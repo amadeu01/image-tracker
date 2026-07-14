@@ -22,7 +22,7 @@ Cargo workspace:
 | 1.1 | Workspace scaffold: two crates, CI-able `cargo test` passes empty | S | done (sonnet-5, 2026-07-14) | |
 | 1.2 | Geometry: `Point`, `Frame` (owned RGB buffer), pixel access | S | done (sonnet-5, 2026-07-14) | |
 | 1.3 | Grayscale patch extraction with bounds handling | S | done (sonnet-5, 2026-07-14) | |
-| 1.4 | ZNCC metric over two patches | S | todo | |
+| 1.4 | ZNCC metric over two patches | S | done (sonnet-5, 2026-07-14) | `CorrelationMetric` trait + `Zncc` in `metric.rs`; mismatched sizes → `None`, zero-variance patch → `Some(0.0)` (no NaN) |
 | 1.5 | Template Tracker: search window around last position, best-match step | M | todo | |
 | 1.6 | Gap logic: miss threshold, coast (hold/extrapolate), reacquire, `Gap` spans in path | M | todo | |
 | 1.7 | `BarPath` aggregate: positions + gaps + timebase (per-video fps) | S | todo | |
