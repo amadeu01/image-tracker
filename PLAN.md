@@ -25,7 +25,7 @@ Cargo workspace:
 | 1.4 | ZNCC metric over two patches | S | done (sonnet-5, 2026-07-14) | `CorrelationMetric` trait + `Zncc` in `metric.rs`; mismatched sizes → `None`, zero-variance patch → `Some(0.0)` (no NaN) |
 | 1.5 | Template Tracker: search window around last position, best-match step | M | done (sonnet-5, 2026-07-14) | `TemplateTracker` in `tracker.rs`; `TemplateTrackerConfig::builder()` (patch_radius/search_radius/min_score); `step` returns `StepOutcome::{Found{position,score}, Miss}` for 1.6's Gap logic |
 | 1.6 | Gap logic: miss threshold, coast (hold/extrapolate), reacquire, `Gap` spans in path | M | done (sonnet-5, 2026-07-14) | `TrackingSession` in `session.rs`; wraps `TemplateTracker`, `step(frame)` per frame; `Sample{frame_index,position,source:Tracked\|Interpolated}` + `Gap{start,end}` spans; coast_limit (builder) misses before `SessionState::NeedsReseed` pauses `step`; `reseed(frame_index, point)` resumes and closes trailing gap |
-| 1.7 | `BarPath` aggregate: positions + gaps + timebase (per-video fps) | S | todo | |
+| 1.7 | `BarPath` aggregate: positions + gaps + timebase (per-video fps) | S | done (sonnet-5, 2026-07-14) | `Timebase` (rational fps, num/den) in `bar_path.rs`; rejects zero num/den; `BarPath::new(&[Sample], &[Gap], Timebase, start_frame)` builds `PathPoint{frame_index,t_seconds,position,source}` list, video-absolute frame indices; `duration_seconds()`, `position_at(frame_index)` |
 
 ## Milestone 2 — video IO + UI shell
 
