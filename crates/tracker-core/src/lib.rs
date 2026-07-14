@@ -6,7 +6,12 @@
 pub mod geometry;
 pub mod metric;
 pub mod patch;
+pub mod tracker;
 
 pub use geometry::{Frame, FrameError, Point};
 pub use metric::{CorrelationMetric, Zncc};
 pub use patch::{extract_patch, Patch};
+pub use tracker::{
+    StepOutcome, TemplateTracker, TemplateTrackerConfig, TemplateTrackerConfigBuilder,
+    TemplateTrackerError,
+};
