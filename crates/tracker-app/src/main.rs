@@ -2,6 +2,6 @@
 //! Stub entry point until milestone 2 wires up the real app.
 
 fn main() {
-    println!("tracker-app v{} (tracker-core v{})", env!("CARGO_PKG_VERSION"), tracker_core::version());
+    println!("tracker-app v{}", env!("CARGO_PKG_VERSION"));
     println!("Usage: tracker-app <video-path>  (not yet implemented)");
 }
