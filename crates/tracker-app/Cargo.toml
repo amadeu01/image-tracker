@@ -1,0 +1,7 @@
+[package]
+name = "tracker-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tracker-core = { path = "../tracker-core" }
