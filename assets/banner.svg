@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="220" viewBox="0 0 880 220" role="img" aria-label="image-tracker — bar path tracking for lifters">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f1420"/>
+      <stop offset="1" stop-color="#1b2438"/>
+    </linearGradient>
+    <linearGradient id="path" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4ade80"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <rect width="880" height="220" rx="14" fill="url(#bg)"/>
+
+  <!-- bar path trace (squat: down then up, slight forward drift) -->
+  <path d="M 700 40 C 690 80, 686 120, 692 165 C 694 178, 702 178, 706 165 C 714 120, 712 80, 706 42"
+        fill="none" stroke="url(#path)" stroke-width="4" stroke-linecap="round" opacity="0.9"/>
+  <!-- sample dots along path -->
+  <g fill="#4ade80">
+    <circle cx="700" cy="40" r="5"/>
+    <circle cx="689" cy="90" r="4" opacity="0.8"/>
+    <circle cx="688" cy="135" r="4" opacity="0.7"/>
+    <circle cx="699" cy="172" r="6"/>
+    <circle cx="711" cy="128" r="4" opacity="0.7"/>
+    <circle cx="712" cy="82" r="4" opacity="0.8"/>
+    <circle cx="706" cy="42" r="5"/>
+  </g>
+  <!-- crosshair on current point -->
+  <g stroke="#f472b6" stroke-width="2.5" stroke-linecap="round">
+    <line x1="683" y1="172" x2="715" y2="172"/>
+    <line x1="699" y1="156" x2="699" y2="188"/>
+  </g>
+
+  <!-- barbell glyph -->
+  <g transform="translate(64,96)">
+    <rect x="0" y="10" width="150" height="8" rx="4" fill="#94a3b8"/>
+    <rect x="18" y="-8" width="14" height="44" rx="4" fill="#64748b"/>
+    <rect x="34" y="-16" width="10" height="60" rx="4" fill="#475569"/>
+    <rect x="118" y="-8" width="14" height="44" rx="4" fill="#64748b"/>
+    <rect x="106" y="-16" width="10" height="60" rx="4" fill="#475569"/>
+  </g>
+
+  <text x="250" y="105" font-family="ui-monospace, 'JetBrains Mono', Menlo, monospace" font-size="42" font-weight="700" fill="#e2e8f0">image-tracker</text>
+  <text x="252" y="140" font-family="ui-monospace, 'JetBrains Mono', Menlo, monospace" font-size="17" fill="#94a3b8">bar path · velocity · reps — from a phone video, in Rust</text>
+  <text x="252" y="172" font-family="ui-monospace, 'JetBrains Mono', Menlo, monospace" font-size="14" fill="#4ade80">m/s from plate-size calibration · works in any gym light</text>
+</svg>
