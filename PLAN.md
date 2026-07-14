@@ -31,7 +31,7 @@ Cargo workspace:
 
 | ID | Task | Size | Status | Observations |
 |----|------|------|--------|--------------|
-| 2.1 | ffprobe metadata adapter (w, h, fps incl. odd rates like 600/19, frame count) | S | todo | |
+| 2.1 | ffprobe metadata adapter (w, h, fps incl. odd rates like 600/19, frame count) | S | done (sonnet-5, 2026-07-14) | `ffprobe::{VideoMetadata, ProbeError, parse_ffprobe_json, probe}` in tracker-app; fps kept as rational (num/den) for caller to build `Timebase`; `nb_frames` absent → `frame_count: None`; parsing unit-tested on canned JSON (serde/serde_json, tracker-app only); `#[ignore]`d integration test hits a real test_videos/ file (space-containing filename) — ran manually, passed: 1024x576, 600/19, 1910 frames |
 | 2.2 | ffmpeg decode adapter: rawvideo pipe → `Frame` iterator (`FrameSource` port) | M | todo | |
 | 2.3 | egui app shell: open video, show frame, scrub bar | M | todo | |
 | 2.4 | Seed placement: click → image-pixel coords (zoom-aware) | S | todo | |
