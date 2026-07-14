@@ -1,0 +1,17 @@
+# Rust
+/target
+**/target
+# Cargo.lock is tracked (binary crate workspace) — do not ignore it
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Tool output (generated artifacts, not sources)
+/out/
+*.csv
+!tests/fixtures/**/*.csv
+
+# NOTE: test_videos/ is intentionally TRACKED — do not add it here.
