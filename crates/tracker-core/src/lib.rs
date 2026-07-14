@@ -4,6 +4,7 @@
 //! kinematics, reps, and color advisor logic will live here.
 
 pub mod bar_path;
+pub mod frame_source;
 pub mod geometry;
 pub mod metric;
 pub mod patch;
@@ -11,6 +12,7 @@ pub mod session;
 pub mod tracker;
 
 pub use bar_path::{BarPath, PathPoint, Timebase, TimebaseError};
+pub use frame_source::FrameSource;
 pub use geometry::{Frame, FrameError, Point};
 pub use metric::{CorrelationMetric, Zncc};
 pub use patch::{extract_patch, Patch};
