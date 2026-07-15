@@ -15,14 +15,24 @@ use eframe::egui;
 
 use crate::ffprobe::VideoMetadata;
 use crate::frame_cache::{clamp_frame_index, FrameCache};
+use crate::screen_map::screen_to_image_px;
 use crate::seek_source::SeekingFrameDecoder;
 
-/// What clicking on the frame view currently does. 2.4 will add
-/// `PlacingSeed`, 2.5 will add `Calibrating { .. }`.
+/// What clicking on the frame view currently does. 2.5 will add
+/// `Calibrating { .. }`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Just look around: scrub the slider, no click handling yet.
     ViewOnly,
+    /// Clicking the frame places the Seed (task 2.4).
+    PlacingSeed,
+}
+
+/// A user-placed Seed: image-pixel position plus the frame it was placed on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Seed {
+    pub position: tracker_core::Point,
+    pub frame_index: u64,
 }
 
 /// UI/session state, independent of egui so the index-clamping logic can be
@@ -32,6 +42,9 @@ pub struct AppState {
     pub metadata: VideoMetadata,
     pub mode: Mode,
     pub current_frame: u64,
+    /// The Seed, once placed (task 2.4). `None` until the user clicks in
+    /// `Mode::PlacingSeed`.
+    pub seed: Option<Seed>,
     /// Bottom status bar text; errors surface here rather than panicking
     /// (project rule — see PLAN.md 2.6).
     pub status: String,
@@ -44,7 +57,43 @@ impl AppState {
             metadata,
             mode: Mode::ViewOnly,
             current_frame: 0,
+            seed: None,
             status: String::new(),
+        }
+    }
+
+    /// Toggle between `ViewOnly` and `PlacingSeed`.
+    pub fn toggle_placing_seed(&mut self) {
+        self.mode = match self.mode {
+            Mode::ViewOnly => Mode::PlacingSeed,
+            Mode::PlacingSeed => Mode::ViewOnly,
+        };
+    }
+
+    /// Record a Seed at the given image-pixel position on the current frame.
+    /// Only takes effect in `Mode::PlacingSeed`.
+    pub fn place_seed(&mut self, position: tracker_core::Point) {
+        if self.mode != Mode::PlacingSeed {
+            return;
+        }
+        self.seed = Some(Seed {
+            position,
+            frame_index: self.current_frame,
+        });
+    }
+
+    /// Status-bar text reflecting mode and, once placed, the Seed position.
+    pub fn status_line(&self) -> String {
+        let mode = match self.mode {
+            Mode::ViewOnly => "view",
+            Mode::PlacingSeed => "placing seed (click frame)",
+        };
+        match &self.seed {
+            Some(seed) => format!(
+                "mode: {mode}  |  seed: ({:.1}, {:.1}) @ frame {}",
+                seed.position.x, seed.position.y, seed.frame_index
+            ),
+            None => format!("mode: {mode}  |  seed: none"),
         }
     }
 
@@ -124,13 +173,30 @@ impl eframe::App for TrackerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ensure_texture(ctx);
 
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let label = match self.state.mode {
+                    Mode::ViewOnly => "Place Seed",
+                    Mode::PlacingSeed => "Placing Seed... (click frame)",
+                };
+                if ui.selectable_label(self.state.mode == Mode::PlacingSeed, label).clicked() {
+                    self.state.toggle_placing_seed();
+                }
+                // Key toggle, e.g. 's' for seed placement.
+                if ui.ctx().input(|i| i.key_pressed(egui::Key::S)) {
+                    self.state.toggle_placing_seed();
+                }
+            });
+        });
+
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(format!(
-                    "{}  |  frame {}/{}",
+                    "{}  |  frame {}/{}  |  {}",
                     self.state.video_path.display(),
                     self.state.current_frame,
                     self.state.metadata.frame_count.unwrap_or(0).saturating_sub(1),
+                    self.state.status_line(),
                 ));
                 if !self.state.status.is_empty() {
                     ui.separator();
@@ -161,12 +227,72 @@ impl eframe::App for TrackerApp {
                 let available = ui.available_size();
                 let tex_size = texture.size_vec2();
                 let scale = (available.x / tex_size.x).min(available.y / tex_size.y).min(1.0);
-                ui.image((texture.id(), tex_size * scale));
+                let response = ui.add(
+                    egui::Image::new((texture.id(), tex_size * scale))
+                        .sense(egui::Sense::click()),
+                );
+                let image_rect = response.rect;
+
+                if self.state.mode == Mode::PlacingSeed && response.clicked() {
+                    if let Some(click_pos) = response.interact_pointer_pos() {
+                        if let Some(image_px) = screen_to_image_px(
+                            click_pos,
+                            image_rect,
+                            self.state.metadata.width,
+                            self.state.metadata.height,
+                        ) {
+                            self.state.place_seed(image_px);
+                        }
+                    }
+                }
+
+                if let Some(seed) = self.state.seed {
+                    if seed.frame_index == self.state.current_frame {
+                        draw_seed_crosshair(ui.painter(), image_rect, tex_size, seed.position);
+                    }
+                }
             } else {
                 ui.label("decoding first frame...");
             }
         });
     }
+}
+
+/// Draw a crosshair marker at the Seed's image-pixel position, converting
+/// back to screen coordinates for the currently drawn (scaled, letterboxed)
+/// image rect. Painter overlay only — never mutates frame pixels.
+fn draw_seed_crosshair(
+    painter: &egui::Painter,
+    image_rect: egui::Rect,
+    image_native_size: egui::Vec2,
+    seed_px: tracker_core::Point,
+) {
+    if image_native_size.x <= 0.0 || image_native_size.y <= 0.0 {
+        return;
+    }
+    let scale_x = image_rect.width() / image_native_size.x;
+    let scale_y = image_rect.height() / image_native_size.y;
+    let screen = image_rect.min
+        + egui::Vec2::new(seed_px.x as f32 * scale_x, seed_px.y as f32 * scale_y);
+
+    let radius = 8.0;
+    let color = egui::Color32::from_rgb(255, 60, 60);
+    let stroke = egui::Stroke::new(2.0, color);
+    painter.line_segment(
+        [
+            egui::pos2(screen.x - radius, screen.y),
+            egui::pos2(screen.x + radius, screen.y),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(screen.x, screen.y - radius),
+            egui::pos2(screen.x, screen.y + radius),
+        ],
+        stroke,
+    );
+    painter.circle_stroke(screen, radius * 0.6, stroke);
 }
 
 /// Runs the app: creates the native window and hands control to eframe's
@@ -237,5 +363,47 @@ mod tests {
         let mut state = AppState::new(PathBuf::from("x.mp4"), meta(None));
         state.next_frame();
         assert_eq!(state.current_frame, 0);
+    }
+
+    #[test]
+    fn toggle_placing_seed_switches_modes() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        assert_eq!(state.mode, Mode::ViewOnly);
+        state.toggle_placing_seed();
+        assert_eq!(state.mode, Mode::PlacingSeed);
+        state.toggle_placing_seed();
+        assert_eq!(state.mode, Mode::ViewOnly);
+    }
+
+    #[test]
+    fn place_seed_is_ignored_outside_placing_mode() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.place_seed(tracker_core::Point::new(1.0, 2.0));
+        assert!(state.seed.is_none());
+    }
+
+    #[test]
+    fn place_seed_records_position_and_current_frame() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_placing_seed();
+        state.set_frame(3);
+        state.place_seed(tracker_core::Point::new(12.5, 7.0));
+        let seed = state.seed.expect("seed should be set");
+        assert_eq!(seed.frame_index, 3);
+        assert_eq!(seed.position, tracker_core::Point::new(12.5, 7.0));
+    }
+
+    #[test]
+    fn status_line_reflects_mode_and_seed() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        assert!(state.status_line().contains("view"));
+        assert!(state.status_line().contains("seed: none"));
+
+        state.toggle_placing_seed();
+        state.place_seed(tracker_core::Point::new(4.0, 5.0));
+        let line = state.status_line();
+        assert!(line.contains("placing seed"));
+        assert!(line.contains("4.0"));
+        assert!(line.contains("5.0"));
     }
 }
