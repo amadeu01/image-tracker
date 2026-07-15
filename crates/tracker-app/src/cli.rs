@@ -141,31 +141,26 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
     // the first loss.
     let mut run_state = tracking::TrackingRunState::started();
     let mut reseed_events: u64 = 0;
-    loop {
-        match handle.messages.recv() {
-            Ok(msg) => {
-                let needs_reseed = matches!(
-                    &msg,
-                    tracking::TrackingMessage::Progress {
-                        state: tracker_core::SessionState::NeedsReseed,
-                        ..
-                    }
-                );
-                let done = run_state.apply(msg);
-                if done {
-                    break;
-                }
-                if needs_reseed {
-                    reseed_events += 1;
-                    let (Some(idx), Some(pos)) =
-                        (run_state.last_frame_index, run_state.last_position)
-                    else {
-                        break; // shouldn't happen: Progress always sets both
-                    };
-                    handle.resume(idx, pos);
-                }
+    // recv() Err means the worker thread exited without sending Done/Error.
+    while let Ok(msg) = handle.messages.recv() {
+        let needs_reseed = matches!(
+            &msg,
+            tracking::TrackingMessage::Progress {
+                state: tracker_core::SessionState::NeedsReseed,
+                ..
             }
-            Err(_) => break, // worker thread exited without sending Done/Error
+        );
+        let done = run_state.apply(msg);
+        if done {
+            break;
+        }
+        if needs_reseed {
+            reseed_events += 1;
+            let (Some(idx), Some(pos)) = (run_state.last_frame_index, run_state.last_position)
+            else {
+                break; // shouldn't happen: Progress always sets both
+            };
+            handle.resume(idx, pos);
         }
     }
 
@@ -250,18 +245,13 @@ fn render_overlay_video(
     let style = OverlayStyle::builder().build();
 
     let mut frame_index: u64 = 0;
-    loop {
-        let frame = match source
-            .next_frame_checked()
-            .map_err(|e| format!("decode error at frame {frame_index}: {e}"))?
-        {
-            Some(f) => f,
-            None => break,
-        };
+    while let Some(mut frame) = source
+        .next_frame_checked()
+        .map_err(|e| format!("decode error at frame {frame_index}: {e}"))?
+    {
         if frame_index > last_frame {
             break;
         }
-        let mut frame = frame;
         render_overlay(&mut frame, bar_path, frame_index, &style);
         sink.write_frame(&frame)
             .map_err(|e| format!("encode error at frame {frame_index}: {e}"))?;

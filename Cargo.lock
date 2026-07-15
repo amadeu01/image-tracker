@@ -3022,7 +3022,7 @@ dependencies = [
 
 [[package]]
 name = "tracker-app"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "egui",
@@ -3033,7 +3033,7 @@ dependencies = [
 
 [[package]]
 name = "tracker-core"
-version = "0.1.0"
+version = "0.3.0"
 
 [[package]]
 name = "ttf-parser"

@@ -191,8 +191,11 @@ impl TrackingSession {
                     // Record the still-open gap as a trailing (unresolved)
                     // span ending at the last processed frame; it will be
                     // replaced (closed properly) if `reseed` succeeds.
+                    // open_gap_start is set above on the first miss of the
+                    // run, but fall back to next_index rather than panic.
+                    let start = self.open_gap_start.take().unwrap_or(next_index);
                     self.gaps.push(Gap {
-                        start: self.open_gap_start.take().unwrap(),
+                        start,
                         end: next_index,
                     });
                 }

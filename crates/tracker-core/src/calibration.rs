@@ -41,7 +41,8 @@ impl Calibration {
     /// (zero pixel distance), both of which would make `px_per_meter`
     /// undefined or infinite.
     pub fn new(a: Point, b: Point, known_length_meters: f64) -> Result<Self, CalibrationError> {
-        if !(known_length_meters > 0.0) {
+        // Rejects NaN and non-finite values as well as zero/negative.
+        if !known_length_meters.is_finite() || known_length_meters <= 0.0 {
             return Err(CalibrationError::NonPositiveLength {
                 meters: known_length_meters,
             });

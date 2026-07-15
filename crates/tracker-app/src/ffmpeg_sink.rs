@@ -224,7 +224,7 @@ mod tests {
 
         // Peek at the writer before finish consumes self.
         let written = sink.writer.as_ref().unwrap().clone();
-        assert_eq!(written.len(), 2 * (2 * 1 * 3));
+        assert_eq!(written.len(), 12); // two 2x1 RGB frames, 6 bytes each
         assert_eq!(&written[..6], &[9, 9, 9, 9, 9, 9]);
         assert_eq!(&written[6..], &[8, 8, 8, 8, 8, 8]);
 
