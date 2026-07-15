@@ -91,3 +91,109 @@ BIN=./target/release/tracker-app
 "$BIN" track "test_videos/WhatsApp Video 2026-07-08 at 22.55.51.mp4" --seed-frame 300 --seed 260,120 --out out/v3
 "$BIN" track "test_videos/WhatsApp Video 2026-07-08 at 22.56.32.mp4" --seed-frame 300 --seed 300,150 --out out/v4
 ```
+
+## 3.6 update (2026-07-15): adaptive dual-template tracking, re-run with visually-picked seeds
+
+Visual review (fable-5) of the 3.4/3.5 overlay videos found the tracker
+still drifted on real footage even with 0 recorded reseed events: the
+fixed-seed template goes stale as the plate rotates and lighting shifts
+through a rep, so the ZNCC best match gradually slides off the plate onto
+the bar/background while still scoring above `min_score` — the CSV/gap
+counts looked fine, but the overlay showed the tracked point wandering off
+the object it started on (worst case: lost near frame 852 on a seed at
+frame 800, one frame outside this task's own v1 seed).
+
+Fix: `TemplateTracker` (`crates/tracker-core/src/tracker.rs`) now keeps two
+templates instead of one:
+
+- **anchor** — captured once at the seed, never changes. Prevents total
+  drift away from the originally-marked object no matter how long the clip
+  runs.
+- **adaptive** — starts identical to the anchor, refreshed with the
+  freshly-matched patch whenever the winning score clears a new
+  `update_threshold` config (default 0.7, comfortably above `min_score`).
+  Tracks gradual, real appearance change (rotation, lighting) that would
+  otherwise erode the anchor's match score over a long clip.
+
+Per candidate in the search window, the effective score is
+`max(anchor_score, adaptive_score)`; the best-scoring candidate wins and is
+`Found` if its effective score clears `min_score`. The adaptive template is
+only replaced when the *winning* score clears `update_threshold` — a
+marginal match (occlusion edges, near-misses, anything between `min_score`
+and `update_threshold`) is still accepted as `Found` but never lets the
+adaptive template creep toward the wrong thing, and a `Miss` never touches
+either template.
+
+New tracker-core tests (TDD, `tracker.rs`): a synthetic per-pixel blend
+between two unrelated patterns (not a global affine transform, since ZNCC
+is invariant to that and a uniform brightness ramp wouldn't exercise the
+adaptive path at all) walked in small steps from `t=0.0` to `t=1.0` —
+dual-template tracking stays `Found` throughout, while the same anchor
+patch scored directly against the final appearance drops below
+`min_score`, confirming an anchor-only tracker really would have lost it.
+A second test occludes the object with the unrelated pattern (`Miss`) then
+reverts to the exact seed appearance, which must still self-match near
+1.0, proving the miss never corrupted the adaptive template. A third test
+drives a marginal match (score between `min_score` and `update_threshold`)
+and repeats the identical frame — the score must reproduce exactly,
+proving the adaptive template wasn't refreshed on marginal evidence.
+
+`tracker-app`'s `track` subcommand gained five optional tuning flags
+(`crates/tracker-app/src/cli.rs`, `crates/tracker-app/src/tracking.rs`):
+`--patch-radius`, `--search-radius`, `--min-score`, `--update-threshold`,
+`--coast-limit`. Unset flags fall back to the existing defaults
+(`patch_radius=12`, `search_radius=30`, `min_score=0.4`,
+`update_threshold=0.7`, `coast_limit=5`); `TrackerTuning` (a plain
+`Option`-per-field struct) is threaded from CLI parsing into
+`tracking::tracker_config`/`session_config`, unit-tested for both the
+"nothing set → defaults" and "everything set → overridden" cases.
+
+### Re-run with fable-5's visually-picked seeds
+
+fable-5 re-picked all four seeds by eye on the actual (display-rotated)
+frames, since seed placement was already established in 3.4/3.5 as the
+dominant factor in tracking quality — this run isolates the tracker-tuning
+change from seed-quality noise as much as possible. Same default tuning as
+before (`patch_radius=12`, `search_radius=30`, `min_score=0.4`,
+`coast_limit=5`), plus the new dual-template `update_threshold=0.7`.
+Outputs in `out/v1d`..`out/v4d` (gitignored).
+
+| Video | Seed (frame, x, y) | Points | Tracked | Interpolated | Gaps | Reseed events | y_px range | Max inter-frame jump |
+|---|---|---|---|---|---|---|---|---|
+| v1 `...14.03.30.mp4` | frame 789, (312, 430) | 1222 | 1216 | 6 | 2 | 0 | 12–557 | 42.4px |
+| v2 `...14.11.05.mp4` | frame 1200, (283, 430) | 882 | 856 | 26 | 18 | 6 | 12–527 | 42.4px |
+| v3 `...22.55.51.mp4` | frame 300, (260, 120) | 2887 | 2887 | 0 | 0 | 0 | 109–606 | 42.4px |
+| v4 `...22.56.32.mp4` | frame 300, (232, 148) | 3478 | 3478 | 0 | 0 | 0 | 143–672 | 42.4px |
+
+The max inter-frame jump is identical (42.4px = `search_radius`×√2) across
+all four videos — that's the geometric ceiling of a single step's search
+window, not a coincidence in the tracked path; it means no candidate ever
+won from outside the window (expected — the window is a hard search
+boundary, not a scored constraint).
+
+v3 and v4 tracked perfectly (0 reseeds, 0 interpolated points) — same as
+3.4/3.5, unaffected by the new dual-template logic since their seeds and
+motion were already well handled by the anchor alone. v1 improved slightly
+over the equivalent 3.5 seed area (2 gaps here vs 3 reseeds there, though
+seeds differ so this isn't a controlled comparison). **v2 is the honest
+negative result**: 6 reseed events and 26 interpolated points — worse by
+the numbers than 3.5's zero-reseed run at a different seed. This CSV
+plausibility alone does not tell us whether the dual-template change
+helped, hurt, or is neutral for v2; it needs the same visual check that
+caught the original 3.4/3.5 problems, which is why overlay frames are
+handed to fable-5 below rather than this table standing alone.
+
+Overlay frames extracted ~15s and ~30s after each seed's timestamp (for
+fable-5's visual review, not committed):
+`/tmp/claude-1000/-home-amca-Developer-image-tracker/db0fc50d-c5b2-48d3-940b-46eb378ec2cb/scratchpad/adaptive_v{1,2,3,4}_{a,b}.png`.
+
+### Reproducing
+
+```
+cargo build --release --bin tracker-app
+BIN=./target/release/tracker-app
+"$BIN" track "test_videos/WhatsApp Video 2026-07-05 at 14.03.30.mp4" --seed-frame 789 --seed 312,430 --out out/v1d
+"$BIN" track "test_videos/WhatsApp Video 2026-07-05 at 14.11.05.mp4" --seed-frame 1200 --seed 283,430 --out out/v2d
+"$BIN" track "test_videos/WhatsApp Video 2026-07-08 at 22.55.51.mp4" --seed-frame 300 --seed 260,120 --out out/v3d
+"$BIN" track "test_videos/WhatsApp Video 2026-07-08 at 22.56.32.mp4" --seed-frame 300 --seed 232,148 --out out/v4d
+```

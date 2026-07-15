@@ -27,21 +27,48 @@ use crate::ffmpeg_source::FfmpegFrameSource;
 pub const DEFAULT_PATCH_RADIUS: u32 = 12;
 pub const DEFAULT_SEARCH_RADIUS: u32 = 30;
 pub const DEFAULT_MIN_SCORE: f64 = 0.4;
+pub const DEFAULT_UPDATE_THRESHOLD: f64 = 0.7;
 pub const DEFAULT_COAST_LIMIT: u32 = 5;
+
+/// Tunable overrides for `default_tracker_config`/`default_session_config`,
+/// one field per CLI flag (3.6): `--patch-radius`, `--search-radius`,
+/// `--min-score`, `--update-threshold`, `--coast-limit`. `None` falls back
+/// to the module's `DEFAULT_*` const.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TrackerTuning {
+    pub patch_radius: Option<u32>,
+    pub search_radius: Option<u32>,
+    pub min_score: Option<f64>,
+    pub update_threshold: Option<f64>,
+    pub coast_limit: Option<u32>,
+}
 
 /// Builds a `TemplateTrackerConfig` from the module's default consts.
 pub fn default_tracker_config() -> TemplateTrackerConfig {
-    TemplateTrackerConfig::builder()
-        .patch_radius(DEFAULT_PATCH_RADIUS)
-        .search_radius(DEFAULT_SEARCH_RADIUS)
-        .min_score(DEFAULT_MIN_SCORE)
-        .build()
+    tracker_config(TrackerTuning::default())
 }
 
 /// Builds a `TrackingSessionConfig` from the module's default consts.
 pub fn default_session_config() -> TrackingSessionConfig {
+    session_config(TrackerTuning::default())
+}
+
+/// Builds a `TemplateTrackerConfig`, using `tuning`'s overrides where set and
+/// the module defaults otherwise.
+pub fn tracker_config(tuning: TrackerTuning) -> TemplateTrackerConfig {
+    TemplateTrackerConfig::builder()
+        .patch_radius(tuning.patch_radius.unwrap_or(DEFAULT_PATCH_RADIUS))
+        .search_radius(tuning.search_radius.unwrap_or(DEFAULT_SEARCH_RADIUS))
+        .min_score(tuning.min_score.unwrap_or(DEFAULT_MIN_SCORE))
+        .update_threshold(tuning.update_threshold.unwrap_or(DEFAULT_UPDATE_THRESHOLD))
+        .build()
+}
+
+/// Builds a `TrackingSessionConfig`, using `tuning`'s coast_limit override
+/// where set and the module default otherwise.
+pub fn session_config(tuning: TrackerTuning) -> TrackingSessionConfig {
     TrackingSessionConfig::builder()
-        .coast_limit(DEFAULT_COAST_LIMIT)
+        .coast_limit(tuning.coast_limit.unwrap_or(DEFAULT_COAST_LIMIT))
         .build()
 }
 
@@ -409,6 +436,44 @@ mod tests {
         let data = synthetic_frame_bytes(width, height, 1); // one frame only
         let mut source = FfmpegFrameSource::from_reader(Cursor::new(data), width, height);
         assert!(decode_up_to(&mut source, 5).unwrap().is_none());
+    }
+
+    #[test]
+    fn tracker_config_falls_back_to_defaults_when_tuning_is_empty() {
+        let config = tracker_config(TrackerTuning::default());
+        assert_eq!(config.patch_radius(), DEFAULT_PATCH_RADIUS);
+        assert_eq!(config.search_radius(), DEFAULT_SEARCH_RADIUS);
+        assert_eq!(config.min_score(), DEFAULT_MIN_SCORE);
+        assert_eq!(config.update_threshold(), DEFAULT_UPDATE_THRESHOLD);
+    }
+
+    #[test]
+    fn tracker_config_applies_overrides() {
+        let tuning = TrackerTuning {
+            patch_radius: Some(20),
+            search_radius: Some(40),
+            min_score: Some(0.55),
+            update_threshold: Some(0.8),
+            coast_limit: None,
+        };
+        let config = tracker_config(tuning);
+        assert_eq!(config.patch_radius(), 20);
+        assert_eq!(config.search_radius(), 40);
+        assert_eq!(config.min_score(), 0.55);
+        assert_eq!(config.update_threshold(), 0.8);
+    }
+
+    #[test]
+    fn session_config_applies_coast_limit_override() {
+        let tuning = TrackerTuning {
+            coast_limit: Some(9),
+            ..Default::default()
+        };
+        assert_eq!(session_config(tuning).coast_limit(), 9);
+        assert_eq!(
+            session_config(TrackerTuning::default()).coast_limit(),
+            DEFAULT_COAST_LIMIT
+        );
     }
 
     #[test]

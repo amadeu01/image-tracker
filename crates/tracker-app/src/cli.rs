@@ -23,6 +23,10 @@ pub struct TrackArgs {
     pub seed_frame: u64,
     pub seed: Point,
     pub out_dir: PathBuf,
+    /// Optional tracker tuning overrides (task 3.6): `--patch-radius`,
+    /// `--search-radius`, `--min-score`, `--update-threshold`,
+    /// `--coast-limit`. Unset fields fall back to `tracking`'s defaults.
+    pub tuning: tracking::TrackerTuning,
 }
 
 /// Everything that can go wrong parsing CLI args, probing, tracking, or
@@ -36,6 +40,7 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
     let mut seed_frame: Option<u64> = None;
     let mut seed: Option<Point> = None;
     let mut out_dir: Option<PathBuf> = None;
+    let mut tuning = tracking::TrackerTuning::default();
 
     let mut i = 0;
     while i < args.len() {
@@ -60,6 +65,35 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
                 out_dir = Some(PathBuf::from(v));
                 i += 2;
             }
+            "--patch-radius" => {
+                let v = args.get(i + 1).ok_or("--patch-radius needs a value")?;
+                tuning.patch_radius =
+                    Some(v.parse().map_err(|_| format!("bad --patch-radius: {v}"))?);
+                i += 2;
+            }
+            "--search-radius" => {
+                let v = args.get(i + 1).ok_or("--search-radius needs a value")?;
+                tuning.search_radius =
+                    Some(v.parse().map_err(|_| format!("bad --search-radius: {v}"))?);
+                i += 2;
+            }
+            "--min-score" => {
+                let v = args.get(i + 1).ok_or("--min-score needs a value")?;
+                tuning.min_score = Some(v.parse().map_err(|_| format!("bad --min-score: {v}"))?);
+                i += 2;
+            }
+            "--update-threshold" => {
+                let v = args.get(i + 1).ok_or("--update-threshold needs a value")?;
+                tuning.update_threshold =
+                    Some(v.parse().map_err(|_| format!("bad --update-threshold: {v}"))?);
+                i += 2;
+            }
+            "--coast-limit" => {
+                let v = args.get(i + 1).ok_or("--coast-limit needs a value")?;
+                tuning.coast_limit =
+                    Some(v.parse().map_err(|_| format!("bad --coast-limit: {v}"))?);
+                i += 2;
+            }
             other if video_path.is_none() && !other.starts_with("--") => {
                 video_path = Some(PathBuf::from(other));
                 i += 1;
@@ -73,6 +107,7 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
         seed_frame: seed_frame.ok_or("missing --seed-frame")?,
         seed: seed.ok_or("missing --seed")?,
         out_dir: out_dir.ok_or("missing --out")?,
+        tuning,
     })
 }
 
@@ -93,8 +128,8 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
         metadata.fps_den,
         args.seed_frame,
         args.seed,
-        tracking::default_tracker_config(),
-        tracking::default_session_config(),
+        tracking::tracker_config(args.tuning),
+        tracking::session_config(args.tuning),
     );
 
     // Headless: no UI to place a new seed on NeedsReseed. Best-effort
@@ -261,6 +296,63 @@ mod tests {
         assert_eq!(parsed.seed_frame, 42);
         assert_eq!(parsed.seed, Point::new(10.5, 20.25));
         assert_eq!(parsed.out_dir, PathBuf::from("out/dir"));
+        assert_eq!(parsed.tuning.patch_radius, None);
+        assert_eq!(parsed.tuning.search_radius, None);
+        assert_eq!(parsed.tuning.min_score, None);
+        assert_eq!(parsed.tuning.update_threshold, None);
+        assert_eq!(parsed.tuning.coast_limit, None);
+    }
+
+    #[test]
+    fn parses_optional_tuning_flags() {
+        let args: Vec<String> = vec![
+            "video.mp4",
+            "--seed-frame",
+            "42",
+            "--seed",
+            "10.5,20.25",
+            "--out",
+            "out/dir",
+            "--patch-radius",
+            "20",
+            "--search-radius",
+            "45",
+            "--min-score",
+            "0.55",
+            "--update-threshold",
+            "0.75",
+            "--coast-limit",
+            "8",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        let parsed = parse_track_args(&args).unwrap();
+        assert_eq!(parsed.tuning.patch_radius, Some(20));
+        assert_eq!(parsed.tuning.search_radius, Some(45));
+        assert_eq!(parsed.tuning.min_score, Some(0.55));
+        assert_eq!(parsed.tuning.update_threshold, Some(0.75));
+        assert_eq!(parsed.tuning.coast_limit, Some(8));
+    }
+
+    #[test]
+    fn bad_tuning_flag_value_is_an_error() {
+        let args: Vec<String> = vec![
+            "video.mp4",
+            "--seed-frame",
+            "0",
+            "--seed",
+            "1,2",
+            "--out",
+            "out",
+            "--min-score",
+            "not-a-number",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(parse_track_args(&args).is_err());
     }
 
     #[test]
