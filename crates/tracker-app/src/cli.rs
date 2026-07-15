@@ -11,14 +11,16 @@
 use std::path::{Path, PathBuf};
 
 use tracker_core::{
-    all_rep_metrics, export_csv, export_json, export_reps_csv, export_reps_json, render_overlay,
-    render_rep_bottoms, segment_reps, velocity_series, Calibration, OverlayStyle, Point,
-    RepSegmentationConfig, Source, VideoSink,
+    all_rep_metrics, export_csv, export_json, export_reps_csv, export_reps_json, hue_histogram,
+    recommend_marker_hues, render_overlay, render_rep_bottoms, segment_reps, velocity_series,
+    Calibration, HueHistogramConfig, OverlayStyle, Point, RepSegmentationConfig, Source, VideoSink,
 };
 
 use crate::ffmpeg_sink::FfmpegVideoSink;
 use crate::ffmpeg_source::FfmpegFrameSource;
 use crate::ffprobe;
+use crate::frame_cache::FrameDecoder;
+use crate::seek_source::SeekingFrameDecoder;
 use crate::tracking;
 
 /// Parsed `track` subcommand arguments.
@@ -409,6 +411,117 @@ fn render_overlay_video(
         .map_err(|e| format!("failed to finalize overlay video: {e}"))
 }
 
+// --- `advise` subcommand (task 6.2) ---
+
+/// Parsed `advise` subcommand arguments.
+pub struct AdviseArgs {
+    pub video_path: PathBuf,
+    /// How many recommendations to print. Defaults to 3.
+    pub top_n: usize,
+}
+
+/// Parses `advise <video> [--top-n N]` from the args following the
+/// subcommand name itself.
+pub fn parse_advise_args(args: &[String]) -> Result<AdviseArgs, CliError> {
+    let mut video_path: Option<PathBuf> = None;
+    let mut top_n: usize = 3;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--top-n" => {
+                let v = args.get(i + 1).ok_or("--top-n needs a value")?;
+                top_n = v.parse().map_err(|_| format!("bad --top-n: {v}"))?;
+                i += 2;
+            }
+            other if video_path.is_none() && !other.starts_with("--") => {
+                video_path = Some(PathBuf::from(other));
+                i += 1;
+            }
+            other => return Err(format!("unrecognized argument: {other}")),
+        }
+    }
+
+    Ok(AdviseArgs {
+        video_path: video_path.ok_or("missing <video> argument")?,
+        top_n,
+    })
+}
+
+/// Number of frames sampled across the video's duration for the hue
+/// histogram (task 6.2): spread out rather than clustered near the start,
+/// so a quick-cut intro/outro doesn't dominate the recommendation.
+const ADVISE_SAMPLE_COUNT: u64 = 10;
+
+/// Runs the `advise` subcommand (task 6.2, "Marker Color Advisor",
+/// CONTEXT.md): probes the video, seeks to `ADVISE_SAMPLE_COUNT` frames
+/// spread evenly across its duration, builds a hue histogram (6.1) over
+/// them, and prints ranked marker-hue recommendations.
+pub fn run_advise(args: AdviseArgs) -> Result<(), CliError> {
+    let metadata = ffprobe::probe(&args.video_path)
+        .map_err(|e| format!("failed to probe {}: {e}", args.video_path.display()))?;
+
+    // ffprobe's `nb_frames` is absent for some containers; fall back to a
+    // conservative guess (a few hundred frames) rather than failing the
+    // whole command over a purely cosmetic sampling-spread concern.
+    let frame_count = metadata.frame_count.unwrap_or(300).max(1);
+
+    let mut decoder = SeekingFrameDecoder::new(
+        args.video_path.clone(),
+        metadata.display_width(),
+        metadata.display_height(),
+        metadata.fps_num,
+        metadata.fps_den,
+    );
+
+    let mut frames = Vec::new();
+    for i in 0..ADVISE_SAMPLE_COUNT {
+        // Evenly spread sample indices across [0, frame_count), inclusive
+        // of neither the very first partial second nor the very last
+        // (which is sometimes truncated), by sampling the frame_count/N
+        // midpoints rather than the endpoints.
+        let index = (i * frame_count) / ADVISE_SAMPLE_COUNT;
+        match decoder.decode_frame(index) {
+            Ok(frame) => frames.push(frame),
+            Err(e) => {
+                tracing::warn!(video_frame_index = index, "advise: skipping frame: {e}");
+            }
+        }
+    }
+
+    if frames.is_empty() {
+        return Err(format!(
+            "could not decode any sample frames from {}",
+            args.video_path.display()
+        ));
+    }
+
+    let frame_refs: Vec<&tracker_core::Frame> = frames.iter().collect();
+    let hist = hue_histogram(&frame_refs, HueHistogramConfig::default());
+    let recommendations = recommend_marker_hues(&hist, args.top_n);
+
+    println!(
+        "{}: sampled {} frame(s), {} scene pixel(s) counted",
+        args.video_path.display(),
+        frames.len(),
+        hist.total_counted()
+    );
+    if recommendations.is_empty() {
+        println!("(no recommendations)");
+    }
+    for (rank, rec) in recommendations.iter().enumerate() {
+        println!(
+            "{}. {} ({:.0}\u{b0}) -- scene presence {:.1}%",
+            rank + 1,
+            rec.name,
+            rec.hue_degrees,
+            rec.scene_presence * 100.0
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,5 +722,40 @@ mod tests {
         .map(String::from)
         .collect();
         assert!(parse_track_args(&args).is_err());
+    }
+
+    // --- parse_advise_args ---
+
+    #[test]
+    fn parses_advise_args_with_default_top_n() {
+        let args: Vec<String> = vec!["video.mp4"].into_iter().map(String::from).collect();
+        let parsed = parse_advise_args(&args).unwrap();
+        assert_eq!(parsed.video_path, PathBuf::from("video.mp4"));
+        assert_eq!(parsed.top_n, 3);
+    }
+
+    #[test]
+    fn parses_advise_args_with_top_n_override() {
+        let args: Vec<String> = vec!["video.mp4", "--top-n", "5"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let parsed = parse_advise_args(&args).unwrap();
+        assert_eq!(parsed.top_n, 5);
+    }
+
+    #[test]
+    fn advise_missing_video_is_an_error() {
+        let args: Vec<String> = vec!["--top-n", "5"].into_iter().map(String::from).collect();
+        assert!(parse_advise_args(&args).is_err());
+    }
+
+    #[test]
+    fn advise_bad_top_n_is_an_error() {
+        let args: Vec<String> = vec!["video.mp4", "--top-n", "not-a-number"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert!(parse_advise_args(&args).is_err());
     }
 }

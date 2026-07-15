@@ -92,8 +92,8 @@ Cargo workspace:
 
 | ID | Task | Size | Status | Observations |
 |----|------|------|--------|--------------|
-| 6.1 | Hue histogram over sampled frames | S | todo | |
-| 6.2 | Recommend top marker hues (max distance from scene hues), CLI/UI report | S | todo | |
+| 6.1 | Hue histogram over sampled frames | S | done (sonnet-5, 2026-07-15) | `hue_histogram` in `tracker-core/src/color_advisor.rs`; 36 buckets, sat/value floors, stride sub-sampling. |
+| 6.2 | Recommend top marker hues (max distance from scene hues), CLI/UI report | S | done (sonnet-5, 2026-07-15) | `recommend_marker_hues` in `tracker-core`; `tracker-app advise <video> [--top-n N]` CLI subcommand. |
 
 ## Milestone 7 — usability, docs & distribution
 

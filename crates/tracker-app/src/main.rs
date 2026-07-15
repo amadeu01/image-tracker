@@ -55,9 +55,26 @@ fn main() {
         return;
     }
 
+    if !args.is_empty() && args[0] == "advise" {
+        let advise_args = match cli::parse_advise_args(&args[1..]) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("usage: tracker-app advise <video> [--top-n N]");
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+        };
+        if let Err(e) = cli::run_advise(advise_args) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if args.is_empty() {
         eprintln!("usage: tracker-app <video-path>");
         eprintln!("       tracker-app track <video> --seed-frame N --seed X,Y --out <dir>");
+        eprintln!("       tracker-app advise <video> [--top-n N]");
         std::process::exit(2);
     }
     let video_path = PathBuf::from(args.remove(0));
