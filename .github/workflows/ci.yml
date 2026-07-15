@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt / clippy / test / build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: cargo build --release
+        run: cargo build --workspace --release
+
+  e2e:
+    name: e2e (main only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --release
+        run: cargo build --workspace --release
+
+      - name: Run e2e track on sample video
+        run: |
+          cargo run --release -p tracker-app -- track \
+            "test_videos/WhatsApp Video 2026-07-08 at 22.55.51.mp4" \
+            --seed-frame 300 --seed 260,120 --out out/ci-e2e
+
+      - name: Assert CSV plausibility
+        run: |
+          set -euo pipefail
+          csv=$(find out/ci-e2e -maxdepth 1 -name '*.csv' | head -n1)
+          if [ -z "$csv" ]; then
+            echo "no CSV output found under out/ci-e2e"
+            exit 1
+          fi
+          echo "checking $csv"
+
+          # data rows = total lines minus header
+          rows=$(($(wc -l < "$csv") - 1))
+          echo "data rows: $rows"
+          if [ "$rows" -lt 2500 ]; then
+            echo "expected >= 2500 data rows, got $rows"
+            exit 1
+          fi
+
+          # count rows whose gap_flag column is true (interpolated samples)
+          header=$(head -n1 "$csv")
+          gap_col=$(echo "$header" | tr ',' '\n' | grep -n '^gap_flag$' | cut -d: -f1)
+          if [ -z "$gap_col" ]; then
+            echo "no gap_flag column found in header: $header"
+            exit 1
+          fi
+          gap_rows=$(tail -n +2 "$csv" | awk -F',' -v col="$gap_col" '$col=="true"' | wc -l)
+          echo "gap_flag=true rows: $gap_rows"
+          if [ "$gap_rows" -gt 10 ]; then
+            echo "expected <= 10 interpolated rows, got $gap_rows"
+            exit 1
+          fi
+
+      - name: Upload e2e outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-e2e-out
+          path: out/ci-e2e
+          retention-days: 7

@@ -119,7 +119,7 @@ Decisions (grilled 2026-07-15): native runners, no cross-compilation — `ubuntu
 
 | ID | Task | Size | Status | Observations |
 |----|------|------|--------|--------------|
-| 9.1 | CI workflow: push/PR → `cargo test --workspace` + `clippy -D warnings` + build (ubuntu, ffmpeg via apt); main pushes → + e2e on v3 video (assert ≥2500 points, 0 reseeds from CSV) | M | todo | |
+| 9.1 | CI workflow: push/PR → `cargo test --workspace` + `clippy -D warnings` + build (ubuntu, ffmpeg via apt); main pushes → + e2e on v3 video (assert ≥2500 points, 0 reseeds from CSV) | M | done (sonnet-5, 2026-07-15) | `.github/workflows/ci.yml`: `test` job (fmt --check, clippy -D warnings, test, release build) on push+PR; `e2e` job gated to `main` pushes only, runs the CLI `track` on the 22.55.51 sample video and asserts ≥2500 CSV data rows and ≤10 `gap_flag=true` rows (small tolerance, not a hard 0). `cargo fmt` was not clean pre-existing — ran it repo-wide (separate commit) before adding the workflow. |
 | 9.2 | Release workflow: tag `v*` → matrix build (ubuntu-latest, macos-latest) + full 4-video e2e on ubuntu + GitHub Release with binaries (tar.gz per platform) | M | todo | |
 | 9.3 | README badges: CI status, release version, license; link to latest smoke report | S | todo | |
 | 9.4 | Manual smoke kit: `scripts/smoke-report.sh` (runs scriptable checks — CLI usage exit, quick track run, version banner, log file exists; prints GUI checklist; emits markdown) + `docs/smoke/` results log committed by user | S | todo | |
