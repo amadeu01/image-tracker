@@ -60,7 +60,8 @@ jobs:
           assert_min_rows() {
             local dir="$1" min="$2"
             local csv
-            csv=$(find "$dir" -maxdepth 1 -name '*.csv' | head -n1)
+            # exclude per-rep summary files (*.reps.csv) — assert on the per-frame CSV
+            csv=$(find "$dir" -maxdepth 1 -name '*.csv' ! -name '*.reps.csv' | head -n1)
             if [ -z "$csv" ]; then
               echo "no CSV output found under $dir"
               exit 1
