@@ -37,7 +37,7 @@ Bonus: the **Marker Color Advisor** analyses your video's palette and tells you 
 
 ## Status
 
-Early development — domain core (geometry, ZNCC template tracking, gap handling, path aggregate, milestones 1-5), CI/e2e (7.2), and the CLI/GUI track pipeline (8) are done; polish and release automation (9.x) are in progress. See [PLAN.md](PLAN.md) for the live task board and [CONTEXT.md](CONTEXT.md) for the project's vocabulary. Manual smoke-test results are logged under [docs/smoke/](docs/smoke/), latest run linked from that directory's index.
+Early development — core tracking (adaptive template + color trackers), GUI with side panel, overlay/CSV/JSON outputs, kinematics + per-rep VBT metrics, telemetry, and CI are done (milestones 1–5, 7.2, 8, most of 9); run guide and distribution polish are in progress. See [PLAN.md](PLAN.md) for the live task board and [CONTEXT.md](CONTEXT.md) for the project's vocabulary. Manual smoke-test results are logged under [docs/smoke/](docs/smoke/), latest run linked from that directory's index.
 
 ## Requirements
 
