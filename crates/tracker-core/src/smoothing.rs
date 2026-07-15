@@ -52,9 +52,9 @@ pub fn smooth_positions(
             let lo = i - reach;
             let hi = i + reach;
             let count = hi - lo + 1;
-            let (sum_x, sum_y) = points[lo..=hi]
-                .iter()
-                .fold((0.0, 0.0), |(sx, sy), p| (sx + p.position.x, sy + p.position.y));
+            let (sum_x, sum_y) = points[lo..=hi].iter().fold((0.0, 0.0), |(sx, sy), p| {
+                (sx + p.position.x, sy + p.position.y)
+            });
             let position = Point::new(sum_x / count as f64, sum_y / count as f64);
             PathPoint {
                 position,
@@ -82,19 +82,13 @@ mod tests {
     #[test]
     fn rejects_zero_window() {
         let pts = vec![point(0, 0.0, 0.0, Source::Tracked)];
-        assert_eq!(
-            smooth_positions(&pts, 0),
-            Err(SmoothingError::ZeroWindow)
-        );
+        assert_eq!(smooth_positions(&pts, 0), Err(SmoothingError::ZeroWindow));
     }
 
     #[test]
     fn rejects_even_window() {
         let pts = vec![point(0, 0.0, 0.0, Source::Tracked)];
-        assert_eq!(
-            smooth_positions(&pts, 4),
-            Err(SmoothingError::EvenWindow)
-        );
+        assert_eq!(smooth_positions(&pts, 4), Err(SmoothingError::EvenWindow));
     }
 
     #[test]
@@ -110,7 +104,9 @@ mod tests {
 
     #[test]
     fn constant_series_is_unchanged() {
-        let pts: Vec<PathPoint> = (0..7).map(|i| point(i, 4.0, -2.0, Source::Tracked)).collect();
+        let pts: Vec<PathPoint> = (0..7)
+            .map(|i| point(i, 4.0, -2.0, Source::Tracked))
+            .collect();
         let smoothed = smooth_positions(&pts, 5).unwrap();
         for p in &smoothed {
             assert_eq!(p.position, Point::new(4.0, -2.0));

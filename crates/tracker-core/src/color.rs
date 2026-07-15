@@ -106,10 +106,7 @@ impl ColorModel {
         let max_x = cx + r;
         let min_y = cy - r;
         let max_y = cy + r;
-        if min_x < 0
-            || min_y < 0
-            || max_x >= frame.width() as i64
-            || max_y >= frame.height() as i64
+        if min_x < 0 || min_y < 0 || max_x >= frame.width() as i64 || max_y >= frame.height() as i64
         {
             return Err(ColorModelError::OutOfBounds);
         }
@@ -275,9 +272,8 @@ mod tests {
     #[test]
     fn learn_from_uniform_red_patch_yields_red_model() {
         let frame = uniform_frame(10, 10, [255, 0, 0]);
-        let model =
-            ColorModel::learn(&frame, Point::new(5.0, 5.0), 2, ColorModelConfig::default())
-                .unwrap();
+        let model = ColorModel::learn(&frame, Point::new(5.0, 5.0), 2, ColorModelConfig::default())
+            .unwrap();
         assert!((model.hue() - 0.0).abs() < 1e-6);
         assert!((model.sat() - 1.0).abs() < 1e-6);
         assert!((model.val() - 1.0).abs() < 1e-6);
@@ -312,9 +308,8 @@ mod tests {
             }
         }
         let frame = Frame::new(5, 5, rgb).unwrap();
-        let model =
-            ColorModel::learn(&frame, Point::new(2.0, 2.0), 2, ColorModelConfig::default())
-                .unwrap();
+        let model = ColorModel::learn(&frame, Point::new(2.0, 2.0), 2, ColorModelConfig::default())
+            .unwrap();
         // Should be near 0/360, i.e. within 15 degrees of 0 (wraparound-aware).
         let dist = hue_distance_deg(model.hue(), 0.0);
         assert!(dist < 15.0, "expected hue near 0, got {}", model.hue());
@@ -350,9 +345,8 @@ mod tests {
     #[test]
     fn matches_pixel_within_tolerance_band() {
         let frame = uniform_frame(10, 10, [255, 0, 0]);
-        let model =
-            ColorModel::learn(&frame, Point::new(5.0, 5.0), 2, ColorModelConfig::default())
-                .unwrap();
+        let model = ColorModel::learn(&frame, Point::new(5.0, 5.0), 2, ColorModelConfig::default())
+            .unwrap();
         assert!(model.matches([255, 0, 0]));
         // A slightly darker/less saturated red should still match within
         // the default tolerance.
@@ -362,9 +356,8 @@ mod tests {
     #[test]
     fn matches_rejects_pixel_outside_tolerance_band() {
         let frame = uniform_frame(10, 10, [255, 0, 0]);
-        let model =
-            ColorModel::learn(&frame, Point::new(5.0, 5.0), 2, ColorModelConfig::default())
-                .unwrap();
+        let model = ColorModel::learn(&frame, Point::new(5.0, 5.0), 2, ColorModelConfig::default())
+            .unwrap();
         // Pure blue is far away in hue.
         assert!(!model.matches([0, 0, 255]));
     }
@@ -372,9 +365,8 @@ mod tests {
     #[test]
     fn matches_rejects_low_saturation_gray_against_saturated_model() {
         let frame = uniform_frame(10, 10, [255, 0, 0]);
-        let model =
-            ColorModel::learn(&frame, Point::new(5.0, 5.0), 2, ColorModelConfig::default())
-                .unwrap();
+        let model = ColorModel::learn(&frame, Point::new(5.0, 5.0), 2, ColorModelConfig::default())
+            .unwrap();
         // Mid-gray has near-zero saturation, far outside the model's
         // saturation tolerance even though its hue is undefined/arbitrary.
         assert!(!model.matches([128, 128, 128]));
@@ -383,9 +375,8 @@ mod tests {
     #[test]
     fn matches_a_gray_model_rejects_saturated_pixel() {
         let frame = uniform_frame(10, 10, [128, 128, 128]);
-        let model =
-            ColorModel::learn(&frame, Point::new(5.0, 5.0), 2, ColorModelConfig::default())
-                .unwrap();
+        let model = ColorModel::learn(&frame, Point::new(5.0, 5.0), 2, ColorModelConfig::default())
+            .unwrap();
         assert!(model.matches([128, 128, 128]));
         assert!(!model.matches([255, 0, 0]));
     }

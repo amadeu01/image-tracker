@@ -222,7 +222,12 @@ mod tests {
     use super::*;
 
     fn synthetic_frame(width: u32, height: u32, fill: u8) -> Frame {
-        Frame::new(width, height, vec![fill; width as usize * height as usize * 3]).unwrap()
+        Frame::new(
+            width,
+            height,
+            vec![fill; width as usize * height as usize * 3],
+        )
+        .unwrap()
     }
 
     #[test]

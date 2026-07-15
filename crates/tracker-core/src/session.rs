@@ -210,10 +210,7 @@ impl<T: Tracker> TrackingSession<T> {
         let span = (end + 1 - start) as f64; // number of missed frames, +1 for the reacquired step
         for (i, frame_index) in (start..=end).enumerate() {
             let t = (i as f64 + 1.0) / (span + 1.0);
-            let position = Point::new(
-                from.x + (to.x - from.x) * t,
-                from.y + (to.y - from.y) * t,
-            );
+            let position = Point::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
             self.samples.push(Sample {
                 frame_index,
                 position,
@@ -311,7 +308,7 @@ mod tests {
     #[test]
     fn short_gap_is_coasted_and_closed_with_interpolated_samples() {
         let mut session = make_session(3); // coast_limit 3 < hidden frames (2)
-        // frames 1, 2: object hidden (blank)
+                                           // frames 1, 2: object hidden (blank)
         session.step(&blank_frame(W, H));
         session.step(&blank_frame(W, H));
         assert_eq!(session.state(), SessionState::Tracking);

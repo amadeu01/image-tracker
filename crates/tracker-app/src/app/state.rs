@@ -413,13 +413,13 @@ impl AppState {
             if let Some(frame_index) = msg.video_frame_index() {
                 self.set_frame(frame_index as i64);
             }
-            let was_paused = self.tracking_run.session_state
-                == Some(tracker_core::SessionState::NeedsReseed);
+            let was_paused =
+                self.tracking_run.session_state == Some(tracker_core::SessionState::NeedsReseed);
             if self.tracking_run.apply(msg) {
                 finished = true;
             }
-            let now_paused = self.tracking_run.session_state
-                == Some(tracker_core::SessionState::NeedsReseed);
+            let now_paused =
+                self.tracking_run.session_state == Some(tracker_core::SessionState::NeedsReseed);
             if now_paused && !was_paused {
                 self.push_event(
                     EventLevel::Warn,
@@ -715,6 +715,8 @@ mod tests {
         assert_eq!(state.events.len(), MAX_EVENTS);
         // Oldest events were evicted; the last pushed one is still there.
         let last = state.events.back().unwrap();
-        assert!(last.message.contains(&format!("({:.1}", (MAX_EVENTS + 4) as f64)));
+        assert!(last
+            .message
+            .contains(&format!("({:.1}", (MAX_EVENTS + 4) as f64)));
     }
 }

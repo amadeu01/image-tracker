@@ -58,7 +58,10 @@ pub struct TelemetryGuard {
 /// filesystem, just computes the path.
 pub fn log_dir() -> PathBuf {
     match directories::ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION) {
-        Some(dirs) => dirs.state_dir().unwrap_or_else(|| dirs.data_dir()).join("logs"),
+        Some(dirs) => dirs
+            .state_dir()
+            .unwrap_or_else(|| dirs.data_dir())
+            .join("logs"),
         None => std::env::temp_dir().join("image-tracker-logs"),
     }
 }
@@ -176,7 +179,10 @@ fn panic_report_fields(info: &std::panic::PanicHookInfo<'_>) -> (String, String)
 /// if `ffmpeg` isn't on `PATH`, fails to run, or produces no output. Used by
 /// the startup banner; never fails startup itself.
 pub fn ffmpeg_version_summary() -> String {
-    match std::process::Command::new("ffmpeg").arg("-version").output() {
+    match std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+    {
         Ok(output) => first_line_or_unavailable(&output.stdout),
         Err(_) => "unavailable".to_string(),
     }
@@ -220,7 +226,8 @@ mod tests {
 
     #[test]
     fn first_line_or_unavailable_extracts_first_line() {
-        let stdout = b"ffmpeg version 6.1.1 Copyright (c) 2000-2023 the FFmpeg developers\nbuilt with gcc\n";
+        let stdout =
+            b"ffmpeg version 6.1.1 Copyright (c) 2000-2023 the FFmpeg developers\nbuilt with gcc\n";
         assert_eq!(
             first_line_or_unavailable(stdout),
             "ffmpeg version 6.1.1 Copyright (c) 2000-2023 the FFmpeg developers"
@@ -235,7 +242,10 @@ mod tests {
 
     #[test]
     fn first_line_or_unavailable_reports_unavailable_on_invalid_utf8() {
-        assert_eq!(first_line_or_unavailable(&[0xff, 0xfe, 0x00]), "unavailable");
+        assert_eq!(
+            first_line_or_unavailable(&[0xff, 0xfe, 0x00]),
+            "unavailable"
+        );
     }
 
     #[test]

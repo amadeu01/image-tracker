@@ -93,7 +93,10 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
             kv_row(
                 ui,
                 "position",
-                &format!("({:.1}, {:.1}) @ frame {}", seed.position.x, seed.position.y, seed.frame_index),
+                &format!(
+                    "({:.1}, {:.1}) @ frame {}",
+                    seed.position.x, seed.position.y, seed.frame_index
+                ),
             );
             let suggestion = match state.suggested_tracker {
                 Some(tracker_core::TrackerKind::Color) => "Color",
@@ -116,13 +119,15 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
     ui.label(egui::RichText::new("Tracking").strong());
     let run = &state.tracking_run;
     let is_error = run.error.is_some();
-    let is_paused =
-        run.session_state == Some(tracker_core::SessionState::NeedsReseed);
+    let is_paused = run.session_state == Some(tracker_core::SessionState::NeedsReseed);
     let is_done = !run.running && run.bar_path.is_some();
     let (state_label, color) = if is_error {
         ("error", egui::Color32::from_rgb(230, 70, 70))
     } else if is_paused {
-        ("paused — reseed needed", egui::Color32::from_rgb(230, 200, 60))
+        (
+            "paused — reseed needed",
+            egui::Color32::from_rgb(230, 200, 60),
+        )
     } else if is_done {
         ("complete", egui::Color32::from_rgb(90, 200, 110))
     } else if run.running {
@@ -137,7 +142,11 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
     kv_row(ui, "frames processed", &run.frames_processed.to_string());
     kv_row(ui, "gaps", &run.gap_count.to_string());
     if let Some(pos) = run.last_position {
-        kv_row(ui, "last position", &format!("({:.1}, {:.1})", pos.x, pos.y));
+        kv_row(
+            ui,
+            "last position",
+            &format!("({:.1}, {:.1})", pos.x, pos.y),
+        );
     }
 }
 

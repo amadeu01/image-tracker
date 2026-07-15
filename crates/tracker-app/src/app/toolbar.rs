@@ -14,7 +14,10 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 Mode::PlacingSeed => "Placing Seed... (click frame)",
                 Mode::Calibrating { .. } => "Place Seed",
             };
-            if ui.selectable_label(state.mode == Mode::PlacingSeed, label).clicked() {
+            if ui
+                .selectable_label(state.mode == Mode::PlacingSeed, label)
+                .clicked()
+            {
                 state.toggle_placing_seed();
             }
             // Key toggle, e.g. 's' for seed placement.
@@ -39,13 +42,18 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
             }
 
             if let Mode::Calibrating {
-                known_length_meters, ..
+                known_length_meters,
+                ..
             } = state.mode
             {
                 ui.label("known length (m):");
                 let mut meters = known_length_meters;
                 if ui
-                    .add(egui::DragValue::new(&mut meters).speed(0.001).range(0.001..=10.0))
+                    .add(
+                        egui::DragValue::new(&mut meters)
+                            .speed(0.001)
+                            .range(0.001..=10.0),
+                    )
                     .changed()
                 {
                     state.set_calibration_length(meters);
@@ -54,8 +62,8 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
 
             ui.separator();
 
-            let paused = state.tracking_run.session_state
-                == Some(tracker_core::SessionState::NeedsReseed);
+            let paused =
+                state.tracking_run.session_state == Some(tracker_core::SessionState::NeedsReseed);
             if paused {
                 // Nudge the user straight into placing a new seed on the
                 // paused frame.
@@ -67,10 +75,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                     .map(|s| Some(s.frame_index) == state.tracking_run.last_frame_index)
                     .unwrap_or(false);
                 ui.colored_label(egui::Color32::YELLOW, "tracking paused: click a new seed");
-                if ui
-                    .add_enabled(ready, egui::Button::new("Resume"))
-                    .clicked()
-                {
+                if ui.add_enabled(ready, egui::Button::new("Resume")).clicked() {
                     state.resume_tracking();
                 }
             } else if ui

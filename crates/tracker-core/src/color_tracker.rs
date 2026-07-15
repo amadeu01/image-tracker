@@ -163,7 +163,9 @@ mod tests {
         for y in 0..height as i64 {
             for x in 0..width as i64 {
                 let color = match blob {
-                    Some((bx, by, size, fg)) if x >= bx && x < bx + size && y >= by && y < by + size => {
+                    Some((bx, by, size, fg))
+                        if x >= bx && x < bx + size && y >= by && y < by + size =>
+                    {
                         fg
                     }
                     _ => bg,
@@ -176,8 +178,13 @@ mod tests {
 
     fn red_model() -> ColorModel {
         let seed_frame = frame_with_blob(10, 10, [255, 0, 0], None);
-        ColorModel::learn(&seed_frame, Point::new(5.0, 5.0), 2, ColorModelConfig::default())
-            .unwrap()
+        ColorModel::learn(
+            &seed_frame,
+            Point::new(5.0, 5.0),
+            2,
+            ColorModelConfig::default(),
+        )
+        .unwrap()
     }
 
     fn plain_config() -> ColorTrackerConfig {

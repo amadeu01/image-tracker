@@ -55,8 +55,12 @@ pub fn export_json(path: &BarPath, cal: Option<&Calibration>) -> String {
     for (i, p) in points.iter().enumerate() {
         let xm = x_m(p.position.x, cal);
         let ym = x_m(p.position.y, cal);
-        let xm_field = xm.map(|v| format!("{v:.6}")).unwrap_or_else(|| "null".to_string());
-        let ym_field = ym.map(|v| format!("{v:.6}")).unwrap_or_else(|| "null".to_string());
+        let xm_field = xm
+            .map(|v| format!("{v:.6}"))
+            .unwrap_or_else(|| "null".to_string());
+        let ym_field = ym
+            .map(|v| format!("{v:.6}"))
+            .unwrap_or_else(|| "null".to_string());
         let gap_flag = p.source == Source::Interpolated;
         out.push_str(&format!(
             "  {{\"frame_index\": {}, \"t_seconds\": {:.6}, \"x_px\": {:.6}, \"y_px\": {:.6}, \"x_m\": {}, \"y_m\": {}, \"gap_flag\": {}}}",

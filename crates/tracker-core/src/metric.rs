@@ -106,9 +106,13 @@ mod tests {
             rgb.extend_from_slice(&[byte, byte, byte]);
         }
         let transformed_frame = Frame::new(side, side, rgb).unwrap();
-        let transformed_patch =
-            extract_patch(&transformed_frame, (side / 2) as i64, (side / 2) as i64, side / 2)
-                .unwrap();
+        let transformed_patch = extract_patch(
+            &transformed_frame,
+            (side / 2) as i64,
+            (side / 2) as i64,
+            side / 2,
+        )
+        .unwrap();
 
         let score = Zncc.score(&patch, &transformed_patch).unwrap();
         assert!((score - 1.0).abs() < 1e-4);

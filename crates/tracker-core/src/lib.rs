@@ -25,7 +25,6 @@ pub use color::{rgb_to_hsv, ColorModel, ColorModelConfig, ColorModelError};
 pub use color_tracker::{ColorTracker, ColorTrackerConfig, ColorTrackerConfigBuilder};
 pub use export::{export_csv, export_json};
 pub use frame_source::FrameSource;
-pub use video_sink::VideoSink;
 pub use geometry::{Frame, FrameError, Point};
 pub use metric::{CorrelationMetric, Zncc};
 pub use overlay::{render_overlay, Color, OverlayStyle, OverlayStyleBuilder};
@@ -42,3 +41,4 @@ pub use tracker::{
     StepOutcome, TemplateTracker, TemplateTrackerConfig, TemplateTrackerConfigBuilder,
     TemplateTrackerError, Tracker,
 };
+pub use video_sink::VideoSink;

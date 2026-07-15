@@ -240,7 +240,11 @@ mod tests {
         // Saturated green blob on a plain mid-gray background: distinct
         // color, low background match fraction (0) -> Color.
         let frame = frame_with_centered_blob(80, 80, [128, 128, 128], 40, 40, 8, [0, 200, 0]);
-        let kind = suggest_tracker(&frame, Point::new(40.0, 40.0), TrackerSuggestionConfig::default());
+        let kind = suggest_tracker(
+            &frame,
+            Point::new(40.0, 40.0),
+            TrackerSuggestionConfig::default(),
+        );
         assert_eq!(kind, TrackerKind::Color);
     }
 
@@ -251,7 +255,11 @@ mod tests {
         // saturation, so the min_saturation floor alone routes this to
         // Template regardless of the background.
         let frame = frame_with_centered_blob(80, 80, [40, 40, 40], 40, 40, 8, [70, 70, 70]);
-        let kind = suggest_tracker(&frame, Point::new(40.0, 40.0), TrackerSuggestionConfig::default());
+        let kind = suggest_tracker(
+            &frame,
+            Point::new(40.0, 40.0),
+            TrackerSuggestionConfig::default(),
+        );
         assert_eq!(kind, TrackerKind::Template);
     }
 
@@ -261,7 +269,11 @@ mod tests {
         // background happens to be colorful (and thus would otherwise pass
         // the background-match check trivially).
         let frame = frame_with_centered_blob(80, 80, [0, 200, 0], 40, 40, 8, [128, 128, 128]);
-        let kind = suggest_tracker(&frame, Point::new(40.0, 40.0), TrackerSuggestionConfig::default());
+        let kind = suggest_tracker(
+            &frame,
+            Point::new(40.0, 40.0),
+            TrackerSuggestionConfig::default(),
+        );
         assert_eq!(kind, TrackerKind::Template);
     }
 
@@ -278,7 +290,11 @@ mod tests {
             }
         }
         let frame = Frame::new(80, 80, rgb).unwrap();
-        let kind = suggest_tracker(&frame, Point::new(40.0, 40.0), TrackerSuggestionConfig::default());
+        let kind = suggest_tracker(
+            &frame,
+            Point::new(40.0, 40.0),
+            TrackerSuggestionConfig::default(),
+        );
         assert_eq!(kind, TrackerKind::Template);
     }
 
@@ -292,7 +308,11 @@ mod tests {
         // green seed color, so this should still resolve to Color rather
         // than falling back just because of the clipping.
         let frame = frame_with_centered_blob(30, 30, [128, 128, 128], 10, 10, 14, [0, 200, 0]);
-        let kind = suggest_tracker(&frame, Point::new(10.0, 10.0), TrackerSuggestionConfig::default());
+        let kind = suggest_tracker(
+            &frame,
+            Point::new(10.0, 10.0),
+            TrackerSuggestionConfig::default(),
+        );
         assert_eq!(kind, TrackerKind::Color);
     }
 
@@ -300,7 +320,11 @@ mod tests {
     fn out_of_bounds_seed_patch_suggests_template() {
         let frame = frame_with_centered_blob(80, 80, [128, 128, 128], 40, 40, 8, [0, 200, 0]);
         // Seed right at the corner: patch_radius(5) pushes it out of bounds.
-        let kind = suggest_tracker(&frame, Point::new(0.0, 0.0), TrackerSuggestionConfig::default());
+        let kind = suggest_tracker(
+            &frame,
+            Point::new(0.0, 0.0),
+            TrackerSuggestionConfig::default(),
+        );
         assert_eq!(kind, TrackerKind::Template);
     }
 

@@ -17,8 +17,8 @@ use std::thread;
 use tracker_core::{
     BarPath, ColorModel, ColorModelConfig, ColorTracker, ColorTrackerConfig, Frame, FrameSource,
     Point, SessionState, Source as SampleSource, StepOutcome, TemplateTracker,
-    TemplateTrackerConfig, Timebase, Tracker, TrackerKind, TrackerSuggestionConfig, TrackingSession,
-    TrackingSessionConfig,
+    TemplateTrackerConfig, Timebase, Tracker, TrackerKind, TrackerSuggestionConfig,
+    TrackingSession, TrackingSessionConfig,
 };
 
 use crate::ffmpeg_source::FfmpegFrameSource;
@@ -52,7 +52,9 @@ impl std::str::FromStr for TrackerSelection {
             "auto" => Ok(TrackerSelection::Auto),
             "template" => Ok(TrackerSelection::Template),
             "color" => Ok(TrackerSelection::Color),
-            other => Err(format!("bad --tracker (expected auto|template|color): {other}")),
+            other => Err(format!(
+                "bad --tracker (expected auto|template|color): {other}"
+            )),
         }
     }
 }
@@ -204,7 +206,8 @@ impl TrackingRunState {
                 source,
                 state,
             } => {
-                if state == SessionState::NeedsReseed && self.session_state != Some(SessionState::NeedsReseed)
+                if state == SessionState::NeedsReseed
+                    && self.session_state != Some(SessionState::NeedsReseed)
                 {
                     self.gap_count += 1;
                 }
@@ -240,11 +243,14 @@ impl TrackingRunState {
             );
         }
         match (self.last_frame_index, self.session_state) {
-            (Some(idx), Some(SessionState::NeedsReseed)) => format!(
-                "tracking paused at frame {idx}: object lost, place a new seed then Resume"
-            ),
+            (Some(idx), Some(SessionState::NeedsReseed)) => {
+                format!("tracking paused at frame {idx}: object lost, place a new seed then Resume")
+            }
             (Some(idx), _) => {
-                format!("tracking… frame {idx} ({} processed)", self.frames_processed)
+                format!(
+                    "tracking… frame {idx} ({} processed)",
+                    self.frames_processed
+                )
             }
             _ => "tracking starting…".to_string(),
         }
@@ -319,7 +325,10 @@ pub fn spawn_tracking(job: TrackingJob) -> TrackingHandle {
         run_tracking_worker(job, &tx, &reseed_rx);
     });
 
-    TrackingHandle { messages: rx, reseed_tx }
+    TrackingHandle {
+        messages: rx,
+        reseed_tx,
+    }
 }
 
 #[tracing::instrument(
@@ -331,7 +340,11 @@ pub fn spawn_tracking(job: TrackingJob) -> TrackingHandle {
         seed_y = job.seed_position.y,
     )
 )]
-fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx: &Receiver<ReseedCommand>) {
+fn run_tracking_worker(
+    job: TrackingJob,
+    tx: &Sender<TrackingMessage>,
+    reseed_rx: &Receiver<ReseedCommand>,
+) {
     let TrackingJob {
         video_path,
         width,
@@ -377,9 +390,11 @@ fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx
     let resolved_kind = match tracker_selection {
         TrackerSelection::Template => TrackerKind::Template,
         TrackerSelection::Color => TrackerKind::Color,
-        TrackerSelection::Auto => {
-            tracker_core::suggest_tracker(&seed_frame, seed_position, TrackerSuggestionConfig::default())
-        }
+        TrackerSelection::Auto => tracker_core::suggest_tracker(
+            &seed_frame,
+            seed_position,
+            TrackerSuggestionConfig::default(),
+        ),
     };
     tracing::info!(
         kind = ?resolved_kind,
@@ -388,16 +403,18 @@ fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx
     );
 
     let tracker = match resolved_kind {
-        TrackerKind::Template => match TemplateTracker::new(&seed_frame, seed_position, tracker_config) {
-            Ok(t) => AnyTracker::Template(t),
-            Err(e) => {
-                tracing::error!(error = ?e, "seed patch out of bounds");
-                let _ = tx.send(TrackingMessage::Error(format!(
-                    "seed patch out of bounds: {e:?}"
-                )));
-                return;
+        TrackerKind::Template => {
+            match TemplateTracker::new(&seed_frame, seed_position, tracker_config) {
+                Ok(t) => AnyTracker::Template(t),
+                Err(e) => {
+                    tracing::error!(error = ?e, "seed patch out of bounds");
+                    let _ = tx.send(TrackingMessage::Error(format!(
+                        "seed patch out of bounds: {e:?}"
+                    )));
+                    return;
+                }
             }
-        },
+        }
         TrackerKind::Color => {
             match ColorModel::learn(
                 &seed_frame,
@@ -454,14 +471,14 @@ fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx
                 if session.state() == SessionState::NeedsReseed {
                     gap_count += 1;
                     tracing::warn!(
-                        video_frame_index = seed_frame_index + session.samples().last().map(|s| s.frame_index).unwrap_or(0),
+                        video_frame_index = seed_frame_index
+                            + session.samples().last().map(|s| s.frame_index).unwrap_or(0),
                         misses = gap_count,
                         "tracking needs reseed: object lost, waiting for a new seed"
                     );
                     match reseed_rx.recv() {
                         Ok(cmd) => {
-                            let relative =
-                                cmd.video_frame_index.saturating_sub(seed_frame_index);
+                            let relative = cmd.video_frame_index.saturating_sub(seed_frame_index);
                             session.reseed(relative, cmd.position);
                             tracing::info!(
                                 video_frame_index = cmd.video_frame_index,

@@ -68,18 +68,15 @@ impl TrackerApp {
             Ok(frame) => {
                 let size = [frame.width() as usize, frame.height() as usize];
                 let image = egui::ColorImage::from_rgb(size, frame.rgb());
-                let handle = ctx.load_texture(
-                    "current-frame",
-                    image,
-                    egui::TextureOptions::LINEAR,
-                );
+                let handle = ctx.load_texture("current-frame", image, egui::TextureOptions::LINEAR);
                 self.texture = Some(handle);
                 self.texture_frame = Some(self.state.current_frame);
                 self.state.status.clear();
             }
             Err(e) => {
                 tracing::error!(frame = self.state.current_frame, error = %e, "failed to decode frame");
-                self.state.status = format!("failed to decode frame {}: {e}", self.state.current_frame);
+                self.state.status =
+                    format!("failed to decode frame {}: {e}", self.state.current_frame);
             }
         }
     }

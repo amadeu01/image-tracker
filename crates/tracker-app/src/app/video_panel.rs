@@ -18,10 +18,11 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         let texture = texture.clone();
         let available = ui.available_size();
         let tex_size = texture.size_vec2();
-        let scale = (available.x / tex_size.x).min(available.y / tex_size.y).min(1.0);
-        let response = ui.add(
-            egui::Image::new((texture.id(), tex_size * scale)).sense(egui::Sense::click()),
-        );
+        let scale = (available.x / tex_size.x)
+            .min(available.y / tex_size.y)
+            .min(1.0);
+        let response =
+            ui.add(egui::Image::new((texture.id(), tex_size * scale)).sense(egui::Sense::click()));
         let image_rect = response.rect;
 
         let calibrating = matches!(app.state.mode, Mode::Calibrating { .. });
@@ -114,8 +115,7 @@ fn draw_crosshair(
     }
     let scale_x = image_rect.width() / image_native_size.x;
     let scale_y = image_rect.height() / image_native_size.y;
-    let screen =
-        image_rect.min + egui::Vec2::new(px.x as f32 * scale_x, px.y as f32 * scale_y);
+    let screen = image_rect.min + egui::Vec2::new(px.x as f32 * scale_x, px.y as f32 * scale_y);
 
     let radius = 8.0;
     let stroke = egui::Stroke::new(2.0, color);

@@ -22,11 +22,16 @@ pub enum SeekError {
     FfmpegNotFound,
     Io(std::io::Error),
     /// ffmpeg exited non-zero.
-    ProcessFailed { stderr: String },
+    ProcessFailed {
+        stderr: String,
+    },
     /// ffmpeg produced no frame at all (e.g. seek past end of stream).
     NoFrameDecoded,
     /// ffmpeg produced fewer bytes than one full frame.
-    ShortRead { expected: usize, got: usize },
+    ShortRead {
+        expected: usize,
+        got: usize,
+    },
 }
 
 impl std::fmt::Display for SeekError {
@@ -34,8 +39,12 @@ impl std::fmt::Display for SeekError {
         match self {
             SeekError::FfmpegNotFound => write!(f, "ffmpeg not found on PATH; install ffmpeg"),
             SeekError::Io(e) => write!(f, "I/O error decoding frame: {e}"),
-            SeekError::ProcessFailed { stderr } => write!(f, "ffmpeg exited with an error: {stderr}"),
-            SeekError::NoFrameDecoded => write!(f, "ffmpeg produced no frame for the requested seek"),
+            SeekError::ProcessFailed { stderr } => {
+                write!(f, "ffmpeg exited with an error: {stderr}")
+            }
+            SeekError::NoFrameDecoded => {
+                write!(f, "ffmpeg produced no frame for the requested seek")
+            }
             SeekError::ShortRead { expected, got } => write!(
                 f,
                 "ffmpeg produced a partial frame: expected {expected} bytes, got {got}"
@@ -134,8 +143,8 @@ impl FrameDecoder for SeekingFrameDecoder {
             });
         }
 
-        Frame::new(self.width, self.height, buf)
-            .map_err(|_| SeekError::NoFrameDecoded) // buffer length already checked above
+        Frame::new(self.width, self.height, buf).map_err(|_| SeekError::NoFrameDecoded)
+        // buffer length already checked above
     }
 }
 

@@ -273,7 +273,9 @@ mod tests {
 
     #[test]
     fn config_builder_overrides_update_threshold() {
-        let config = TemplateTrackerConfig::builder().update_threshold(0.8).build();
+        let config = TemplateTrackerConfig::builder()
+            .update_threshold(0.8)
+            .build();
         assert_eq!(config.update_threshold(), 0.8);
     }
 
@@ -412,8 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn dual_template_stays_found_through_gradual_appearance_change_that_would_lose_anchor_alone()
-    {
+    fn dual_template_stays_found_through_gradual_appearance_change_that_would_lose_anchor_alone() {
         let width = 30;
         let height = 30;
         let pos = Point::new(15.0, 15.0);

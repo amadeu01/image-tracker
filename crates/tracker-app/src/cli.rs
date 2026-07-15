@@ -10,7 +10,9 @@
 
 use std::path::{Path, PathBuf};
 
-use tracker_core::{export_csv, export_json, render_overlay, OverlayStyle, Point, Source, VideoSink};
+use tracker_core::{
+    export_csv, export_json, render_overlay, OverlayStyle, Point, Source, VideoSink,
+};
 
 use crate::ffmpeg_sink::FfmpegVideoSink;
 use crate::ffmpeg_source::FfmpegFrameSource;
@@ -88,8 +90,10 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
             }
             "--update-threshold" => {
                 let v = args.get(i + 1).ok_or("--update-threshold needs a value")?;
-                tuning.update_threshold =
-                    Some(v.parse().map_err(|_| format!("bad --update-threshold: {v}"))?);
+                tuning.update_threshold = Some(
+                    v.parse()
+                        .map_err(|_| format!("bad --update-threshold: {v}"))?,
+                );
                 i += 2;
             }
             "--coast-limit" => {

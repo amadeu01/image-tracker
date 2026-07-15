@@ -12,7 +12,11 @@ use egui::{Pos2, Rect, Vec2};
 /// image is actually drawn into, given `image_size` (in pixels) fitted to
 /// `panel_rect` with letterboxing and capped at 1.0 (no upscaling).
 pub fn fitted_image_rect(panel_rect: Rect, image_size: Vec2) -> Rect {
-    if image_size.x <= 0.0 || image_size.y <= 0.0 || panel_rect.width() <= 0.0 || panel_rect.height() <= 0.0 {
+    if image_size.x <= 0.0
+        || image_size.y <= 0.0
+        || panel_rect.width() <= 0.0
+        || panel_rect.height() <= 0.0
+    {
         return Rect::from_min_size(panel_rect.min, Vec2::ZERO);
     }
     let scale = (panel_rect.width() / image_size.x)
