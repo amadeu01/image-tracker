@@ -5,9 +5,8 @@
 //! rendering itself isn't unit-tested, but the state transitions it drives
 //! (frame index clamping) are, via `frame_cache::clamp_frame_index`.
 //!
-//! `Mode` exists now (with a single variant) so tasks 2.4 (seed placement)
-//! and 2.5 (calibration) can add variants and match on `state.mode` without
-//! restructuring this file.
+//! `Mode` grows a variant per interactive task: `PlacingSeed` (2.4) and
+//! `Calibrating` (2.5), matched on `state.mode`.
 
 use std::path::PathBuf;
 
@@ -18,15 +17,25 @@ use crate::frame_cache::{clamp_frame_index, FrameCache};
 use crate::screen_map::screen_to_image_px;
 use crate::seek_source::SeekingFrameDecoder;
 
-/// What clicking on the frame view currently does. 2.5 will add
-/// `Calibrating { .. }`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What clicking on the frame view currently does.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
     /// Just look around: scrub the slider, no click handling yet.
     ViewOnly,
     /// Clicking the frame places the Seed (task 2.4).
     PlacingSeed,
+    /// Clicking the frame places calibration points (task 2.5). Holds the
+    /// first click (if any) and the known real-world length in meters used
+    /// to derive px/m once both points are placed.
+    Calibrating {
+        first_point: Option<tracker_core::Point>,
+        known_length_meters: f64,
+    },
 }
+
+/// Default known length for the calibration reference object: a standard
+/// 450mm bumper plate diameter.
+pub const DEFAULT_CALIBRATION_LENGTH_METERS: f64 = 0.450;
 
 /// A user-placed Seed: image-pixel position plus the frame it was placed on.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,6 +54,14 @@ pub struct AppState {
     /// The Seed, once placed (task 2.4). `None` until the user clicks in
     /// `Mode::PlacingSeed`.
     pub seed: Option<Seed>,
+    /// The resolved Calibration (task 2.5), once both points have been
+    /// clicked and the segment accepted. `None` until then; overwritten each
+    /// time a new pair is completed.
+    pub calibration: Option<tracker_core::Calibration>,
+    /// The two points of the most recently completed calibration pair
+    /// (success or failure), so the UI can draw a line between them even
+    /// after the pair has reset for a potential third click.
+    pub last_calibration_segment: Option<(tracker_core::Point, tracker_core::Point)>,
     /// Bottom status bar text; errors surface here rather than panicking
     /// (project rule — see PLAN.md 2.6).
     pub status: String,
@@ -58,6 +75,8 @@ impl AppState {
             mode: Mode::ViewOnly,
             current_frame: 0,
             seed: None,
+            calibration: None,
+            last_calibration_segment: None,
             status: String::new(),
         }
     }
@@ -65,9 +84,34 @@ impl AppState {
     /// Toggle between `ViewOnly` and `PlacingSeed`.
     pub fn toggle_placing_seed(&mut self) {
         self.mode = match self.mode {
-            Mode::ViewOnly => Mode::PlacingSeed,
             Mode::PlacingSeed => Mode::ViewOnly,
+            _ => Mode::PlacingSeed,
         };
+    }
+
+    /// Toggle between `ViewOnly` and `Calibrating`. Entering `Calibrating`
+    /// starts a fresh pair (no first point yet) and defaults the known
+    /// length to `DEFAULT_CALIBRATION_LENGTH_METERS` (450mm plate).
+    pub fn toggle_calibrating(&mut self) {
+        self.mode = match self.mode {
+            Mode::Calibrating { .. } => Mode::ViewOnly,
+            _ => Mode::Calibrating {
+                first_point: None,
+                known_length_meters: DEFAULT_CALIBRATION_LENGTH_METERS,
+            },
+        };
+    }
+
+    /// Update the known real-world length (in meters) used for the current
+    /// calibration pair. No-op outside `Mode::Calibrating`.
+    pub fn set_calibration_length(&mut self, meters: f64) {
+        if let Mode::Calibrating {
+            known_length_meters,
+            ..
+        } = &mut self.mode
+        {
+            *known_length_meters = meters;
+        }
     }
 
     /// Record a Seed at the given image-pixel position on the current frame.
@@ -82,19 +126,72 @@ impl AppState {
         });
     }
 
-    /// Status-bar text reflecting mode and, once placed, the Seed position.
+    /// Record a calibration click at the given image-pixel position. Only
+    /// takes effect in `Mode::Calibrating`.
+    ///
+    /// The first click of a pair is just remembered. The second click
+    /// attempts to build a `Calibration` from the two points and the
+    /// currently configured known length; success or failure, the pair then
+    /// resets so a third click starts a brand-new pair.
+    pub fn place_calibration_point(&mut self, position: tracker_core::Point) {
+        let Mode::Calibrating {
+            first_point,
+            known_length_meters,
+        } = self.mode
+        else {
+            return;
+        };
+
+        match first_point {
+            None => {
+                self.mode = Mode::Calibrating {
+                    first_point: Some(position),
+                    known_length_meters,
+                };
+            }
+            Some(first) => {
+                self.last_calibration_segment = Some((first, position));
+                match tracker_core::Calibration::new(first, position, known_length_meters) {
+                    Ok(cal) => {
+                        self.calibration = Some(cal);
+                        self.status.clear();
+                    }
+                    Err(e) => {
+                        self.status = format!("calibration failed: {e}");
+                    }
+                }
+                // Third click restarts the pair, regardless of outcome.
+                self.mode = Mode::Calibrating {
+                    first_point: None,
+                    known_length_meters,
+                };
+            }
+        }
+    }
+
+    /// Status-bar text reflecting mode and, once placed, the Seed and
+    /// Calibration state.
     pub fn status_line(&self) -> String {
         let mode = match self.mode {
-            Mode::ViewOnly => "view",
-            Mode::PlacingSeed => "placing seed (click frame)",
+            Mode::ViewOnly => "view".to_string(),
+            Mode::PlacingSeed => "placing seed (click frame)".to_string(),
+            Mode::Calibrating { first_point, .. } => match first_point {
+                Some(_) => "calibrating (click 2nd point)".to_string(),
+                None => "calibrating (click 1st point)".to_string(),
+            },
         };
-        match &self.seed {
+        let seed_part = match &self.seed {
             Some(seed) => format!(
-                "mode: {mode}  |  seed: ({:.1}, {:.1}) @ frame {}",
+                "seed: ({:.1}, {:.1}) @ frame {}",
                 seed.position.x, seed.position.y, seed.frame_index
             ),
-            None => format!("mode: {mode}  |  seed: none"),
-        }
+            None => "seed: none".to_string(),
+        };
+        let calibration_part = match &self.calibration {
+            Some(cal) => format!("calibration: {:.1} px/m", cal.px_per_meter()),
+            None => "calibration: none".to_string(),
+        };
+        format!("mode: {mode}  |  {seed_part}  |  {calibration_part}")
     }
 
     fn frame_count(&self) -> u64 {
@@ -178,6 +275,7 @@ impl eframe::App for TrackerApp {
                 let label = match self.state.mode {
                     Mode::ViewOnly => "Place Seed",
                     Mode::PlacingSeed => "Placing Seed... (click frame)",
+                    Mode::Calibrating { .. } => "Place Seed",
                 };
                 if ui.selectable_label(self.state.mode == Mode::PlacingSeed, label).clicked() {
                     self.state.toggle_placing_seed();
@@ -185,6 +283,36 @@ impl eframe::App for TrackerApp {
                 // Key toggle, e.g. 's' for seed placement.
                 if ui.ctx().input(|i| i.key_pressed(egui::Key::S)) {
                     self.state.toggle_placing_seed();
+                }
+
+                ui.separator();
+
+                let calibrating = matches!(self.state.mode, Mode::Calibrating { .. });
+                let cal_label = if calibrating {
+                    "Calibrating... (click 2 points)"
+                } else {
+                    "Calibrate"
+                };
+                if ui.selectable_label(calibrating, cal_label).clicked() {
+                    self.state.toggle_calibrating();
+                }
+                // Key toggle, 'c' for calibration.
+                if ui.ctx().input(|i| i.key_pressed(egui::Key::C)) {
+                    self.state.toggle_calibrating();
+                }
+
+                if let Mode::Calibrating {
+                    known_length_meters, ..
+                } = self.state.mode
+                {
+                    ui.label("known length (m):");
+                    let mut meters = known_length_meters;
+                    if ui
+                        .add(egui::DragValue::new(&mut meters).speed(0.001).range(0.001..=10.0))
+                        .changed()
+                    {
+                        self.state.set_calibration_length(meters);
+                    }
                 }
             });
         });
@@ -233,7 +361,9 @@ impl eframe::App for TrackerApp {
                 );
                 let image_rect = response.rect;
 
-                if self.state.mode == Mode::PlacingSeed && response.clicked() {
+                let calibrating = matches!(self.state.mode, Mode::Calibrating { .. });
+
+                if response.clicked() {
                     if let Some(click_pos) = response.interact_pointer_pos() {
                         if let Some(image_px) = screen_to_image_px(
                             click_pos,
@@ -241,7 +371,11 @@ impl eframe::App for TrackerApp {
                             self.state.metadata.width,
                             self.state.metadata.height,
                         ) {
-                            self.state.place_seed(image_px);
+                            if self.state.mode == Mode::PlacingSeed {
+                                self.state.place_seed(image_px);
+                            } else if calibrating {
+                                self.state.place_calibration_point(image_px);
+                            }
                         }
                     }
                 }
@@ -250,6 +384,18 @@ impl eframe::App for TrackerApp {
                     if seed.frame_index == self.state.current_frame {
                         draw_seed_crosshair(ui.painter(), image_rect, tex_size, seed.position);
                     }
+                }
+
+                if let Mode::Calibrating {
+                    first_point: Some(first),
+                    ..
+                } = self.state.mode
+                {
+                    draw_calibration_pending_point(ui.painter(), image_rect, tex_size, first);
+                }
+
+                if let Some((a, b)) = self.state.last_calibration_segment {
+                    draw_calibration_segment(ui.painter(), image_rect, tex_size, a, b);
                 }
             } else {
                 ui.label("decoding first frame...");
@@ -293,6 +439,61 @@ fn draw_seed_crosshair(
         stroke,
     );
     painter.circle_stroke(screen, radius * 0.6, stroke);
+}
+
+/// Convert an image-pixel point to a screen point within the currently
+/// drawn (scaled, letterboxed) image rect. Shared by the seed crosshair and
+/// calibration overlays.
+fn image_px_to_screen(
+    image_rect: egui::Rect,
+    image_native_size: egui::Vec2,
+    px: tracker_core::Point,
+) -> Option<egui::Pos2> {
+    if image_native_size.x <= 0.0 || image_native_size.y <= 0.0 {
+        return None;
+    }
+    let scale_x = image_rect.width() / image_native_size.x;
+    let scale_y = image_rect.height() / image_native_size.y;
+    Some(
+        image_rect.min
+            + egui::Vec2::new(px.x as f32 * scale_x, px.y as f32 * scale_y),
+    )
+}
+
+/// Draw a marker at the first-clicked calibration point, while awaiting the
+/// second click.
+fn draw_calibration_pending_point(
+    painter: &egui::Painter,
+    image_rect: egui::Rect,
+    image_native_size: egui::Vec2,
+    point_px: tracker_core::Point,
+) {
+    if let Some(screen) = image_px_to_screen(image_rect, image_native_size, point_px) {
+        let color = egui::Color32::from_rgb(60, 160, 255);
+        painter.circle_filled(screen, 4.0, color);
+    }
+}
+
+/// Draw a line between the two most recently clicked calibration points,
+/// with endpoint markers. Painter overlay only — never mutates frame pixels.
+fn draw_calibration_segment(
+    painter: &egui::Painter,
+    image_rect: egui::Rect,
+    image_native_size: egui::Vec2,
+    a_px: tracker_core::Point,
+    b_px: tracker_core::Point,
+) {
+    let (Some(a), Some(b)) = (
+        image_px_to_screen(image_rect, image_native_size, a_px),
+        image_px_to_screen(image_rect, image_native_size, b_px),
+    ) else {
+        return;
+    };
+    let color = egui::Color32::from_rgb(60, 160, 255);
+    let stroke = egui::Stroke::new(2.0, color);
+    painter.line_segment([a, b], stroke);
+    painter.circle_filled(a, 4.0, color);
+    painter.circle_filled(b, 4.0, color);
 }
 
 /// Runs the app: creates the native window and hands control to eframe's
@@ -391,6 +592,95 @@ mod tests {
         let seed = state.seed.expect("seed should be set");
         assert_eq!(seed.frame_index, 3);
         assert_eq!(seed.position, tracker_core::Point::new(12.5, 7.0));
+    }
+
+    #[test]
+    fn toggle_calibrating_switches_modes_and_seeds_default_length() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_calibrating();
+        match state.mode {
+            Mode::Calibrating {
+                first_point,
+                known_length_meters,
+            } => {
+                assert_eq!(first_point, None);
+                assert_eq!(known_length_meters, DEFAULT_CALIBRATION_LENGTH_METERS);
+            }
+            _ => panic!("expected Calibrating mode"),
+        }
+        state.toggle_calibrating();
+        assert_eq!(state.mode, Mode::ViewOnly);
+    }
+
+    #[test]
+    fn two_clicks_resolve_calibration_with_default_length() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_calibrating();
+        state.place_calibration_point(tracker_core::Point::new(0.0, 0.0));
+        assert!(state.calibration.is_none());
+        state.place_calibration_point(tracker_core::Point::new(200.0, 0.0));
+        let cal = state.calibration.expect("calibration should resolve");
+        assert!((cal.px_per_meter() - (200.0 / DEFAULT_CALIBRATION_LENGTH_METERS)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn third_click_restarts_the_pair() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_calibrating();
+        state.place_calibration_point(tracker_core::Point::new(0.0, 0.0));
+        state.place_calibration_point(tracker_core::Point::new(200.0, 0.0));
+        // Third click: starts a fresh pair rather than being treated as a
+        // second point of the old one.
+        state.place_calibration_point(tracker_core::Point::new(50.0, 50.0));
+        match state.mode {
+            Mode::Calibrating { first_point, .. } => {
+                assert_eq!(first_point, Some(tracker_core::Point::new(50.0, 50.0)));
+            }
+            _ => panic!("expected Calibrating mode"),
+        }
+    }
+
+    #[test]
+    fn coincident_calibration_points_surface_error_and_restart_pair() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_calibrating();
+        state.place_calibration_point(tracker_core::Point::new(10.0, 10.0));
+        state.place_calibration_point(tracker_core::Point::new(10.0, 10.0));
+        assert!(state.calibration.is_none());
+        assert!(state.status.contains("calibration failed"));
+        match state.mode {
+            Mode::Calibrating { first_point, .. } => assert_eq!(first_point, None),
+            _ => panic!("expected Calibrating mode"),
+        }
+    }
+
+    #[test]
+    fn calibration_clicks_are_ignored_outside_calibrating_mode() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.place_calibration_point(tracker_core::Point::new(0.0, 0.0));
+        assert_eq!(state.mode, Mode::ViewOnly);
+        assert!(state.calibration.is_none());
+    }
+
+    #[test]
+    fn set_calibration_length_updates_pending_pair() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_calibrating();
+        state.set_calibration_length(1.0);
+        state.place_calibration_point(tracker_core::Point::new(0.0, 0.0));
+        state.place_calibration_point(tracker_core::Point::new(100.0, 0.0));
+        let cal = state.calibration.expect("calibration should resolve");
+        assert!((cal.px_per_meter() - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn status_line_reports_calibration_px_per_meter() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_calibrating();
+        state.place_calibration_point(tracker_core::Point::new(0.0, 0.0));
+        state.place_calibration_point(tracker_core::Point::new(200.0, 0.0));
+        let line = state.status_line();
+        assert!(line.contains("px/m"));
     }
 
     #[test]
