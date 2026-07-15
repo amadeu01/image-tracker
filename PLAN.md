@@ -100,3 +100,13 @@ Cargo workspace:
 | 7.1 | RUNNING.md: how to run (dev: `cargo run`; user: built binary), install on own machine (`cargo install --path`), prerequisites (ffmpeg/ffprobe), and a **manual test script** — step-by-step checklist per feature (open video, scrub, seed, calibrate, track, reseed, export) with expected results, used to validate releases by hand | S | todo | |
 | 7.2 | Side panel UI: use the empty space right of the video for (a) a compact usage guide (steps with current-step highlight), (b) live debug/status panel — tracker state, current score, seed/calibration values, last errors with timestamps. Clean, readable design (grouped sections, color-coded state) replacing the single cramped bottom line. Includes splitting app.rs (872 lines, audit finding) into view modules | M | todo | Requested by user after first GUI session: "hard to see what is happening in the very bottom" |
 | 7.3 | Distribution: GitHub release workflow (tagged builds, `cargo-dist` or manual artifacts for Linux + macOS), install instructions for non-developers in README | M | todo | |
+
+## Milestone 8 — observability (tracing, crash reports, LLM-debuggable logs)
+
+Rust-idiomatic pluggable telemetry: `tracing` for instrumentation; `tracing-subscriber` `Layer` as the plug-in protocol (console layer now; JSON-lines file layer now; `sentry-tracing`/Datadog layer possible later without touching instrumented code). `tracker-core` stays dependency-free — only adapters instrument.
+
+| ID | Task | Size | Status | Observations |
+|----|------|------|--------|--------------|
+| 8.1 | Logging foundation: `tracing` + `tracing-subscriber` in tracker-app; console (pretty) layer + JSON-lines rolling file layer (`tracing-appender`) to `$XDG_STATE_HOME/image-tracker/logs/` (`directories` crate); log path printed at startup; RUST_LOG env filter | M | todo | |
+| 8.2 | Instrument pipeline: spans for probe/decode/track/encode/export with fields (video, frame index, score, session state); errors + reseed/gap events logged; GUI actions (seed, calibrate, track start/stop) as breadcrumb events | S | todo | |
+| 8.3 | Crash capture: panic hook → panic message + backtrace through tracing to file before exit; startup banner logs version + OS + ffmpeg version | S | todo | |
