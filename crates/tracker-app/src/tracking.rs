@@ -211,9 +211,26 @@ impl TrackingHandle {
     }
 }
 
-/// Spawns a background thread that tracks from `seed_position` (placed on
-/// `seed_frame_index`) to the end of the video, sending `TrackingMessage`s
-/// as it goes.
+/// All the inputs `spawn_tracking`/`run_tracking_worker` need to run one
+/// tracking pass: the video to decode, its dimensions/framerate, where to
+/// seed, and the tuning to track with. Grouped into one struct (task 3.7)
+/// so callers build it once with plain field syntax instead of threading
+/// nine positional args through the spawn call.
+pub struct TrackingJob {
+    pub video_path: PathBuf,
+    pub width: u32,
+    pub height: u32,
+    pub fps_num: u64,
+    pub fps_den: u64,
+    pub seed_frame_index: u64,
+    pub seed_position: Point,
+    pub tracker_config: TemplateTrackerConfig,
+    pub session_config: TrackingSessionConfig,
+}
+
+/// Spawns a background thread that tracks from `job.seed_position` (placed
+/// on `job.seed_frame_index`) to the end of the video, sending
+/// `TrackingMessage`s as it goes.
 ///
 /// Frame source: a single sequential `FfmpegFrameSource` (task 2.2) rather
 /// than the seek-based per-frame decoder (`SeekingFrameDecoder`, task
@@ -230,53 +247,31 @@ impl TrackingHandle {
 /// user clicked on. The discard-decode costs a few seconds up front on a
 /// ~2000-frame clip, but it runs off the UI thread so it never blocks the
 /// app.
-pub fn spawn_tracking(
-    video_path: PathBuf,
-    width: u32,
-    height: u32,
-    fps_num: u64,
-    fps_den: u64,
-    seed_frame_index: u64,
-    seed_position: Point,
-    tracker_config: TemplateTrackerConfig,
-    session_config: TrackingSessionConfig,
-) -> TrackingHandle {
+pub fn spawn_tracking(job: TrackingJob) -> TrackingHandle {
     let (tx, rx) = mpsc::channel::<TrackingMessage>();
     let (reseed_tx, reseed_rx) = mpsc::channel::<ReseedCommand>();
 
     thread::spawn(move || {
-        run_tracking_worker(
-            &video_path,
-            width,
-            height,
-            fps_num,
-            fps_den,
-            seed_frame_index,
-            seed_position,
-            tracker_config,
-            session_config,
-            &tx,
-            &reseed_rx,
-        );
+        run_tracking_worker(job, &tx, &reseed_rx);
     });
 
     TrackingHandle { messages: rx, reseed_tx }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_tracking_worker(
-    video_path: &Path,
-    width: u32,
-    height: u32,
-    fps_num: u64,
-    fps_den: u64,
-    seed_frame_index: u64,
-    seed_position: Point,
-    tracker_config: TemplateTrackerConfig,
-    session_config: TrackingSessionConfig,
-    tx: &Sender<TrackingMessage>,
-    reseed_rx: &Receiver<ReseedCommand>,
-) {
+fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx: &Receiver<ReseedCommand>) {
+    let TrackingJob {
+        video_path,
+        width,
+        height,
+        fps_num,
+        fps_den,
+        seed_frame_index,
+        seed_position,
+        tracker_config,
+        session_config,
+    } = job;
+    let video_path: &Path = &video_path;
+
     let mut source = match FfmpegFrameSource::spawn(video_path, width, height) {
         Ok(s) => s,
         Err(e) => {

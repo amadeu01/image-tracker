@@ -240,17 +240,17 @@ impl AppState {
             return;
         }
         let Some(seed) = self.seed else { return };
-        let handle = tracking::spawn_tracking(
-            self.video_path.clone(),
-            self.metadata.display_width(),
-            self.metadata.display_height(),
-            self.metadata.fps_num,
-            self.metadata.fps_den,
-            seed.frame_index,
-            seed.position,
-            tracking::default_tracker_config(),
-            tracking::default_session_config(),
-        );
+        let handle = tracking::spawn_tracking(tracking::TrackingJob {
+            video_path: self.video_path.clone(),
+            width: self.metadata.display_width(),
+            height: self.metadata.display_height(),
+            fps_num: self.metadata.fps_num,
+            fps_den: self.metadata.fps_den,
+            seed_frame_index: seed.frame_index,
+            seed_position: seed.position,
+            tracker_config: tracking::default_tracker_config(),
+            session_config: tracking::default_session_config(),
+        });
         self.tracking = Some(handle);
         self.tracking_run = TrackingRunState::started();
         self.bar_path = None;

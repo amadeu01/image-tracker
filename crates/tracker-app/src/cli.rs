@@ -120,17 +120,17 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
     std::fs::create_dir_all(&args.out_dir)
         .map_err(|e| format!("failed to create out dir {}: {e}", args.out_dir.display()))?;
 
-    let handle = tracking::spawn_tracking(
-        args.video_path.clone(),
-        metadata.display_width(),
-        metadata.display_height(),
-        metadata.fps_num,
-        metadata.fps_den,
-        args.seed_frame,
-        args.seed,
-        tracking::tracker_config(args.tuning),
-        tracking::session_config(args.tuning),
-    );
+    let handle = tracking::spawn_tracking(tracking::TrackingJob {
+        video_path: args.video_path.clone(),
+        width: metadata.display_width(),
+        height: metadata.display_height(),
+        fps_num: metadata.fps_num,
+        fps_den: metadata.fps_den,
+        seed_frame_index: args.seed_frame,
+        seed_position: args.seed,
+        tracker_config: tracking::tracker_config(args.tuning),
+        session_config: tracking::session_config(args.tuning),
+    });
 
     // Headless: no UI to place a new seed on NeedsReseed. Best-effort
     // auto-recovery instead of giving up: resume from the last known
