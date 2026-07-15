@@ -5,6 +5,7 @@
 
 pub mod bar_path;
 pub mod calibration;
+pub mod export;
 pub mod frame_source;
 pub mod geometry;
 pub mod metric;
@@ -16,6 +17,7 @@ pub mod video_sink;
 
 pub use bar_path::{BarPath, PathPoint, Timebase, TimebaseError};
 pub use calibration::{Calibration, CalibrationError};
+pub use export::{export_csv, export_json};
 pub use frame_source::FrameSource;
 pub use video_sink::VideoSink;
 pub use geometry::{Frame, FrameError, Point};
