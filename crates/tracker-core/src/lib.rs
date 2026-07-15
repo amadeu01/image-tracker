@@ -13,6 +13,7 @@ pub mod geometry;
 pub mod metric;
 pub mod overlay;
 pub mod patch;
+pub mod rep;
 pub mod session;
 pub mod smoothing;
 pub mod suggest;
@@ -30,6 +31,7 @@ pub use geometry::{Frame, FrameError, Point};
 pub use metric::{CorrelationMetric, Zncc};
 pub use overlay::{render_overlay, Color, OverlayStyle, OverlayStyleBuilder};
 pub use patch::{extract_patch, Patch};
+pub use rep::{segment_reps, Rep, RepSegmentationConfig, RepSegmentationConfigBuilder};
 pub use session::{
     Gap, Sample, SessionState, Source, TrackingSession, TrackingSessionConfig,
     TrackingSessionConfigBuilder,
