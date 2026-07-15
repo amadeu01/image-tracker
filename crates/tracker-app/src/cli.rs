@@ -27,6 +27,9 @@ pub struct TrackArgs {
     /// `--search-radius`, `--min-score`, `--update-threshold`,
     /// `--coast-limit`. Unset fields fall back to `tracking`'s defaults.
     pub tuning: tracking::TrackerTuning,
+    /// `--tracker auto|template|color` (task 4.3): which tracker to run.
+    /// Defaults to `Auto` (suggest from the seed patch).
+    pub tracker_selection: tracking::TrackerSelection,
 }
 
 /// Everything that can go wrong parsing CLI args, probing, tracking, or
@@ -41,6 +44,7 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
     let mut seed: Option<Point> = None;
     let mut out_dir: Option<PathBuf> = None;
     let mut tuning = tracking::TrackerTuning::default();
+    let mut tracker_selection = tracking::TrackerSelection::default();
 
     let mut i = 0;
     while i < args.len() {
@@ -94,6 +98,11 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
                     Some(v.parse().map_err(|_| format!("bad --coast-limit: {v}"))?);
                 i += 2;
             }
+            "--tracker" => {
+                let v = args.get(i + 1).ok_or("--tracker needs a value")?;
+                tracker_selection = v.parse()?;
+                i += 2;
+            }
             other if video_path.is_none() && !other.starts_with("--") => {
                 video_path = Some(PathBuf::from(other));
                 i += 1;
@@ -108,6 +117,7 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
         seed: seed.ok_or("missing --seed")?,
         out_dir: out_dir.ok_or("missing --out")?,
         tuning,
+        tracker_selection,
     })
 }
 
@@ -131,6 +141,8 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
         seed_position: args.seed,
         tracker_config: tracking::tracker_config(args.tuning),
         session_config: tracking::session_config(args.tuning),
+        tracker_selection: args.tracker_selection,
+        color_tracker_config: tracking::default_color_tracker_config(),
     });
 
     // Headless: no UI to place a new seed on NeedsReseed. Best-effort
@@ -305,6 +317,52 @@ mod tests {
         assert_eq!(parsed.tuning.min_score, None);
         assert_eq!(parsed.tuning.update_threshold, None);
         assert_eq!(parsed.tuning.coast_limit, None);
+        assert_eq!(parsed.tracker_selection, tracking::TrackerSelection::Auto);
+    }
+
+    #[test]
+    fn parses_tracker_selection_flag() {
+        for (flag, expected) in [
+            ("auto", tracking::TrackerSelection::Auto),
+            ("template", tracking::TrackerSelection::Template),
+            ("color", tracking::TrackerSelection::Color),
+        ] {
+            let args: Vec<String> = vec![
+                "video.mp4",
+                "--seed-frame",
+                "0",
+                "--seed",
+                "1,2",
+                "--out",
+                "out",
+                "--tracker",
+                flag,
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect();
+            let parsed = parse_track_args(&args).unwrap();
+            assert_eq!(parsed.tracker_selection, expected);
+        }
+    }
+
+    #[test]
+    fn bad_tracker_selection_flag_is_an_error() {
+        let args: Vec<String> = vec![
+            "video.mp4",
+            "--seed-frame",
+            "0",
+            "--seed",
+            "1,2",
+            "--out",
+            "out",
+            "--tracker",
+            "bogus",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(parse_track_args(&args).is_err());
     }
 
     #[test]

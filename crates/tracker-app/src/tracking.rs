@@ -15,8 +15,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use tracker_core::{
-    BarPath, Frame, FrameSource, Point, SessionState, Source as SampleSource, TemplateTracker,
-    TemplateTrackerConfig, Timebase, TrackingSession, TrackingSessionConfig,
+    BarPath, ColorModel, ColorModelConfig, ColorTracker, ColorTrackerConfig, Frame, FrameSource,
+    Point, SessionState, Source as SampleSource, StepOutcome, TemplateTracker,
+    TemplateTrackerConfig, Timebase, Tracker, TrackerKind, TrackerSuggestionConfig, TrackingSession,
+    TrackingSessionConfig,
 };
 
 use crate::ffmpeg_source::FfmpegFrameSource;
@@ -29,6 +31,48 @@ pub const DEFAULT_SEARCH_RADIUS: u32 = 30;
 pub const DEFAULT_MIN_SCORE: f64 = 0.4;
 pub const DEFAULT_UPDATE_THRESHOLD: f64 = 0.7;
 pub const DEFAULT_COAST_LIMIT: u32 = 5;
+
+/// Which tracker `run_tracking_worker` should use once it has decoded the
+/// seed frame (task 4.3): `Auto` runs `tracker_core::suggest_tracker` on the
+/// seed patch and logs the chosen kind; `Template`/`Color` force a specific
+/// tracker regardless of the seed's appearance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrackerSelection {
+    #[default]
+    Auto,
+    Template,
+    Color,
+}
+
+impl std::str::FromStr for TrackerSelection {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "auto" => Ok(TrackerSelection::Auto),
+            "template" => Ok(TrackerSelection::Template),
+            "color" => Ok(TrackerSelection::Color),
+            other => Err(format!("bad --tracker (expected auto|template|color): {other}")),
+        }
+    }
+}
+
+/// Either tracker (4.2/4.3), so a `TrackingSession` can drive whichever one
+/// was resolved for a run without the session itself needing to know which.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnyTracker {
+    Template(TemplateTracker),
+    Color(ColorTracker),
+}
+
+impl Tracker for AnyTracker {
+    fn step(&mut self, frame: &Frame, last_pos: Point) -> StepOutcome {
+        match self {
+            AnyTracker::Template(t) => t.step(frame, last_pos),
+            AnyTracker::Color(t) => t.step(frame, last_pos),
+        }
+    }
+}
 
 /// Tunable overrides for `default_tracker_config`/`default_session_config`,
 /// one field per CLI flag (3.6): `--patch-radius`, `--search-radius`,
@@ -51,6 +95,14 @@ pub fn default_tracker_config() -> TemplateTrackerConfig {
 /// Builds a `TrackingSessionConfig` from the module's default consts.
 pub fn default_session_config() -> TrackingSessionConfig {
     session_config(TrackerTuning::default())
+}
+
+/// Builds a `ColorTrackerConfig` using its own module defaults (search
+/// radius 25, min pixels 5) — the color path doesn't currently expose CLI
+/// tuning flags of its own (4.3 is about *choosing* the tracker, not
+/// re-tuning it).
+pub fn default_color_tracker_config() -> ColorTrackerConfig {
+    ColorTrackerConfig::builder().build()
 }
 
 /// Builds a `TemplateTrackerConfig`, using `tuning`'s overrides where set and
@@ -226,6 +278,10 @@ pub struct TrackingJob {
     pub seed_position: Point,
     pub tracker_config: TemplateTrackerConfig,
     pub session_config: TrackingSessionConfig,
+    /// Which tracker to use once the seed frame is decoded (task 4.3).
+    pub tracker_selection: TrackerSelection,
+    /// `ColorTracker` tuning, used only when the resolved kind is `Color`.
+    pub color_tracker_config: ColorTrackerConfig,
 }
 
 /// Spawns a background thread that tracks from `job.seed_position` (placed
@@ -278,6 +334,8 @@ fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx
         seed_position,
         tracker_config,
         session_config,
+        tracker_selection,
+        color_tracker_config,
     } = job;
     let video_path: &Path = &video_path;
 
@@ -308,14 +366,46 @@ fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx
         }
     };
 
-    let tracker = match TemplateTracker::new(&seed_frame, seed_position, tracker_config) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!(error = ?e, "seed patch out of bounds");
-            let _ = tx.send(TrackingMessage::Error(format!(
-                "seed patch out of bounds: {e:?}"
-            )));
-            return;
+    let resolved_kind = match tracker_selection {
+        TrackerSelection::Template => TrackerKind::Template,
+        TrackerSelection::Color => TrackerKind::Color,
+        TrackerSelection::Auto => {
+            tracker_core::suggest_tracker(&seed_frame, seed_position, TrackerSuggestionConfig::default())
+        }
+    };
+    tracing::info!(
+        kind = ?resolved_kind,
+        auto = tracker_selection == TrackerSelection::Auto,
+        "tracker kind resolved"
+    );
+
+    let tracker = match resolved_kind {
+        TrackerKind::Template => match TemplateTracker::new(&seed_frame, seed_position, tracker_config) {
+            Ok(t) => AnyTracker::Template(t),
+            Err(e) => {
+                tracing::error!(error = ?e, "seed patch out of bounds");
+                let _ = tx.send(TrackingMessage::Error(format!(
+                    "seed patch out of bounds: {e:?}"
+                )));
+                return;
+            }
+        },
+        TrackerKind::Color => {
+            match ColorModel::learn(
+                &seed_frame,
+                seed_position,
+                tracker_config.patch_radius(),
+                ColorModelConfig::default(),
+            ) {
+                Ok(model) => AnyTracker::Color(ColorTracker::new(model, color_tracker_config)),
+                Err(e) => {
+                    tracing::error!(error = ?e, "seed patch out of bounds for color model");
+                    let _ = tx.send(TrackingMessage::Error(format!(
+                        "seed patch out of bounds: {e:?}"
+                    )));
+                    return;
+                }
+            }
         }
     };
 

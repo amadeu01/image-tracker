@@ -14,6 +14,7 @@ pub mod metric;
 pub mod overlay;
 pub mod patch;
 pub mod session;
+pub mod suggest;
 pub mod tracker;
 pub mod video_sink;
 
@@ -31,6 +32,9 @@ pub use patch::{extract_patch, Patch};
 pub use session::{
     Gap, Sample, SessionState, Source, TrackingSession, TrackingSessionConfig,
     TrackingSessionConfigBuilder,
+};
+pub use suggest::{
+    suggest_tracker, TrackerKind, TrackerSuggestionConfig, TrackerSuggestionConfigBuilder,
 };
 pub use tracker::{
     StepOutcome, TemplateTracker, TemplateTrackerConfig, TemplateTrackerConfigBuilder,

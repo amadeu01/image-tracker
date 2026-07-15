@@ -77,6 +77,13 @@ pub struct AppState {
     /// The completed `BarPath`, once a tracking run reaches clean
     /// end-of-video. Consumed by milestone 3 (overlay render / export).
     pub bar_path: Option<tracker_core::BarPath>,
+    /// The tracker `suggest_tracker` recommends for the current Seed (task
+    /// 4.3), computed as soon as the Seed is placed so the status bar can
+    /// tell the user which tracker Track will use before they click it.
+    /// `None` until a Seed has been placed and a frame is available to
+    /// evaluate (`TrackerApp::ensure_texture`/click handler sets this via
+    /// `note_seed_suggestion`, since `AppState` alone has no frame access).
+    pub suggested_tracker: Option<tracker_core::TrackerKind>,
 }
 
 impl AppState {
@@ -93,6 +100,7 @@ impl AppState {
             tracking: None,
             tracking_run: TrackingRunState::default(),
             bar_path: None,
+            suggested_tracker: None,
         }
     }
 
@@ -147,6 +155,16 @@ impl AppState {
             y = position.y,
             "seed placed"
         );
+    }
+
+    /// Records the tracker `suggest_tracker` recommends for the just-placed
+    /// Seed (task 4.3), logging the decision. Called by `TrackerApp` right
+    /// after `place_seed`, once it has the corresponding frame's pixels
+    /// available from its cache — `AppState` itself never touches decoded
+    /// frames.
+    pub fn note_seed_suggestion(&mut self, kind: tracker_core::TrackerKind) {
+        tracing::info!(kind = ?kind, "tracker auto-suggested");
+        self.suggested_tracker = Some(kind);
     }
 
     /// Record a calibration click at the given image-pixel position. Only
@@ -206,10 +224,17 @@ impl AppState {
             },
         };
         let seed_part = match &self.seed {
-            Some(seed) => format!(
-                "seed: ({:.1}, {:.1}) @ frame {}",
-                seed.position.x, seed.position.y, seed.frame_index
-            ),
+            Some(seed) => {
+                let suggestion = match self.suggested_tracker {
+                    Some(tracker_core::TrackerKind::Color) => " (suggested: Color)",
+                    Some(tracker_core::TrackerKind::Template) => " (suggested: Template)",
+                    None => "",
+                };
+                format!(
+                    "seed: ({:.1}, {:.1}) @ frame {}{suggestion}",
+                    seed.position.x, seed.position.y, seed.frame_index
+                )
+            }
             None => "seed: none".to_string(),
         };
         let calibration_part = match &self.calibration {
@@ -267,6 +292,8 @@ impl AppState {
             seed_position: seed.position,
             tracker_config: tracking::default_tracker_config(),
             session_config: tracking::default_session_config(),
+            tracker_selection: tracking::TrackerSelection::Auto,
+            color_tracker_config: tracking::default_color_tracker_config(),
         });
         self.tracking = Some(handle);
         self.tracking_run = TrackingRunState::started();
@@ -536,6 +563,16 @@ impl eframe::App for TrackerApp {
                         ) {
                             if self.state.mode == Mode::PlacingSeed {
                                 self.state.place_seed(image_px);
+                                if let Some(seed) = self.state.seed {
+                                    if let Ok(frame) = self.cache.get(seed.frame_index) {
+                                        let kind = tracker_core::suggest_tracker(
+                                            &frame,
+                                            seed.position,
+                                            tracker_core::TrackerSuggestionConfig::default(),
+                                        );
+                                        self.state.note_seed_suggestion(kind);
+                                    }
+                                }
                             } else if calibrating {
                                 self.state.place_calibration_point(image_px);
                             }

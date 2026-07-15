@@ -76,7 +76,7 @@ Cargo workspace:
 |----|------|------|--------|--------------|
 | 4.1 | `ColorModel` learned from seed patch (HSV median ± tolerance) | S | done | sonnet-5, 2026-07-15 |
 | 4.2 | Color Tracker: threshold + centroid within search window | M | done | sonnet-5, 2026-07-15 |
-| 4.3 | Tracker auto-suggestion: seed color distinct from background? → Color, else Template | S | todo | |
+| 4.3 | Tracker auto-suggestion: seed color distinct from background? → Color, else Template | S | done | sonnet-5, 2026-07-15 |
 
 ## Milestone 5 — kinematics + reps
 
