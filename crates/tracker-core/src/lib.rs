@@ -6,6 +6,7 @@
 pub mod bar_path;
 pub mod calibration;
 pub mod color;
+pub mod color_tracker;
 pub mod export;
 pub mod frame_source;
 pub mod geometry;
@@ -19,6 +20,7 @@ pub mod video_sink;
 pub use bar_path::{BarPath, PathPoint, Timebase, TimebaseError};
 pub use calibration::{Calibration, CalibrationError};
 pub use color::{rgb_to_hsv, ColorModel, ColorModelConfig, ColorModelError};
+pub use color_tracker::{ColorTracker, ColorTrackerConfig, ColorTrackerConfigBuilder};
 pub use export::{export_csv, export_json};
 pub use frame_source::FrameSource;
 pub use video_sink::VideoSink;
@@ -32,5 +34,5 @@ pub use session::{
 };
 pub use tracker::{
     StepOutcome, TemplateTracker, TemplateTrackerConfig, TemplateTrackerConfigBuilder,
-    TemplateTrackerError,
+    TemplateTrackerError, Tracker,
 };

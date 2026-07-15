@@ -117,6 +117,20 @@ pub enum StepOutcome {
     Miss,
 }
 
+/// Anything that, given a frame and the last known position, produces a
+/// `StepOutcome` for the current frame (see CONTEXT.md, "Tracker"). Lets
+/// `TrackingSession`'s gap/coast logic (1.6) drive either a `TemplateTracker`
+/// or a `ColorTracker` (4.2) interchangeably.
+pub trait Tracker {
+    fn step(&mut self, frame: &Frame, last_pos: Point) -> StepOutcome;
+}
+
+impl Tracker for TemplateTracker {
+    fn step(&mut self, frame: &Frame, last_pos: Point) -> StepOutcome {
+        TemplateTracker::step(self, frame, last_pos)
+    }
+}
+
 /// Tracks a template patch (captured from a seed point on a reference
 /// frame) across successive frames by searching a window centered on the
 /// last known position and returning the best ZNCC match.

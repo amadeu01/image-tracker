@@ -7,7 +7,7 @@
 //! re-places the Seed.
 
 use crate::geometry::{Frame, Point};
-use crate::tracker::{StepOutcome, TemplateTracker};
+use crate::tracker::{StepOutcome, Tracker};
 
 /// Configuration for a `TrackingSession`, built via
 /// `TrackingSessionConfig::builder()`.
@@ -102,8 +102,8 @@ pub enum SessionState {
 /// the session (`SessionState::NeedsReseed`) until the caller calls
 /// `reseed`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TrackingSession {
-    tracker: TemplateTracker,
+pub struct TrackingSession<T: Tracker> {
+    tracker: T,
     config: TrackingSessionConfig,
     state: SessionState,
     last_pos: Point,
@@ -115,11 +115,11 @@ pub struct TrackingSession {
     miss_count: u32,
 }
 
-impl TrackingSession {
+impl<T: Tracker> TrackingSession<T> {
     /// Starts a session with `tracker` seeded at `seed_frame_index` and
     /// `seed` position (recorded as the first `Tracked` sample).
     pub fn new(
-        tracker: TemplateTracker,
+        tracker: T,
         seed_frame_index: u64,
         seed: Point,
         config: TrackingSessionConfig,
@@ -251,7 +251,7 @@ impl TrackingSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracker::TemplateTrackerConfig;
+    use crate::tracker::{TemplateTracker, TemplateTrackerConfig};
 
     /// Builds a frame with a bright `size`x`size` square (value 220) on a
     /// dark background (value 20), with the square's top-left corner at
@@ -283,7 +283,7 @@ mod tests {
     const W: u32 = 60;
     const H: u32 = 40;
 
-    fn make_session(coast_limit: u32) -> TrackingSession {
+    fn make_session(coast_limit: u32) -> TrackingSession<TemplateTracker> {
         let ref_frame = frame_with_square(W, H, 10, 10, 4);
         let seed = Point::new(12.0, 12.0);
         let tracker = TemplateTracker::new(&ref_frame, seed, plain_config()).unwrap();
