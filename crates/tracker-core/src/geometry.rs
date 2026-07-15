@@ -80,6 +80,19 @@ impl Frame {
     pub fn rgb(&self) -> &[u8] {
         &self.rgb
     }
+
+    /// Sets the RGB triple at `(x, y)`. Silently does nothing if `(x, y)`
+    /// is out of bounds — callers doing pixel-math drawing (lines, markers)
+    /// routinely compute off-frame coordinates and must never panic.
+    pub fn set_pixel(&mut self, x: i64, y: i64, rgb: [u8; 3]) {
+        if x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height {
+            return;
+        }
+        let idx = (y as usize * self.width as usize + x as usize) * 3;
+        self.rgb[idx] = rgb[0];
+        self.rgb[idx + 1] = rgb[1];
+        self.rgb[idx + 2] = rgb[2];
+    }
 }
 
 #[cfg(test)]
@@ -125,6 +138,24 @@ mod tests {
         let frame = Frame::new(2, 1, vec![0; 6]).unwrap();
         assert_eq!(frame.pixel(2, 0), None);
         assert_eq!(frame.pixel(0, 1), None);
+    }
+
+    #[test]
+    fn frame_set_pixel_writes_rgb_triple() {
+        let mut frame = Frame::new(2, 1, vec![0; 6]).unwrap();
+        frame.set_pixel(1, 0, [7, 8, 9]);
+        assert_eq!(frame.pixel(1, 0), Some([7, 8, 9]));
+        assert_eq!(frame.pixel(0, 0), Some([0, 0, 0]));
+    }
+
+    #[test]
+    fn frame_set_pixel_out_of_bounds_does_not_panic() {
+        let mut frame = Frame::new(2, 1, vec![0; 6]).unwrap();
+        frame.set_pixel(-1, 0, [1, 2, 3]);
+        frame.set_pixel(2, 0, [1, 2, 3]);
+        frame.set_pixel(0, 1, [1, 2, 3]);
+        frame.set_pixel(i64::MAX, i64::MAX, [1, 2, 3]);
+        assert_eq!(frame.pixel(0, 0), Some([0, 0, 0]));
     }
 
     #[test]

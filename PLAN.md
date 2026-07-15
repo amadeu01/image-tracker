@@ -42,7 +42,7 @@ Cargo workspace:
 
 | ID | Task | Size | Status | Observations |
 |----|------|------|--------|--------------|
-| 3.1 | Overlay renderer: path polyline + current point + legend onto frames | M | todo | |
+| 3.1 | Overlay renderer: path polyline + current point + legend onto frames | M | done (sonnet-5, 2026-07-15) | `overlay.rs` in tracker-core (pixel math on domain types, no UI dep, and 3.2's MP4 encode needs the same burned-in pixels egui can't provide); `OverlayStyle::builder()` (colors/thickness/marker radius/`show_legend`) mirrors `TemplateTrackerConfig`'s builder convention. `Frame::set_pixel` added to geometry.rs (bounds-checked, silently no-ops out of range — never panics). Bresenham line with square-stamp thickness; segments touching an `Interpolated` point render in `gap_color` instead of `path_color`. Legend is swatches-only, no text/bitmap font (documented in `OverlayStyle`'s doc comment) — a future task can composite real text once a text-rendering adapter exists. `render_overlay` filters `BarPath::points()` to `frame_index <= current_frame_index`, so it naturally supports being called per-frame while encoding (3.2). |
 | 3.2 | ffmpeg encode adapter: frames → MP4 (`VideoSink` port) | S | todo | |
 | 3.3 | CSV/JSON export: `t, x_px, y_px, x_m, y_m, gap_flag` | S | todo | |
 | 3.4 | End-to-end run on each video in `test_videos/`; record results here | M | todo | |

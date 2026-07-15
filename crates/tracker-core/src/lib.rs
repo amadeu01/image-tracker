@@ -8,6 +8,7 @@ pub mod calibration;
 pub mod frame_source;
 pub mod geometry;
 pub mod metric;
+pub mod overlay;
 pub mod patch;
 pub mod session;
 pub mod tracker;
@@ -17,6 +18,7 @@ pub use calibration::{Calibration, CalibrationError};
 pub use frame_source::FrameSource;
 pub use geometry::{Frame, FrameError, Point};
 pub use metric::{CorrelationMetric, Zncc};
+pub use overlay::{render_overlay, Color, OverlayStyle, OverlayStyleBuilder};
 pub use patch::{extract_patch, Patch};
 pub use session::{
     Gap, Sample, SessionState, Source, TrackingSession, TrackingSessionConfig,
