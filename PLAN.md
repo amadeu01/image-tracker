@@ -9,6 +9,9 @@ Decisions and vocabulary: see [CONTEXT.md](CONTEXT.md) and [docs/adr/](docs/adr/
 - One task = one commit (or a few small ones). Update this file's status column in the same commit that finishes the task.
 - Status values: `todo` · `in-progress (worker)` · `done (worker, date)`. Observations column for surprises/decisions.
 
+- **Quality gate**: at every milestone completion (and any major change), fable-5 runs `/brooks-audit` and records findings in the review log; serious findings become tasks before the next milestone starts.
+- **Versioning**: bump workspace version and create an annotated git tag at each milestone completion (`v0.1.0` = milestone 1, `v0.2.0` = milestone 2, …). Tag only after the audit gate passes.
+
 ## Roles
 
 - **sonnet-5** — worker. Implements one task per run, TDD, one commit per task, updates its PLAN.md row.
@@ -85,3 +88,11 @@ Cargo workspace:
 |----|------|------|--------|--------------|
 | 6.1 | Hue histogram over sampled frames | S | todo | |
 | 6.2 | Recommend top marker hues (max distance from scene hues), CLI/UI report | S | todo | |
+
+## Milestone 7 — usability, docs & distribution
+
+| ID | Task | Size | Status | Observations |
+|----|------|------|--------|--------------|
+| 7.1 | RUNNING.md: how to run (dev: `cargo run`; user: built binary), install on own machine (`cargo install --path`), prerequisites (ffmpeg/ffprobe), and a **manual test script** — step-by-step checklist per feature (open video, scrub, seed, calibrate, track, reseed, export) with expected results, used to validate releases by hand | S | todo | |
+| 7.2 | Side panel UI: use the empty space right of the video for (a) a compact usage guide (steps with current-step highlight), (b) live debug/status panel — tracker state, current score, seed/calibration values, last errors with timestamps. Clean, readable design (grouped sections, color-coded state) replacing the single cramped bottom line | M | todo | Requested by user after first GUI session: "hard to see what is happening in the very bottom" |
+| 7.3 | Distribution: GitHub release workflow (tagged builds, `cargo-dist` or manual artifacts for Linux + macOS), install instructions for non-developers in README | M | todo | |
