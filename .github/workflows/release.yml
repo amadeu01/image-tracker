@@ -1,0 +1,181 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e-full:
+    name: e2e (all test_videos)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --release
+        run: cargo build --workspace --release
+
+      - name: Run e2e track on v1 (14.03.30)
+        run: |
+          cargo run --release -p tracker-app -- track \
+            "test_videos/WhatsApp Video 2026-07-05 at 14.03.30.mp4" \
+            --seed-frame 789 --seed 310,280 --out out/release-e2e/v1
+
+      - name: Run e2e track on v2 (14.11.05)
+        run: |
+          cargo run --release -p tracker-app -- track \
+            "test_videos/WhatsApp Video 2026-07-05 at 14.11.05.mp4" \
+            --seed-frame 1200 --seed 290,390 --out out/release-e2e/v2
+
+      - name: Run e2e track on v3 (22.55.51)
+        run: |
+          cargo run --release -p tracker-app -- track \
+            "test_videos/WhatsApp Video 2026-07-08 at 22.55.51.mp4" \
+            --seed-frame 300 --seed 260,120 --out out/release-e2e/v3
+
+      - name: Run e2e track on v4 (22.56.32)
+        run: |
+          cargo run --release -p tracker-app -- track \
+            "test_videos/WhatsApp Video 2026-07-08 at 22.56.32.mp4" \
+            --seed-frame 300 --seed 300,150 --out out/release-e2e/v4
+
+      - name: Assert CSV row-count floors
+        run: |
+          set -euo pipefail
+
+          assert_min_rows() {
+            local dir="$1" min="$2"
+            local csv
+            csv=$(find "$dir" -maxdepth 1 -name '*.csv' | head -n1)
+            if [ -z "$csv" ]; then
+              echo "no CSV output found under $dir"
+              exit 1
+            fi
+            local rows
+            rows=$(($(wc -l < "$csv") - 1))
+            echo "$csv: $rows data rows (floor $min)"
+            if [ "$rows" -lt "$min" ]; then
+              echo "expected >= $min data rows in $csv, got $rows"
+              exit 1
+            fi
+          }
+
+          assert_min_rows out/release-e2e/v1 1000
+          assert_min_rows out/release-e2e/v2 800
+          assert_min_rows out/release-e2e/v3 2500
+          assert_min_rows out/release-e2e/v4 3000
+
+      - name: Upload e2e outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-e2e-out
+          path: out/release-e2e
+          retention-days: 7
+
+  build:
+    name: build (${{ matrix.os }})
+    needs: e2e-full
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --release
+        run: cargo build --release -p tracker-app --target ${{ matrix.target }}
+
+      - name: Package tarball
+        id: package
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          pkg="image-tracker-${version}-${{ matrix.target }}"
+          mkdir -p "$pkg"
+          cp "target/${{ matrix.target }}/release/tracker-app" "$pkg/"
+          cp README.md LICENSE "$pkg/"
+          tar -czf "${pkg}.tar.gz" "$pkg"
+          echo "asset=${pkg}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.asset }}
+          path: ${{ steps.package.outputs.asset }}
+          retention-days: 7
+
+  release:
+    name: publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "image-tracker-*"
+          path: dist
+          merge-multiple: true
+
+      - name: List downloaded assets
+        run: ls -la dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true
+          body: |
+            ## Requirements
+
+            These binaries require `ffmpeg` to be installed and available on
+            `PATH` at runtime (decoding/encoding is shelled out to it, it is
+            not statically linked in).
+
+            ## macOS: unsigned binary
+
+            The macOS binary is not code-signed or notarized. Gatekeeper will
+            block it on first launch. To run it:
+
+            - Right-click (or Control-click) the `tracker-app` binary in
+              Finder and choose "Open", then confirm in the dialog that
+              appears, **or**
+            - Remove the quarantine attribute from a terminal:
+
+              ```
+              xattr -d com.apple.quarantine tracker-app
+              ```
