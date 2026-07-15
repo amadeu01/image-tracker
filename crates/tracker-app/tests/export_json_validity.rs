@@ -29,7 +29,7 @@ fn sample_path() -> BarPath {
 #[test]
 fn json_export_parses_and_has_expected_shape_without_calibration() {
     let path = sample_path();
-    let json = export_json(&path, None);
+    let json = export_json(&path, None, None);
     let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     let arr = value.as_array().expect("top-level array");
     assert_eq!(arr.len(), 2);
@@ -49,7 +49,7 @@ fn json_export_parses_and_has_expected_shape_without_calibration() {
 fn json_export_parses_and_has_meter_columns_with_calibration() {
     let path = sample_path();
     let cal = Calibration::new(Point::new(0.0, 0.0), Point::new(200.0, 0.0), 0.45).unwrap();
-    let json = export_json(&path, Some(&cal));
+    let json = export_json(&path, Some(&cal), None);
     let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     let arr = value.as_array().expect("top-level array");
 

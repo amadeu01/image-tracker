@@ -208,9 +208,9 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
     let json_path = args.out_dir.join(format!("{stem}.json"));
     let overlay_path = args.out_dir.join(format!("{stem}.overlay.mp4"));
 
-    std::fs::write(&csv_path, export_csv(&bar_path, None))
+    std::fs::write(&csv_path, export_csv(&bar_path, None, None))
         .map_err(|e| format!("failed to write {}: {e}", csv_path.display()))?;
-    std::fs::write(&json_path, export_json(&bar_path, None))
+    std::fs::write(&json_path, export_json(&bar_path, None, None))
         .map_err(|e| format!("failed to write {}: {e}", json_path.display()))?;
     tracing::info!(
         csv_path = %csv_path.display(),

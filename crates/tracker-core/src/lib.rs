@@ -17,6 +17,7 @@ pub mod session;
 pub mod smoothing;
 pub mod suggest;
 pub mod tracker;
+pub mod velocity;
 pub mod video_sink;
 
 pub use bar_path::{BarPath, PathPoint, Timebase, TimebaseError};
@@ -41,4 +42,5 @@ pub use tracker::{
     StepOutcome, TemplateTracker, TemplateTrackerConfig, TemplateTrackerConfigBuilder,
     TemplateTrackerError, Tracker,
 };
+pub use velocity::{velocity_series, VelocityError, VelocitySample, VelocityUnit};
 pub use video_sink::VideoSink;
