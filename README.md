@@ -44,6 +44,8 @@ Early development — core tracking (adaptive template + color trackers), GUI wi
 - Rust (stable)
 - `ffmpeg` and `ffprobe` on your `PATH` (decode/encode is done via subprocess — see [ADR 0001](docs/adr/0001-shell-out-to-ffmpeg.md))
 
+See [RUNNING.md](RUNNING.md) for full run/install instructions (dev, end user, `cargo install`) and a manual test script used to validate releases.
+
 ```bash
 git clone https://github.com/amadeu01/image-tracker.git
 cd image-tracker
