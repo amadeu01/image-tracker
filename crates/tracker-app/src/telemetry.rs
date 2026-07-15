@@ -115,6 +115,87 @@ fn env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
 }
 
+/// Installs a panic hook that logs the panic message, source location, and a
+/// captured backtrace at `error` level through `tracing` before chaining to
+/// the previous (default) hook so the usual stderr output still happens.
+///
+/// Call this after [`init`] so the log layers are already installed and the
+/// panic gets a chance to reach the file layer.
+///
+/// # Why this still gets the log line out
+///
+/// This hook runs synchronously *before* the unwind (or abort, if the panic
+/// happens while already unwinding, or the process is built with
+/// `panic = "abort"`) — so the `tracing::error!` call below always executes.
+/// What's not guaranteed is that the *file* layer's non-blocking writer has
+/// flushed its background thread before the process actually exits: for the
+/// main thread, a panic unwinds up through `main` and the `TelemetryGuard`
+/// held there is dropped on the way out, which blocks until the writer
+/// thread drains its queue. A panic on a non-main thread with the default
+/// `panic = "unwind"` strategy only kills that thread, so the process (and
+/// its guard) lives on and flushes normally on eventual exit; only an abort
+/// (`panic = "abort"`, or a double panic) skips unwinding entirely, in which
+/// case the OS may still deliver already-buffered writer output, but this is
+/// not guaranteed — hence why the hook logs synchronously via `tracing`
+/// *before* any abort/unwind proceeds, rather than relying on drop order.
+pub fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let (message, location) = panic_report_fields(info);
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!(
+            panic.message = %message,
+            panic.location = %location,
+            panic.backtrace = %backtrace,
+            "tracker-app panicked"
+        );
+        previous(info);
+    }));
+}
+
+/// Extracts a human-readable message and `file:line:col` location from a
+/// `PanicHookInfo`. Factored out from [`install_panic_hook`] so the
+/// formatting is unit-testable without triggering an actual panic.
+fn panic_report_fields(info: &std::panic::PanicHookInfo<'_>) -> (String, String) {
+    let message = if let Some(s) = info.payload().downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = info.payload().downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    };
+    let location = info
+        .location()
+        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+        .unwrap_or_else(|| "<unknown location>".to_string());
+    (message, location)
+}
+
+/// Returns the first line of `ffmpeg -version` output (e.g. `ffmpeg version
+/// 6.1.1 Copyright (c) 2000-2023 the FFmpeg developers`), or `"unavailable"`
+/// if `ffmpeg` isn't on `PATH`, fails to run, or produces no output. Used by
+/// the startup banner; never fails startup itself.
+pub fn ffmpeg_version_summary() -> String {
+    match std::process::Command::new("ffmpeg").arg("-version").output() {
+        Ok(output) => first_line_or_unavailable(&output.stdout),
+        Err(_) => "unavailable".to_string(),
+    }
+}
+
+/// Pure helper: extracts the first line of raw `ffmpeg -version` stdout
+/// bytes, trimmed, falling back to `"unavailable"` if empty or not valid
+/// UTF-8. Split out from [`ffmpeg_version_summary`] for unit testing without
+/// spawning a process.
+fn first_line_or_unavailable(stdout: &[u8]) -> String {
+    match std::str::from_utf8(stdout) {
+        Ok(text) => match text.lines().next() {
+            Some(line) if !line.trim().is_empty() => line.trim().to_string(),
+            _ => "unavailable".to_string(),
+        },
+        Err(_) => "unavailable".to_string(),
+    }
+}
+
 /// `tracing_appender::rolling` doesn't expose the exact filename it'll
 /// write today (it's date-suffixed internally), so this reports the
 /// directory it writes into, which is what users need to find their logs.
@@ -135,5 +216,33 @@ mod tests {
     #[test]
     fn log_dir_is_stable_across_calls() {
         assert_eq!(log_dir(), log_dir());
+    }
+
+    #[test]
+    fn first_line_or_unavailable_extracts_first_line() {
+        let stdout = b"ffmpeg version 6.1.1 Copyright (c) 2000-2023 the FFmpeg developers\nbuilt with gcc\n";
+        assert_eq!(
+            first_line_or_unavailable(stdout),
+            "ffmpeg version 6.1.1 Copyright (c) 2000-2023 the FFmpeg developers"
+        );
+    }
+
+    #[test]
+    fn first_line_or_unavailable_reports_unavailable_on_empty_output() {
+        assert_eq!(first_line_or_unavailable(b""), "unavailable");
+        assert_eq!(first_line_or_unavailable(b"\n\n"), "unavailable");
+    }
+
+    #[test]
+    fn first_line_or_unavailable_reports_unavailable_on_invalid_utf8() {
+        assert_eq!(first_line_or_unavailable(&[0xff, 0xfe, 0x00]), "unavailable");
+    }
+
+    #[test]
+    fn ffmpeg_version_summary_never_panics() {
+        // Whether or not ffmpeg is installed in the test environment, this
+        // must return a plain string rather than failing.
+        let summary = ffmpeg_version_summary();
+        assert!(!summary.is_empty());
     }
 }

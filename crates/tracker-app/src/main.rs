@@ -15,10 +15,22 @@ use tracker_app::{app, cli, ffprobe, telemetry};
 
 fn main() {
     let (_telemetry_guard, log_path) = telemetry::init();
+    telemetry::install_panic_hook();
+
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let ffmpeg_version = telemetry::ffmpeg_version_summary();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
+        os,
+        arch,
+        ffmpeg_version = %ffmpeg_version,
         log_path = ?log_path,
         "tracker-app starting"
+    );
+    println!(
+        "tracker-app {} ({os}/{arch}); ffmpeg: {ffmpeg_version}",
+        env!("CARGO_PKG_VERSION")
     );
     match &log_path {
         Some(p) => println!("logging to {}", p.display()),
