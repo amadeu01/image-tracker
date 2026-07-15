@@ -11,7 +11,9 @@
 use std::path::{Path, PathBuf};
 
 use tracker_core::{
-    export_csv, export_json, render_overlay, OverlayStyle, Point, Source, VideoSink,
+    all_rep_metrics, export_csv, export_json, export_reps_csv, export_reps_json, render_overlay,
+    render_rep_bottoms, segment_reps, velocity_series, Calibration, OverlayStyle, Point,
+    RepSegmentationConfig, Source, VideoSink,
 };
 
 use crate::ffmpeg_sink::FfmpegVideoSink;
@@ -32,6 +34,12 @@ pub struct TrackArgs {
     /// `--tracker auto|template|color` (task 4.3): which tracker to run.
     /// Defaults to `Auto` (suggest from the seed patch).
     pub tracker_selection: tracking::TrackerSelection,
+    /// Optional calibration (task 5.4): `--cal x1,y1,x2,y2` (two points)
+    /// plus `--cal-length-m <meters>`, the known real-world distance
+    /// between them. When both are given, velocity/rep metrics are
+    /// computed in m/s/meters instead of px/s/px.
+    pub cal_points: Option<(Point, Point)>,
+    pub cal_length_m: Option<f64>,
 }
 
 /// Everything that can go wrong parsing CLI args, probing, tracking, or
@@ -47,6 +55,8 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
     let mut out_dir: Option<PathBuf> = None;
     let mut tuning = tracking::TrackerTuning::default();
     let mut tracker_selection = tracking::TrackerSelection::default();
+    let mut cal_points: Option<(Point, Point)> = None;
+    let mut cal_length_m: Option<f64> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -107,6 +117,22 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
                 tracker_selection = v.parse()?;
                 i += 2;
             }
+            "--cal" => {
+                let v = args.get(i + 1).ok_or("--cal needs a value (x1,y1,x2,y2)")?;
+                let parts: Vec<&str> = v.split(',').collect();
+                if parts.len() != 4 {
+                    return Err(format!("bad --cal (expected x1,y1,x2,y2): {v}"));
+                }
+                let nums: Result<Vec<f64>, _> = parts.iter().map(|p| p.trim().parse()).collect();
+                let nums: Vec<f64> = nums.map_err(|_| format!("bad --cal (non-numeric): {v}"))?;
+                cal_points = Some((Point::new(nums[0], nums[1]), Point::new(nums[2], nums[3])));
+                i += 2;
+            }
+            "--cal-length-m" => {
+                let v = args.get(i + 1).ok_or("--cal-length-m needs a value")?;
+                cal_length_m = Some(v.parse().map_err(|_| format!("bad --cal-length-m: {v}"))?);
+                i += 2;
+            }
             other if video_path.is_none() && !other.starts_with("--") => {
                 video_path = Some(PathBuf::from(other));
                 i += 1;
@@ -122,6 +148,8 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
         out_dir: out_dir.ok_or("missing --out")?,
         tuning,
         tracker_selection,
+        cal_points,
+        cal_length_m,
     })
 }
 
@@ -204,17 +232,69 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
         .and_then(|s| s.to_str())
         .unwrap_or("out");
 
+    // Optional calibration (task 5.4): both `--cal` and `--cal-length-m`
+    // must be given; a mismatched pair (one but not the other) is treated
+    // as "no calibration" rather than an error, since the CLI's job is to
+    // produce best-effort output, not fail a whole run over one flag.
+    let cal = match (args.cal_points, args.cal_length_m) {
+        (Some((a, b)), Some(len)) => match Calibration::new(a, b, len) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!("ignoring --cal: {e}");
+                None
+            }
+        },
+        _ => None,
+    };
+
+    // Velocity/rep metrics (task 5.2-5.4): best-effort -- a bar path too
+    // short to differentiate (e.g. a single point) just yields no
+    // velocity/reps rather than failing the whole run.
+    let velocity = velocity_series(bar_path.points(), 5, cal.as_ref()).ok();
+    // `RepSegmentationConfig`'s default `min_velocity` (5.0) is tuned for
+    // uncalibrated px/s data; m/s bar speeds are typically well under 1-2
+    // m/s, so with a `Calibration` the dead-band must be overridden much
+    // smaller (per `rep.rs`'s own doc comment) or every sample stays
+    // `Idle` and zero reps are ever detected.
+    let rep_config = if cal.is_some() {
+        RepSegmentationConfig::builder().min_velocity(0.03).build()
+    } else {
+        RepSegmentationConfig::default_config()
+    };
+    let reps = velocity
+        .as_ref()
+        .map(|v| segment_reps(v, rep_config))
+        .unwrap_or_default();
+    let metrics = velocity
+        .as_ref()
+        .map(|v| all_rep_metrics(&reps, v, bar_path.points(), cal.as_ref()))
+        .unwrap_or_default();
+
     let csv_path = args.out_dir.join(format!("{stem}.csv"));
     let json_path = args.out_dir.join(format!("{stem}.json"));
+    let reps_csv_path = args.out_dir.join(format!("{stem}.reps.csv"));
+    let reps_json_path = args.out_dir.join(format!("{stem}.reps.json"));
     let overlay_path = args.out_dir.join(format!("{stem}.overlay.mp4"));
 
-    std::fs::write(&csv_path, export_csv(&bar_path, None, None))
-        .map_err(|e| format!("failed to write {}: {e}", csv_path.display()))?;
-    std::fs::write(&json_path, export_json(&bar_path, None, None))
-        .map_err(|e| format!("failed to write {}: {e}", json_path.display()))?;
+    std::fs::write(
+        &csv_path,
+        export_csv(&bar_path, cal.as_ref(), velocity.as_deref()),
+    )
+    .map_err(|e| format!("failed to write {}: {e}", csv_path.display()))?;
+    std::fs::write(
+        &json_path,
+        export_json(&bar_path, cal.as_ref(), velocity.as_deref()),
+    )
+    .map_err(|e| format!("failed to write {}: {e}", json_path.display()))?;
+    std::fs::write(&reps_csv_path, export_reps_csv(&metrics))
+        .map_err(|e| format!("failed to write {}: {e}", reps_csv_path.display()))?;
+    std::fs::write(&reps_json_path, export_reps_json(&metrics))
+        .map_err(|e| format!("failed to write {}: {e}", reps_json_path.display()))?;
     tracing::info!(
         csv_path = %csv_path.display(),
         json_path = %json_path.display(),
+        reps_csv_path = %reps_csv_path.display(),
+        reps_json_path = %reps_json_path.display(),
         overlay_path = %overlay_path.display(),
         "wrote track exports"
     );
@@ -227,6 +307,7 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
         metadata.fps_num,
         metadata.fps_den,
         &bar_path,
+        &reps,
     )?;
 
     let found = bar_path
@@ -245,6 +326,26 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
         overlay_path.display(),
     );
 
+    for (i, m) in metrics.iter().enumerate() {
+        let unit = match m.unit {
+            tracker_core::VelocityUnit::PixelsPerSecond => "px/s",
+            tracker_core::VelocityUnit::MetersPerSecond => "m/s",
+        };
+        let depth_unit = if cal.is_some() { "m" } else { "px" };
+        println!(
+            "rep {i}: depth={:.3}{depth_unit} peak={:.3}{unit} mean={:.3}{unit} ({} interpolated sample(s) excluded)",
+            m.depth, m.peak_concentric_speed, m.mean_concentric_velocity, m.excluded_interpolated_samples
+        );
+    }
+    if metrics.is_empty() {
+        println!("(no reps detected)");
+    }
+    println!(
+        "reps -> {} / {}",
+        reps_csv_path.display(),
+        reps_json_path.display()
+    );
+
     Ok(())
 }
 
@@ -252,6 +353,7 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
 /// (`render_overlay`, 3.1) frame by frame, encoding the result via
 /// `FfmpegVideoSink` (3.2). Decodes only up to the last frame the path
 /// covers, not the whole video, since tracking may have stopped early.
+#[allow(clippy::too_many_arguments)]
 fn render_overlay_video(
     video_path: &Path,
     out_path: &Path,
@@ -260,12 +362,19 @@ fn render_overlay_video(
     fps_num: u64,
     fps_den: u64,
     bar_path: &tracker_core::BarPath,
+    reps: &[tracker_core::Rep],
 ) -> Result<(), CliError> {
     let last_frame = bar_path
         .points()
         .last()
         .map(|p| p.frame_index)
         .unwrap_or(bar_path.start_frame());
+
+    // `Rep`s index into whatever slice `segment_reps` was given, which the
+    // caller built from `velocity_series(bar_path.points(), ...)` -- one
+    // sample per point, same order. So `bar_path.points()`'s frame indices
+    // line up with `Rep::bottom` the same way the velocity slice's would.
+    let frame_indices: Vec<u64> = bar_path.points().iter().map(|p| p.frame_index).collect();
 
     let mut source = FfmpegFrameSource::spawn(video_path, width, height)
         .map_err(|e| format!("failed to spawn ffmpeg decoder: {e}"))?;
@@ -283,6 +392,14 @@ fn render_overlay_video(
             break;
         }
         render_overlay(&mut frame, bar_path, frame_index, &style);
+        render_rep_bottoms(
+            &mut frame,
+            bar_path,
+            reps,
+            &frame_indices,
+            frame_index,
+            &style,
+        );
         sink.write_frame(&frame)
             .map_err(|e| format!("encode error at frame {frame_index}: {e}"))?;
         frame_index += 1;
@@ -322,6 +439,53 @@ mod tests {
         assert_eq!(parsed.tuning.update_threshold, None);
         assert_eq!(parsed.tuning.coast_limit, None);
         assert_eq!(parsed.tracker_selection, tracking::TrackerSelection::Auto);
+        assert_eq!(parsed.cal_points, None);
+        assert_eq!(parsed.cal_length_m, None);
+    }
+
+    #[test]
+    fn parses_cal_flags() {
+        let args: Vec<String> = vec![
+            "video.mp4",
+            "--seed-frame",
+            "0",
+            "--seed",
+            "1,2",
+            "--out",
+            "out",
+            "--cal",
+            "200,120,320,120",
+            "--cal-length-m",
+            "0.45",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let parsed = parse_track_args(&args).unwrap();
+        assert_eq!(
+            parsed.cal_points,
+            Some((Point::new(200.0, 120.0), Point::new(320.0, 120.0)))
+        );
+        assert_eq!(parsed.cal_length_m, Some(0.45));
+    }
+
+    #[test]
+    fn bad_cal_format_is_an_error() {
+        let args: Vec<String> = vec![
+            "video.mp4",
+            "--seed-frame",
+            "0",
+            "--seed",
+            "1,2",
+            "--out",
+            "out",
+            "--cal",
+            "200,120",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(parse_track_args(&args).is_err());
     }
 
     #[test]

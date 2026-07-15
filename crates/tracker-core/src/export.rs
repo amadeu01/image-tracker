@@ -32,6 +32,7 @@
 
 use crate::bar_path::BarPath;
 use crate::calibration::Calibration;
+use crate::rep_metrics::RepMetrics;
 use crate::session::Source;
 use crate::velocity::{VelocitySample, VelocityUnit};
 use std::collections::HashMap;
@@ -148,6 +149,61 @@ pub fn export_json(
             vx_field, vy_field, speed_field, unit_field, interp_field
         ));
         if i + 1 < points.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    out.push(']');
+    out
+}
+
+/// Serializes per-rep metrics (task 5.4) to CSV with header `rep_index,
+/// start_t,bottom_t,end_t,depth,peak,mean,unit`.
+///
+/// Kept in a **separate file/function** from `export_csv`'s points table
+/// rather than a second section appended to it: the points export is
+/// already a stable flat table (one row per frame) consumed as-is by
+/// spreadsheets/`csv` readers, and reps are a different grain (one row per
+/// rep, far fewer rows) — mixing grains in one table would mean either
+/// ragged rows or repeating rep data on every point row. `tracker-app`'s CLI
+/// writes this to `<stem>.reps.csv` alongside `<stem>.csv`.
+pub fn export_reps_csv(metrics: &[RepMetrics]) -> String {
+    let mut out = String::from("rep_index,start_t,bottom_t,end_t,depth,peak,mean,unit\n");
+    for (i, m) in metrics.iter().enumerate() {
+        out.push_str(&format!(
+            "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{}\n",
+            i,
+            m.start_t,
+            m.bottom_t,
+            m.end_t,
+            m.depth,
+            m.peak_concentric_speed,
+            m.mean_concentric_velocity,
+            unit_str(m.unit),
+        ));
+    }
+    out
+}
+
+/// Serializes per-rep metrics (task 5.4) to a JSON array of objects, one per
+/// rep, with keys `rep_index, start_t, bottom_t, end_t, depth, peak, mean,
+/// unit`. See `export_reps_csv`'s doc comment for why this is a separate
+/// file/function rather than embedded in `export_json`'s points array.
+pub fn export_reps_json(metrics: &[RepMetrics]) -> String {
+    let mut out = String::from("[\n");
+    for (i, m) in metrics.iter().enumerate() {
+        out.push_str(&format!(
+            "  {{\"rep_index\": {}, \"start_t\": {:.6}, \"bottom_t\": {:.6}, \"end_t\": {:.6}, \"depth\": {:.6}, \"peak\": {:.6}, \"mean\": {:.6}, \"unit\": \"{}\"}}",
+            i,
+            m.start_t,
+            m.bottom_t,
+            m.end_t,
+            m.depth,
+            m.peak_concentric_speed,
+            m.mean_concentric_velocity,
+            unit_str(m.unit),
+        ));
+        if i + 1 < metrics.len() {
             out.push(',');
         }
         out.push('\n');
@@ -308,5 +364,55 @@ mod tests {
         let json = export_json(&path, None, Some(&velocity));
         assert!(json.contains("\"velocity_unit\": \"px/s\""));
         assert!(!json.contains("\"vx\": null"));
+    }
+
+    fn sample_rep_metrics() -> Vec<RepMetrics> {
+        vec![RepMetrics {
+            start_t: 0.0,
+            bottom_t: 0.5,
+            end_t: 1.0,
+            depth: 10.0,
+            peak_concentric_speed: 30.0,
+            mean_concentric_velocity: 20.0,
+            unit: VelocityUnit::PixelsPerSecond,
+            excluded_interpolated_samples: 0,
+        }]
+    }
+
+    #[test]
+    fn reps_csv_has_expected_header_and_one_row_per_rep() {
+        let csv = export_reps_csv(&sample_rep_metrics());
+        let mut lines = csv.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            "rep_index,start_t,bottom_t,end_t,depth,peak,mean,unit"
+        );
+        let row = lines.next().unwrap();
+        let fields: Vec<&str> = row.split(',').collect();
+        assert_eq!(fields[0], "0");
+        assert_eq!(fields[4], "10.000000");
+        assert_eq!(fields[5], "30.000000");
+        assert_eq!(fields[6], "20.000000");
+        assert_eq!(fields[7], "px/s");
+        assert!(lines.next().is_none());
+    }
+
+    #[test]
+    fn reps_json_is_array_with_one_object_per_rep() {
+        let json = export_reps_json(&sample_rep_metrics());
+        assert!(json.trim_start().starts_with('['));
+        assert!(json.trim_end().ends_with(']'));
+        assert!(json.contains("\"rep_index\": 0"));
+        assert!(json.contains("\"unit\": \"px/s\""));
+        assert!(json.contains("\"depth\": 10.000000"));
+    }
+
+    #[test]
+    fn reps_export_handles_empty_metrics() {
+        assert_eq!(
+            export_reps_csv(&[]),
+            "rep_index,start_t,bottom_t,end_t,depth,peak,mean,unit\n"
+        );
+        assert_eq!(export_reps_json(&[]), "[\n]");
     }
 }

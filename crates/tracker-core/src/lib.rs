@@ -14,6 +14,7 @@ pub mod metric;
 pub mod overlay;
 pub mod patch;
 pub mod rep;
+pub mod rep_metrics;
 pub mod session;
 pub mod smoothing;
 pub mod suggest;
@@ -25,13 +26,14 @@ pub use bar_path::{BarPath, PathPoint, Timebase, TimebaseError};
 pub use calibration::{Calibration, CalibrationError};
 pub use color::{rgb_to_hsv, ColorModel, ColorModelConfig, ColorModelError};
 pub use color_tracker::{ColorTracker, ColorTrackerConfig, ColorTrackerConfigBuilder};
-pub use export::{export_csv, export_json};
+pub use export::{export_csv, export_json, export_reps_csv, export_reps_json};
 pub use frame_source::FrameSource;
 pub use geometry::{Frame, FrameError, Point};
 pub use metric::{CorrelationMetric, Zncc};
-pub use overlay::{render_overlay, Color, OverlayStyle, OverlayStyleBuilder};
+pub use overlay::{render_overlay, render_rep_bottoms, Color, OverlayStyle, OverlayStyleBuilder};
 pub use patch::{extract_patch, Patch};
 pub use rep::{segment_reps, Rep, RepSegmentationConfig, RepSegmentationConfigBuilder};
+pub use rep_metrics::{all_rep_metrics, rep_metrics, RepMetrics};
 pub use session::{
     Gap, Sample, SessionState, Source, TrackingSession, TrackingSessionConfig,
     TrackingSessionConfigBuilder,

@@ -17,6 +17,7 @@
 
 use crate::bar_path::BarPath;
 use crate::geometry::Frame;
+use crate::rep::Rep;
 use crate::session::Source;
 
 /// RGB color, 8-bit per channel.
@@ -274,6 +275,50 @@ pub fn render_overlay(
     }
 }
 
+/// Draws a small horizontal tick mark at each `Rep`'s `bottom` position
+/// (task 5.4), for reps whose bottom has already been reached by
+/// `current_frame_index`. A separate function rather than folding into
+/// `render_overlay` since text labels (e.g. "rep 1 depth: ...") aren't
+/// available (no font rendering, see this module's doc comment) — a tick is
+/// the S-sized visual marker that's feasible without one, and callers who
+/// don't track reps can simply not call this.
+///
+/// Uses `style`'s marker color and a fixed small rectangle (wider than
+/// tall, to read as a horizontal tick rather than a dot) so it's visually
+/// distinct from the current-position marker circle.
+pub fn render_rep_bottoms(
+    frame: &mut Frame,
+    path: &BarPath,
+    reps: &[Rep],
+    velocity_frame_indices: &[u64],
+    current_frame_index: u64,
+    style: &OverlayStyle,
+) {
+    let tick_half_width: i64 = 8;
+    let tick_height: i64 = 3;
+    for rep in reps {
+        let Some(&frame_index) = velocity_frame_indices.get(rep.bottom) else {
+            continue;
+        };
+        if frame_index > current_frame_index {
+            continue;
+        }
+        let Some(point) = path.position_at(frame_index) else {
+            continue;
+        };
+        let cx = point.position.x.round() as i64;
+        let cy = point.position.y.round() as i64;
+        draw_filled_rect(
+            frame,
+            cx - tick_half_width,
+            cy - tick_height / 2,
+            tick_half_width * 2,
+            tick_height,
+            style.marker_color,
+        );
+    }
+}
+
 fn draw_legend(frame: &mut Frame, style: &OverlayStyle) {
     let swatch = style.legend_swatch_size as i64;
     let margin = style.legend_margin as i64;
@@ -421,6 +466,47 @@ mod tests {
         let path = BarPath::new(&samples, &[], tb(), 0);
         let style = OverlayStyle::builder().build();
         render_overlay(&mut frame, &path, 1, &style);
+    }
+
+    #[test]
+    fn render_rep_bottoms_draws_tick_at_bottom_position() {
+        let mut frame = blank_frame(60, 60);
+        let samples = vec![
+            sample(0, 30.0, 30.0, Source::Tracked),
+            sample(1, 30.0, 40.0, Source::Tracked),
+            sample(2, 30.0, 30.0, Source::Tracked),
+        ];
+        let path = BarPath::new(&samples, &[], tb(), 0);
+        let velocity_frame_indices = vec![0u64, 1, 2];
+        let reps = vec![Rep {
+            eccentric_start: 0,
+            bottom: 1,
+            concentric_end: 2,
+        }];
+        let style = OverlayStyle::builder().show_legend(false).build();
+        render_rep_bottoms(&mut frame, &path, &reps, &velocity_frame_indices, 2, &style);
+        assert_eq!(frame.pixel(30, 40), Some(style.marker_color()));
+    }
+
+    #[test]
+    fn render_rep_bottoms_skips_reps_not_yet_reached() {
+        let mut frame = blank_frame(60, 60);
+        let samples = vec![
+            sample(0, 30.0, 30.0, Source::Tracked),
+            sample(1, 30.0, 40.0, Source::Tracked),
+            sample(2, 30.0, 30.0, Source::Tracked),
+        ];
+        let path = BarPath::new(&samples, &[], tb(), 0);
+        let velocity_frame_indices = vec![0u64, 1, 2];
+        let reps = vec![Rep {
+            eccentric_start: 0,
+            bottom: 1,
+            concentric_end: 2,
+        }];
+        let style = OverlayStyle::builder().show_legend(false).build();
+        // current_frame_index 0 is before the rep's bottom (frame 1).
+        render_rep_bottoms(&mut frame, &path, &reps, &velocity_frame_indices, 0, &style);
+        assert_eq!(frame.pixel(30, 40), Some([0, 0, 0]));
     }
 
     #[test]
