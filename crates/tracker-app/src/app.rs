@@ -102,6 +102,7 @@ impl AppState {
             Mode::PlacingSeed => Mode::ViewOnly,
             _ => Mode::PlacingSeed,
         };
+        tracing::info!(mode = ?self.mode, "mode changed");
     }
 
     /// Toggle between `ViewOnly` and `Calibrating`. Entering `Calibrating`
@@ -115,6 +116,7 @@ impl AppState {
                 known_length_meters: DEFAULT_CALIBRATION_LENGTH_METERS,
             },
         };
+        tracing::info!(mode = ?self.mode, "mode changed");
     }
 
     /// Update the known real-world length (in meters) used for the current
@@ -139,6 +141,12 @@ impl AppState {
             position,
             frame_index: self.current_frame,
         });
+        tracing::info!(
+            frame = self.current_frame,
+            x = position.x,
+            y = position.y,
+            "seed placed"
+        );
     }
 
     /// Record a calibration click at the given image-pixel position. Only
@@ -168,10 +176,12 @@ impl AppState {
                 self.last_calibration_segment = Some((first, position));
                 match tracker_core::Calibration::new(first, position, known_length_meters) {
                     Ok(cal) => {
+                        tracing::info!(px_per_meter = cal.px_per_meter(), "calibration set");
                         self.calibration = Some(cal);
                         self.status.clear();
                     }
                     Err(e) => {
+                        tracing::warn!(error = %e, "calibration failed");
                         self.status = format!("calibration failed: {e}");
                     }
                 }
@@ -240,6 +250,13 @@ impl AppState {
             return;
         }
         let Some(seed) = self.seed else { return };
+        tracing::info!(
+            video = %self.video_path.display(),
+            seed_frame = seed.frame_index,
+            x = seed.position.x,
+            y = seed.position.y,
+            "track started"
+        );
         let handle = tracking::spawn_tracking(tracking::TrackingJob {
             video_path: self.video_path.clone(),
             width: self.metadata.display_width(),
@@ -348,6 +365,7 @@ impl TrackerApp {
                 self.state.status.clear();
             }
             Err(e) => {
+                tracing::error!(frame = self.state.current_frame, error = %e, "failed to decode frame");
                 self.state.status = format!("failed to decode frame {}: {e}", self.state.current_frame);
             }
         }

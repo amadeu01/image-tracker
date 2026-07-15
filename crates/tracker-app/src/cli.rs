@@ -113,6 +113,7 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
 
 /// Runs the `track` subcommand: probe -> track (blocking, on this thread) ->
 /// render overlay MP4 -> write CSV/JSON, all under `args.out_dir`.
+#[tracing::instrument(skip_all, fields(video = %args.video_path.display(), out_dir = %args.out_dir.display()))]
 pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
     let metadata = ffprobe::probe(&args.video_path)
         .map_err(|e| format!("failed to probe {}: {e}", args.video_path.display()))?;
@@ -160,6 +161,13 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
             else {
                 break; // shouldn't happen: Progress always sets both
             };
+            tracing::warn!(
+                video_frame_index = idx,
+                x = pos.x,
+                y = pos.y,
+                reseed_events,
+                "headless auto-resume: reseeding from last known position"
+            );
             handle.resume(idx, pos);
         }
     }
@@ -188,6 +196,12 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
         .map_err(|e| format!("failed to write {}: {e}", csv_path.display()))?;
     std::fs::write(&json_path, export_json(&bar_path, None))
         .map_err(|e| format!("failed to write {}: {e}", json_path.display()))?;
+    tracing::info!(
+        csv_path = %csv_path.display(),
+        json_path = %json_path.display(),
+        overlay_path = %overlay_path.display(),
+        "wrote track exports"
+    );
 
     render_overlay_video(
         &args.video_path,

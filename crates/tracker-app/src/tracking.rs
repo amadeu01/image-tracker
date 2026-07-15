@@ -258,6 +258,15 @@ pub fn spawn_tracking(job: TrackingJob) -> TrackingHandle {
     TrackingHandle { messages: rx, reseed_tx }
 }
 
+#[tracing::instrument(
+    skip_all,
+    fields(
+        video = %job.video_path.display(),
+        seed_frame = job.seed_frame_index,
+        seed_x = job.seed_position.x,
+        seed_y = job.seed_position.y,
+    )
+)]
 fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx: &Receiver<ReseedCommand>) {
     let TrackingJob {
         video_path,
@@ -272,9 +281,12 @@ fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx
     } = job;
     let video_path: &Path = &video_path;
 
+    tracing::info!("tracking run started");
+
     let mut source = match FfmpegFrameSource::spawn(video_path, width, height) {
         Ok(s) => s,
         Err(e) => {
+            tracing::error!(error = %e, "failed to spawn ffmpeg decoder for tracking run");
             let _ = tx.send(TrackingMessage::Error(e.to_string()));
             return;
         }
@@ -283,12 +295,14 @@ fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx
     let seed_frame = match decode_up_to(&mut source, seed_frame_index) {
         Ok(Some(frame)) => frame,
         Ok(None) => {
+            tracing::error!("video ended before reaching the seed frame");
             let _ = tx.send(TrackingMessage::Error(
                 "video ended before reaching the seed frame".to_string(),
             ));
             return;
         }
         Err(e) => {
+            tracing::error!(error = %e, "failed to decode up to seed frame");
             let _ = tx.send(TrackingMessage::Error(e.to_string()));
             return;
         }
@@ -297,6 +311,7 @@ fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx
     let tracker = match TemplateTracker::new(&seed_frame, seed_position, tracker_config) {
         Ok(t) => t,
         Err(e) => {
+            tracing::error!(error = ?e, "seed patch out of bounds");
             let _ = tx.send(TrackingMessage::Error(format!(
                 "seed patch out of bounds: {e:?}"
             )));
@@ -315,12 +330,22 @@ fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx
         state: SessionState::Tracking,
     });
 
+    let mut gap_count: u64 = 0;
+
     loop {
         match source.next_frame_checked() {
             Ok(Some(frame)) => {
                 session.step(&frame);
                 if let Some(last) = session.samples().last() {
                     let video_frame_index = seed_frame_index + last.frame_index;
+                    tracing::trace!(
+                        video_frame_index,
+                        x = last.position.x,
+                        y = last.position.y,
+                        source = ?last.source,
+                        state = ?session.state(),
+                        "frame processed"
+                    );
                     let _ = tx.send(TrackingMessage::Progress {
                         video_frame_index,
                         position: last.position,
@@ -329,11 +354,23 @@ fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx
                     });
                 }
                 if session.state() == SessionState::NeedsReseed {
+                    gap_count += 1;
+                    tracing::warn!(
+                        video_frame_index = seed_frame_index + session.samples().last().map(|s| s.frame_index).unwrap_or(0),
+                        misses = gap_count,
+                        "tracking needs reseed: object lost, waiting for a new seed"
+                    );
                     match reseed_rx.recv() {
                         Ok(cmd) => {
                             let relative =
                                 cmd.video_frame_index.saturating_sub(seed_frame_index);
                             session.reseed(relative, cmd.position);
+                            tracing::info!(
+                                video_frame_index = cmd.video_frame_index,
+                                x = cmd.position.x,
+                                y = cmd.position.y,
+                                "tracking reseeded, resuming"
+                            );
                             let _ = tx.send(TrackingMessage::Progress {
                                 video_frame_index: cmd.video_frame_index,
                                 position: cmd.position,
@@ -342,12 +379,16 @@ fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx
                             });
                         }
                         // UI dropped the handle (e.g. app closing): stop.
-                        Err(_) => return,
+                        Err(_) => {
+                            tracing::warn!("reseed channel closed; stopping tracking run");
+                            return;
+                        }
                     }
                 }
             }
             Ok(None) => break,
             Err(e) => {
+                tracing::error!(error = %e, "decode error during tracking run");
                 let _ = tx.send(TrackingMessage::Error(e.to_string()));
                 return;
             }
@@ -357,6 +398,7 @@ fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx
     let timebase = match Timebase::new(fps_num, fps_den) {
         Ok(tb) => tb,
         Err(_) => {
+            tracing::error!("invalid fps reported by ffprobe (zero numerator/denominator)");
             let _ = tx.send(TrackingMessage::Error(
                 "invalid fps reported by ffprobe (zero numerator/denominator)".to_string(),
             ));
@@ -368,6 +410,12 @@ fn run_tracking_worker(job: TrackingJob, tx: &Sender<TrackingMessage>, reseed_rx
         session.gaps(),
         timebase,
         seed_frame_index,
+    );
+    tracing::info!(
+        frames_processed = session.samples().len(),
+        gaps = bar_path.gaps().len(),
+        points = bar_path.points().len(),
+        "tracking run done"
     );
     let _ = tx.send(TrackingMessage::Done(bar_path));
 }

@@ -176,6 +176,7 @@ fn parse_rational_rate(raw: &str) -> Result<(u64, u64), ProbeError> {
 /// `panic`: subprocess spawn failure, non-zero exit, and unparsable output
 /// all become `ProbeError` variants for the caller (UI status bar, 2.6) to
 /// surface.
+#[tracing::instrument(skip_all, fields(video = %path.display()))]
 pub fn probe(path: &Path) -> Result<VideoMetadata, ProbeError> {
     let output = Command::new("ffprobe")
         .arg("-v")
@@ -191,13 +192,32 @@ pub fn probe(path: &Path) -> Result<VideoMetadata, ProbeError> {
         .map_err(|_| ProbeError::FfprobeNotFound)?;
 
     if !output.status.success() {
-        return Err(ProbeError::FfprobeFailed {
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        tracing::error!(stderr = %stderr, "ffprobe exited with an error");
+        return Err(ProbeError::FfprobeFailed { stderr });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_ffprobe_json(&stdout)
+    match parse_ffprobe_json(&stdout) {
+        Ok(meta) => {
+            tracing::info!(
+                width = meta.width,
+                height = meta.height,
+                display_width = meta.display_width(),
+                display_height = meta.display_height(),
+                fps_num = meta.fps_num,
+                fps_den = meta.fps_den,
+                rotation = meta.rotation,
+                frame_count = meta.frame_count,
+                "probed video metadata"
+            );
+            Ok(meta)
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to parse ffprobe output");
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]

@@ -115,6 +115,12 @@ impl FfmpegFrameSource<ChildStdout> {
     /// ffprobe adapter (task 2.1) — rawvideo has no dimension header, so the
     /// caller must supply them.
     pub fn spawn(path: &Path, width: u32, height: u32) -> Result<Self, FfmpegDecodeError> {
+        tracing::debug!(
+            video = %path.display(),
+            width,
+            height,
+            "spawning ffmpeg decode process"
+        );
         let mut child = Command::new("ffmpeg")
             .arg("-v")
             .arg("error")
@@ -154,6 +160,7 @@ impl FfmpegFrameSource<ChildStdout> {
             }
             let status = child.wait()?;
             if !status.success() {
+                tracing::error!(stderr = %stderr_buf, "ffmpeg decode process exited with an error");
                 return Err(FfmpegDecodeError::ProcessFailed { stderr: stderr_buf });
             }
         }

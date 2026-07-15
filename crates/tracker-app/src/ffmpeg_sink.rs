@@ -130,6 +130,14 @@ impl FfmpegVideoSink<ChildStdin> {
         let size = format!("{width}x{height}");
         let fps = format!("{fps_num}/{fps_den}");
 
+        tracing::debug!(
+            out = %out_path.display(),
+            width,
+            height,
+            fps = %fps,
+            "spawning ffmpeg encode process"
+        );
+
         let mut child = Command::new("ffmpeg")
             .arg("-v")
             .arg("error")
@@ -188,6 +196,7 @@ impl<W: Write> VideoSink for FfmpegVideoSink<W> {
             }
             let status = child.wait()?;
             if !status.success() {
+                tracing::error!(stderr = %stderr_buf, "ffmpeg encode process exited with an error");
                 return Err(FfmpegEncodeError::ProcessFailed { stderr: stderr_buf });
             }
         }
