@@ -87,8 +87,8 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
 
     let handle = tracking::spawn_tracking(
         args.video_path.clone(),
-        metadata.width,
-        metadata.height,
+        metadata.display_width(),
+        metadata.display_height(),
         metadata.fps_num,
         metadata.fps_den,
         args.seed_frame,
@@ -162,8 +162,8 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
     render_overlay_video(
         &args.video_path,
         &overlay_path,
-        metadata.width,
-        metadata.height,
+        metadata.display_width(),
+        metadata.display_height(),
         metadata.fps_num,
         metadata.fps_den,
         &bar_path,

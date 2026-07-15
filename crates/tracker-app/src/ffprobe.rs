@@ -22,6 +22,46 @@ pub struct VideoMetadata {
     /// `nb_frames` as reported by ffprobe. Absent for some containers/streams
     /// (ffprobe omits the field rather than reporting zero).
     pub frame_count: Option<u64>,
+    /// Display Matrix rotation in degrees, as reported in
+    /// `side_data_list[].rotation` (e.g. `-90`, `90`, `180`). `None` when no
+    /// rotation side data is present (the common case for portrait-coded or
+    /// unrotated footage). ffmpeg's decoder auto-applies this rotation to
+    /// its *decoded pixel output* (rawvideo included) by default — so
+    /// `width`/`height` here are the *coded* dimensions ffprobe reports for
+    /// the stream, but any adapter that decodes frames (ffmpeg `-i ... -f
+    /// rawvideo`) will actually receive frames sized `display_width() x
+    /// display_height()`. Use those, not `width`/`height` directly, when
+    /// sizing frame buffers or CLI/GUI overlays.
+    pub rotation: Option<i32>,
+}
+
+impl VideoMetadata {
+    /// `true` when the rotation is an odd multiple of 90 degrees (i.e. the
+    /// decoded/display frame has width and height swapped relative to the
+    /// coded stream dimensions).
+    fn swaps_dimensions(&self) -> bool {
+        matches!(self.rotation, Some(r) if r % 180 != 0)
+    }
+
+    /// Width of frames actually produced by an autorotating ffmpeg decode
+    /// (what `FfmpegFrameSource`/`SeekingFrameDecoder` will hand back), as
+    /// opposed to `width` (the coded stream width ffprobe reports).
+    pub fn display_width(&self) -> u32 {
+        if self.swaps_dimensions() {
+            self.height
+        } else {
+            self.width
+        }
+    }
+
+    /// Height counterpart to `display_width`.
+    pub fn display_height(&self) -> u32 {
+        if self.swaps_dimensions() {
+            self.width
+        } else {
+            self.height
+        }
+    }
 }
 
 /// Everything that can go wrong probing a video's metadata.
@@ -73,6 +113,13 @@ struct FfprobeStream {
     height: Option<u32>,
     r_frame_rate: Option<String>,
     nb_frames: Option<String>,
+    #[serde(default)]
+    side_data_list: Vec<FfprobeSideData>,
+}
+
+#[derive(serde::Deserialize)]
+struct FfprobeSideData {
+    rotation: Option<i32>,
 }
 
 /// Parses ffprobe's `-of json` stdout into `VideoMetadata`. Pure function,
@@ -97,12 +144,15 @@ pub fn parse_ffprobe_json(json: &str) -> Result<VideoMetadata, ProbeError> {
         .as_deref()
         .and_then(|s| s.parse::<u64>().ok());
 
+    let rotation = stream.side_data_list.iter().find_map(|sd| sd.rotation);
+
     Ok(VideoMetadata {
         width,
         height,
         fps_num,
         fps_den,
         frame_count,
+        rotation,
     })
 }
 
@@ -133,7 +183,7 @@ pub fn probe(path: &Path) -> Result<VideoMetadata, ProbeError> {
         .arg("-select_streams")
         .arg("v:0")
         .arg("-show_entries")
-        .arg("stream=width,height,r_frame_rate,nb_frames")
+        .arg("stream=width,height,r_frame_rate,nb_frames:stream_side_data=rotation")
         .arg("-of")
         .arg("json")
         .arg(path)
@@ -180,8 +230,69 @@ mod tests {
                 fps_num: 600,
                 fps_den: 19,
                 frame_count: Some(1910),
+                rotation: None,
             }
         );
+    }
+
+    #[test]
+    fn rotation_minus_90_is_parsed_and_swaps_display_dims() {
+        let json = r#"{"streams":[{
+            "width": 1024, "height": 576, "r_frame_rate": "30/1", "nb_frames": "100",
+            "side_data_list": [{"rotation": -90}]
+        }]}"#;
+
+        let meta = parse_ffprobe_json(json).expect("should parse");
+        assert_eq!(meta.rotation, Some(-90));
+        assert_eq!(meta.display_width(), 576);
+        assert_eq!(meta.display_height(), 1024);
+    }
+
+    #[test]
+    fn rotation_90_also_swaps_display_dims() {
+        let json = r#"{"streams":[{
+            "width": 1024, "height": 576, "r_frame_rate": "30/1", "nb_frames": "100",
+            "side_data_list": [{"rotation": 90}]
+        }]}"#;
+
+        let meta = parse_ffprobe_json(json).expect("should parse");
+        assert_eq!(meta.rotation, Some(90));
+        assert_eq!(meta.display_width(), 576);
+        assert_eq!(meta.display_height(), 1024);
+    }
+
+    #[test]
+    fn rotation_180_does_not_swap_display_dims() {
+        let json = r#"{"streams":[{
+            "width": 1024, "height": 576, "r_frame_rate": "30/1", "nb_frames": "100",
+            "side_data_list": [{"rotation": 180}]
+        }]}"#;
+
+        let meta = parse_ffprobe_json(json).expect("should parse");
+        assert_eq!(meta.rotation, Some(180));
+        assert_eq!(meta.display_width(), 1024);
+        assert_eq!(meta.display_height(), 576);
+    }
+
+    #[test]
+    fn no_side_data_list_is_no_rotation_and_no_swap() {
+        let json = r#"{"streams":[{"width": 1024, "height": 576, "r_frame_rate": "30/1"}]}"#;
+
+        let meta = parse_ffprobe_json(json).expect("should parse");
+        assert_eq!(meta.rotation, None);
+        assert_eq!(meta.display_width(), 1024);
+        assert_eq!(meta.display_height(), 576);
+    }
+
+    #[test]
+    fn side_data_list_present_without_rotation_key_is_none() {
+        let json = r#"{"streams":[{
+            "width": 1024, "height": 576, "r_frame_rate": "30/1",
+            "side_data_list": [{}]
+        }]}"#;
+
+        let meta = parse_ffprobe_json(json).expect("should parse");
+        assert_eq!(meta.rotation, None);
     }
 
     #[test]
@@ -256,5 +367,8 @@ mod tests {
         assert_eq!(meta.fps_num, 600);
         assert_eq!(meta.fps_den, 19);
         assert_eq!(meta.frame_count, Some(1910));
+        assert_eq!(meta.rotation, Some(-90));
+        assert_eq!(meta.display_width(), 576);
+        assert_eq!(meta.display_height(), 1024);
     }
 }

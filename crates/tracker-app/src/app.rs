@@ -242,8 +242,8 @@ impl AppState {
         let Some(seed) = self.seed else { return };
         let handle = tracking::spawn_tracking(
             self.video_path.clone(),
-            self.metadata.width,
-            self.metadata.height,
+            self.metadata.display_width(),
+            self.metadata.display_height(),
             self.metadata.fps_num,
             self.metadata.fps_den,
             seed.frame_index,
@@ -317,8 +317,8 @@ impl TrackerApp {
     pub fn new(video_path: PathBuf, metadata: VideoMetadata) -> Self {
         let decoder = SeekingFrameDecoder::new(
             video_path.clone(),
-            metadata.width,
-            metadata.height,
+            metadata.display_width(),
+            metadata.display_height(),
             metadata.fps_num,
             metadata.fps_den,
         );
@@ -513,8 +513,8 @@ impl eframe::App for TrackerApp {
                         if let Some(image_px) = screen_to_image_px(
                             click_pos,
                             image_rect,
-                            self.state.metadata.width,
-                            self.state.metadata.height,
+                            self.state.metadata.display_width(),
+                            self.state.metadata.display_height(),
                         ) {
                             if self.state.mode == Mode::PlacingSeed {
                                 self.state.place_seed(image_px);
@@ -691,6 +691,7 @@ mod tests {
             fps_num: 30,
             fps_den: 1,
             frame_count,
+            rotation: None,
         }
     }
 

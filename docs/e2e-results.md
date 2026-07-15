@@ -1,4 +1,26 @@
-# 3.4 — end-to-end run results
+# 3.4 / 3.5 — end-to-end run results
+
+> **3.5 update (2026-07-15): the 3.4 results below for videos 1 and 2 are
+> invalid and superseded.** Visual review (fable-5) found that `v1`/`v2` are
+> phone captures with Display Matrix rotation (`rotation=-90` per
+> `ffprobe`'s `stream_side_data`); ffmpeg's decoder auto-applies that
+> rotation to its rawvideo output (1024x576 coded → 576x1024 decoded), but
+> the pipeline was sizing `Frame` buffers from ffprobe's *coded* dimensions.
+> Every decoded frame was reinterpreted at the wrong width, scrambling rows
+> — the tracker was "tracking" garbage pixel data, and the original v1/v2
+> rows below (seed guessed in landscape 1024x576 coordinates) are
+> meaningless. `v3`/`v4` have no rotation side data (already portrait-coded
+> at the container level), so their original results were valid and are
+> unchanged below.
+>
+> Fix: `ffprobe.rs`'s `VideoMetadata` now also parses
+> `stream_side_data=rotation` and exposes `display_width()`/
+> `display_height()` (swapped from the coded `width`/`height` when rotation
+> is an odd multiple of 90°). Every consumer that sizes decoded frame
+> buffers — the CLI `track` pipeline, the GUI's `SeekingFrameDecoder` and
+> tracking worker spawn — now uses the display dimensions instead of the
+> raw ffprobe `width`/`height`. Seeds for v1/v2 were re-picked by extracting
+> and visually inspecting frames in the correct (portrait) orientation.
 
 Run via the new headless CLI mode:
 
@@ -22,12 +44,18 @@ Verdict criteria: fraction Tracked vs Interpolated, gap/reseed counts, and
 path plausibility (descent+ascent covered in `y_px`, no >50px inter-frame
 jumps computed from the CSV).
 
-| Video | Dimensions / fps | Seed (frame, x, y) | Points | Tracked | Interpolated | Gaps | Reseed events | y_px range | Verdict |
+| Video | Coded dims / rotation / display dims / fps | Seed (frame, x, y) | Points | Tracked | Interpolated | Gaps | Reseed events | y_px range | Verdict |
 |---|---|---|---|---|---|---|---|---|---|
-| `WhatsApp Video 2026-07-05 at 14.03.30.mp4` | 1024x576, 600/19 (~31.6fps) | frame 158, (420, 180) | 1848 | 1848 | 0 | 1 | 1 | 111–342 | Good. Tracked cleanly to near the end of a ~1752-frame remaining span; one reseed near the tail (plate likely left frame or was occluded at rack-in). No wild jumps. |
-| `WhatsApp Video 2026-07-05 at 14.11.05.mp4` | 1024x576, 30/1 | frame 150, (420, 180) | 1962 | 1962 | 0 | 0 | 0 | 124–443 | Very good. Clean run start to finish, zero gaps, zero reseeds. Descent+ascent range (319px) plausible for a squat. |
-| `WhatsApp Video 2026-07-08 at 22.55.51.mp4` | 464x832, 60/1 | frame 300, (260, 120) | 2887 | 2882 | 5 | 3 | 0 | 105–499 | Very good. 3 short gaps auto-coasted (5 interpolated points out of 2887, ~0.2%), no reseed needed, no wild jumps. First seed guess worked well here. |
-| `WhatsApp Video 2026-07-08 at 22.56.32.mp4` | 464x832, 60000/1001 (~59.9fps) | frame 300, (260, 120) initial guess | 3093 | 3019 | 74 | 114 | 77 | 115–564 | Poor with the initial seed guess — frequent loss/reseed (path still plausible, no jumps, but a human would be re-placing the seed constantly). **Retuned seed to (300, 150)** (same frame): 3478 points, 3468 tracked, 10 interpolated, 6 gaps, **0 reseed events**, y range 101–602. Good after retuning; the initial coordinate hint for videos 3–4 (260, 120) was noticeably off-target for this specific clip's framing even though it worked for the other 464x832 video. |
+| `WhatsApp Video 2026-07-05 at 14.03.30.mp4` | 1024x576 coded, rotation=-90, **576x1024 display**, 600/19 (~31.6fps) | frame 789, (310, 280) | 1207 | 1207 | 0 | 3 | 3 | 172–398 | Good. Correctly oriented (verified: `HAMMER STRENGTH` rack text reads upright, plate end-face round not scrambled). Seed re-picked mid-squat-descent by visually inspecting an extracted portrait frame. 3 reseeds over the run (plate likely lost at rack-in/out near the clip's edges); max frame-to-frame jump 40px, no wild jumps. |
+| `WhatsApp Video 2026-07-05 at 14.11.05.mp4` | 1024x576 coded, rotation=-90, **576x1024 display**, 30/1 | frame 1200, (290, 390) | 912 | 896 | 16 | 8 | 0 | 167–563 | Good. Zero reseeds; 8 short gaps auto-coasted (16/912 interpolated, ~1.8%). Max frame-to-frame jump 42px. Seed placed at a visually-confirmed squat-bottom frame. |
+| `WhatsApp Video 2026-07-08 at 22.55.51.mp4` | 464x832, no rotation side data (already portrait-coded) | frame 300, (260, 120) | 2887 | 2882 | 5 | 3 | 0 | 105–499 | Unaffected by the rotation bug (no Display Matrix side data) — result unchanged from 3.4. Very good: 3 short gaps auto-coasted (5/2887 interpolated, ~0.2%), no reseed needed, no wild jumps. |
+| `WhatsApp Video 2026-07-08 at 22.56.32.mp4` | 464x832, no rotation side data (already portrait-coded) | frame 300, (300, 150) | 3478 | 3468 | 10 | 6 | 0 | 101–602 | Unaffected by the rotation bug — result unchanged from 3.4 (using the seed retuned in that task). Good: 0 reseed events, 10/3478 interpolated (~0.3%). |
+
+Verified by extracting overlay-MP4 frames to scratch and visually inspecting
+orientation/content (not just CSV plausibility) for all four videos —
+`HAMMER STRENGTH` rack text and the round barbell plate render correctly
+(previously scrambled into unreadable diagonal noise for v1/v2 before this
+fix).
 
 ## Takeaways
 
@@ -42,14 +70,24 @@ jumps computed from the CSV).
   per-video, per-lift user action (2.4/2.5), not something to hardcode.
 - Outputs (overlay MP4 + CSV/JSON) for all four videos are in `out/`
   (gitignored, not committed) for manual inspection.
+- (3.5) ffprobe's reported `width`/`height` are the *coded* stream
+  dimensions, not necessarily what a decoder emits: phone footage carrying
+  a Display Matrix rotation (`stream_side_data.rotation`) gets auto-rotated
+  by ffmpeg's decoder, so any adapter reading rawvideo off an `ffmpeg -i`
+  pipe must size its frame buffers from the *display* (post-rotation)
+  dimensions, or every row silently reinterprets at the wrong stride —
+  this passed unit tests and "looked" fine in CSV plausibility checks in
+  3.4 (no crashes, no NaNs, plausible-looking y-ranges by coincidence) but
+  was tracking scrambled pixel data end to end. Visual inspection of actual
+  decoded frames (not just numeric output) is what caught it.
 
 ## Reproducing
 
 ```
 cargo build --release --bin tracker-app
 BIN=./target/release/tracker-app
-"$BIN" track "test_videos/WhatsApp Video 2026-07-05 at 14.03.30.mp4" --seed-frame 158 --seed 420,180 --out out/v1
-"$BIN" track "test_videos/WhatsApp Video 2026-07-05 at 14.11.05.mp4" --seed-frame 150 --seed 420,180 --out out/v2
+"$BIN" track "test_videos/WhatsApp Video 2026-07-05 at 14.03.30.mp4" --seed-frame 789 --seed 310,280 --out out/v1
+"$BIN" track "test_videos/WhatsApp Video 2026-07-05 at 14.11.05.mp4" --seed-frame 1200 --seed 290,390 --out out/v2
 "$BIN" track "test_videos/WhatsApp Video 2026-07-08 at 22.55.51.mp4" --seed-frame 300 --seed 260,120 --out out/v3
 "$BIN" track "test_videos/WhatsApp Video 2026-07-08 at 22.56.32.mp4" --seed-frame 300 --seed 300,150 --out out/v4
 ```
