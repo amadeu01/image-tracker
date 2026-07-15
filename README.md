@@ -3,6 +3,8 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/amadeu01/image-tracker/actions/workflows/ci.yml?query=branch%3Amain"><img alt="CI" src="https://github.com/amadeu01/image-tracker/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/amadeu01/image-tracker/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/amadeu01/image-tracker"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/rust-2021-orange.svg">
   <img alt="Status" src="https://img.shields.io/badge/status-early%20development-yellow.svg">
@@ -35,7 +37,7 @@ Bonus: the **Marker Color Advisor** analyses your video's palette and tells you 
 
 ## Status
 
-Early development — domain core (geometry, ZNCC template tracking, gap handling, path aggregate) is built and tested; video IO and UI are in progress. See [PLAN.md](PLAN.md) for the live task board and [CONTEXT.md](CONTEXT.md) for the project's vocabulary.
+Early development — domain core (geometry, ZNCC template tracking, gap handling, path aggregate, milestones 1-5), CI/e2e (7.2), and the CLI/GUI track pipeline (8) are done; polish and release automation (9.x) are in progress. See [PLAN.md](PLAN.md) for the live task board and [CONTEXT.md](CONTEXT.md) for the project's vocabulary. Manual smoke-test results are logged under [docs/smoke/](docs/smoke/), latest run linked from that directory's index.
 
 ## Requirements
 
@@ -45,7 +47,7 @@ Early development — domain core (geometry, ZNCC template tracking, gap handlin
 ```bash
 git clone https://github.com/amadeu01/image-tracker.git
 cd image-tracker
-cargo test        # 39 domain tests and counting
+cargo test        # 200+ workspace tests
 cargo run -p tracker-app -- path/to/video.mp4   # UI lands in milestone 2
 ```
 
