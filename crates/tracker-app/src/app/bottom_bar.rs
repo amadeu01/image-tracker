@@ -1,0 +1,61 @@
+//! Bottom bars (task 7.2 split): a one-line status summary and the scrub
+//! bar. Detailed status (seed/calibration/tracking breakdown, events) moved
+//! to the side panel (`side_panel.rs`) — this stays intentionally terse.
+
+use eframe::egui;
+
+use super::state::AppState;
+
+pub fn show_status_bar(ctx: &egui::Context, state: &AppState) {
+    egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "{}  |  frame {}/{}  |  {}",
+                state.video_path.display(),
+                state.current_frame,
+                state.metadata.frame_count.unwrap_or(0).saturating_sub(1),
+                state.status_line(),
+            ));
+            let tracking_active = state.tracking.is_some()
+                || state.tracking_run.error.is_some()
+                || state.bar_path.is_some();
+            if tracking_active {
+                ui.separator();
+                let is_error = state.tracking_run.error.is_some();
+                let is_paused = state.tracking_run.session_state
+                    == Some(tracker_core::SessionState::NeedsReseed);
+                let color = if is_error {
+                    egui::Color32::RED
+                } else if is_paused {
+                    egui::Color32::YELLOW
+                } else {
+                    egui::Color32::LIGHT_GREEN
+                };
+                ui.colored_label(color, state.tracking_run.status_line());
+            }
+            if !state.status.is_empty() {
+                ui.separator();
+                ui.colored_label(egui::Color32::RED, &state.status);
+            }
+        });
+    });
+}
+
+pub fn show_scrub_bar(ctx: &egui::Context, state: &mut AppState) {
+    egui::TopBottomPanel::bottom("scrub_bar").show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            if ui.button("<< prev").clicked() {
+                state.prev_frame();
+            }
+            let max = state.metadata.frame_count.unwrap_or(1).saturating_sub(1);
+            let mut frame_val = state.current_frame;
+            let slider = ui.add(egui::Slider::new(&mut frame_val, 0..=max));
+            if slider.changed() {
+                state.set_frame(frame_val as i64);
+            }
+            if ui.button("next >>").clicked() {
+                state.next_frame();
+            }
+        });
+    });
+}

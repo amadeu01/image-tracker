@@ -176,6 +176,10 @@ pub struct TrackingRunState {
     pub last_source: Option<SampleSource>,
     pub session_state: Option<SessionState>,
     pub frames_processed: u64,
+    /// How many times this run has transitioned into `SessionState::NeedsReseed`
+    /// (i.e. how many gaps the user has had to reseed through), used by the
+    /// side panel's tracking status section (task 7.2).
+    pub gap_count: u64,
     pub error: Option<String>,
     pub bar_path: Option<BarPath>,
 }
@@ -200,6 +204,10 @@ impl TrackingRunState {
                 source,
                 state,
             } => {
+                if state == SessionState::NeedsReseed && self.session_state != Some(SessionState::NeedsReseed)
+                {
+                    self.gap_count += 1;
+                }
                 self.last_frame_index = Some(video_frame_index);
                 self.last_position = Some(position);
                 self.last_source = Some(source);
@@ -647,6 +655,30 @@ mod tests {
         let line = state.status_line();
         assert!(line.contains("paused"));
         assert!(line.contains('7'));
+    }
+
+    #[test]
+    fn needs_reseed_progress_increments_gap_count_only_once_per_pause() {
+        let mut state = TrackingRunState::started();
+        let paused = |frame| TrackingMessage::Progress {
+            video_frame_index: frame,
+            position: Point::new(0.0, 0.0),
+            source: SampleSource::Interpolated,
+            state: SessionState::NeedsReseed,
+        };
+        state.apply(paused(5));
+        state.apply(paused(5)); // still paused: no second increment
+        assert_eq!(state.gap_count, 1);
+
+        // Resumes, tracks a bit, then pauses again: second gap.
+        state.apply(TrackingMessage::Progress {
+            video_frame_index: 6,
+            position: Point::new(1.0, 1.0),
+            source: SampleSource::Tracked,
+            state: SessionState::Tracking,
+        });
+        state.apply(paused(9));
+        assert_eq!(state.gap_count, 2);
     }
 
     #[test]

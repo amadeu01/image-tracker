@@ -1,21 +1,14 @@
-//! egui app shell (task 2.3): open a video, show a frame, scrub through it.
-//!
-//! `AppState` separates pure(ish) state (current frame index, mode, status
-//! message) from the egui `App` impl, which is intentionally thin — egui
-//! rendering itself isn't unit-tested, but the state transitions it drives
-//! (frame index clamping) are, via `frame_cache::clamp_frame_index`.
-//!
-//! `Mode` grows a variant per interactive task: `PlacingSeed` (2.4) and
-//! `Calibrating` (2.5), matched on `state.mode`.
+//! Pure(ish) app state (task 2.3, split out in 7.2): current frame index,
+//! mode, Seed/Calibration, tracking run reducer, and the guide/status/events
+//! data the side panel (7.2) renders. No egui `Context` dependency, so all of
+//! this is unit-testable directly.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
-
-use eframe::egui;
+use std::time::Instant;
 
 use crate::ffprobe::VideoMetadata;
-use crate::frame_cache::{clamp_frame_index, FrameCache};
-use crate::screen_map::screen_to_image_px;
-use crate::seek_source::SeekingFrameDecoder;
+use crate::frame_cache::clamp_frame_index;
 use crate::tracking::{self, TrackingHandle, TrackingRunState};
 
 /// What clicking on the frame view currently does.
@@ -43,6 +36,51 @@ pub const DEFAULT_CALIBRATION_LENGTH_METERS: f64 = 0.450;
 pub struct Seed {
     pub position: tracker_core::Point,
     pub frame_index: u64,
+}
+
+/// Severity of an [`AppEvent`], used by the side panel to color the events
+/// list (errors stand out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+/// One entry in the in-memory event ring buffer the side panel's "Events"
+/// section shows (task 7.2) — an on-screen mirror of the breadcrumbs already
+/// sent to `tracing`, so the user doesn't need to open the log file to see
+/// what just happened.
+#[derive(Debug, Clone)]
+pub struct AppEvent {
+    pub level: EventLevel,
+    pub message: String,
+    /// Seconds since this `AppState` was created. There's no wall-clock
+    /// dependency in this crate (no `chrono`/`time`), and elapsed-since-start
+    /// is exactly as useful for "what just happened" debugging.
+    pub elapsed_secs: f64,
+}
+
+/// How many `AppEvent`s the ring buffer keeps; older ones are dropped.
+const MAX_EVENTS: usize = 8;
+
+/// The workflow step the side panel's guide should highlight as current,
+/// derived purely from `AppState` (task 7.2). Steps 1 (scrub to the bar) and
+/// 2 (place seed) share a single derived value since there's no scrub signal
+/// to distinguish them — the guide lists both, but only step 2 is ever
+/// "current"; step 1 is implicitly satisfied once the user reaches step 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowStep {
+    PlaceSeed = 2,
+    Calibrate = 3,
+    Track = 4,
+    Review = 5,
+}
+
+impl WorkflowStep {
+    pub fn ordinal(self) -> u8 {
+        self as u8
+    }
 }
 
 /// UI/session state, independent of egui so the index-clamping logic can be
@@ -84,6 +122,13 @@ pub struct AppState {
     /// evaluate (`TrackerApp::ensure_texture`/click handler sets this via
     /// `note_seed_suggestion`, since `AppState` alone has no frame access).
     pub suggested_tracker: Option<tracker_core::TrackerKind>,
+    /// Recent app events (task 7.2), newest last, capped at `MAX_EVENTS`.
+    /// Fed from the same call sites that already emit `tracing` breadcrumbs,
+    /// so the side panel gives on-screen visibility into the same history
+    /// the log file has.
+    pub events: VecDeque<AppEvent>,
+    /// When this `AppState` was created; used to timestamp `events`.
+    start_time: Instant,
 }
 
 impl AppState {
@@ -101,6 +146,37 @@ impl AppState {
             tracking_run: TrackingRunState::default(),
             bar_path: None,
             suggested_tracker: None,
+            events: VecDeque::new(),
+            start_time: Instant::now(),
+        }
+    }
+
+    /// Appends an event to the ring buffer, evicting the oldest if it's now
+    /// over `MAX_EVENTS`.
+    fn push_event(&mut self, level: EventLevel, message: impl Into<String>) {
+        if self.events.len() >= MAX_EVENTS {
+            self.events.pop_front();
+        }
+        self.events.push_back(AppEvent {
+            level,
+            message: message.into(),
+            elapsed_secs: self.start_time.elapsed().as_secs_f64(),
+        });
+    }
+
+    /// The workflow step the guide should currently highlight (task 7.2):
+    /// no Seed yet → `PlaceSeed`; Seed placed, no active/finished run →
+    /// `Calibrate` (optional — needed only for m/s output); a run
+    /// active/paused → `Track`; a finished `BarPath` → `Review`.
+    pub fn current_step(&self) -> WorkflowStep {
+        if self.bar_path.is_some() {
+            WorkflowStep::Review
+        } else if self.tracking.is_some() || self.tracking_run.running {
+            WorkflowStep::Track
+        } else if self.seed.is_some() {
+            WorkflowStep::Calibrate
+        } else {
+            WorkflowStep::PlaceSeed
         }
     }
 
@@ -155,6 +231,13 @@ impl AppState {
             y = position.y,
             "seed placed"
         );
+        self.push_event(
+            EventLevel::Info,
+            format!(
+                "seed placed at ({:.1}, {:.1}) @ frame {}",
+                position.x, position.y, self.current_frame
+            ),
+        );
     }
 
     /// Records the tracker `suggest_tracker` recommends for the just-placed
@@ -195,11 +278,16 @@ impl AppState {
                 match tracker_core::Calibration::new(first, position, known_length_meters) {
                     Ok(cal) => {
                         tracing::info!(px_per_meter = cal.px_per_meter(), "calibration set");
+                        self.push_event(
+                            EventLevel::Info,
+                            format!("calibration set: {:.1} px/m", cal.px_per_meter()),
+                        );
                         self.calibration = Some(cal);
                         self.status.clear();
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "calibration failed");
+                        self.push_event(EventLevel::Error, format!("calibration failed: {e}"));
                         self.status = format!("calibration failed: {e}");
                     }
                 }
@@ -282,6 +370,10 @@ impl AppState {
             y = seed.position.y,
             "track started"
         );
+        self.push_event(
+            EventLevel::Info,
+            format!("track started @ frame {}", seed.frame_index),
+        );
         let handle = tracking::spawn_tracking(tracking::TrackingJob {
             video_path: self.video_path.clone(),
             width: self.metadata.display_width(),
@@ -321,13 +413,37 @@ impl AppState {
             if let Some(frame_index) = msg.video_frame_index() {
                 self.set_frame(frame_index as i64);
             }
+            let was_paused = self.tracking_run.session_state
+                == Some(tracker_core::SessionState::NeedsReseed);
             if self.tracking_run.apply(msg) {
                 finished = true;
+            }
+            let now_paused = self.tracking_run.session_state
+                == Some(tracker_core::SessionState::NeedsReseed);
+            if now_paused && !was_paused {
+                self.push_event(
+                    EventLevel::Warn,
+                    format!(
+                        "tracking paused @ frame {}: object lost",
+                        self.tracking_run.last_frame_index.unwrap_or_default()
+                    ),
+                );
             }
         }
         if finished {
             self.bar_path = self.tracking_run.bar_path.clone();
             self.tracking = None;
+            if let Some(e) = &self.tracking_run.error {
+                self.push_event(EventLevel::Error, format!("tracking error: {e}"));
+            } else {
+                self.push_event(
+                    EventLevel::Info,
+                    format!(
+                        "tracking complete ({} frames)",
+                        self.tracking_run.frames_processed
+                    ),
+                );
+            }
         }
         any
     }
@@ -341,398 +457,11 @@ impl AppState {
             return;
         };
         handle.resume(seed.frame_index, seed.position);
-    }
-}
-
-/// The eframe `App`. Thin by design: state transitions live on `AppState`
-/// (tested above); this struct wires that state to egui widgets and to the
-/// seek-based frame cache (see `frame_cache.rs` for why: a scrub bar needs
-/// random access but full-video caching is too much memory).
-pub struct TrackerApp {
-    pub state: AppState,
-    cache: FrameCache<SeekingFrameDecoder>,
-    texture: Option<egui::TextureHandle>,
-    /// Which frame `texture` currently shows, so we don't re-upload every
-    /// frame when nothing changed.
-    texture_frame: Option<u64>,
-}
-
-impl TrackerApp {
-    pub fn new(video_path: PathBuf, metadata: VideoMetadata) -> Self {
-        let decoder = SeekingFrameDecoder::new(
-            video_path.clone(),
-            metadata.display_width(),
-            metadata.display_height(),
-            metadata.fps_num,
-            metadata.fps_den,
+        self.push_event(
+            EventLevel::Info,
+            format!("resumed tracking @ frame {}", seed.frame_index),
         );
-        Self {
-            state: AppState::new(video_path, metadata),
-            cache: FrameCache::new(decoder, 16),
-            texture: None,
-            texture_frame: None,
-        }
     }
-
-    fn ensure_texture(&mut self, ctx: &egui::Context) {
-        if self.texture_frame == Some(self.state.current_frame) {
-            return; // already showing the right frame
-        }
-        match self.cache.get(self.state.current_frame) {
-            Ok(frame) => {
-                let size = [frame.width() as usize, frame.height() as usize];
-                let image = egui::ColorImage::from_rgb(size, frame.rgb());
-                let handle = ctx.load_texture(
-                    "current-frame",
-                    image,
-                    egui::TextureOptions::LINEAR,
-                );
-                self.texture = Some(handle);
-                self.texture_frame = Some(self.state.current_frame);
-                self.state.status.clear();
-            }
-            Err(e) => {
-                tracing::error!(frame = self.state.current_frame, error = %e, "failed to decode frame");
-                self.state.status = format!("failed to decode frame {}: {e}", self.state.current_frame);
-            }
-        }
-    }
-}
-
-impl eframe::App for TrackerApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.state.poll_tracking() {
-            ctx.request_repaint();
-        }
-        // While a run is active, keep repainting so progress keeps flowing
-        // even if nothing else prompts a redraw.
-        if self.state.tracking.is_some() {
-            ctx.request_repaint();
-        }
-        self.ensure_texture(ctx);
-
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let label = match self.state.mode {
-                    Mode::ViewOnly => "Place Seed",
-                    Mode::PlacingSeed => "Placing Seed... (click frame)",
-                    Mode::Calibrating { .. } => "Place Seed",
-                };
-                if ui.selectable_label(self.state.mode == Mode::PlacingSeed, label).clicked() {
-                    self.state.toggle_placing_seed();
-                }
-                // Key toggle, e.g. 's' for seed placement.
-                if ui.ctx().input(|i| i.key_pressed(egui::Key::S)) {
-                    self.state.toggle_placing_seed();
-                }
-
-                ui.separator();
-
-                let calibrating = matches!(self.state.mode, Mode::Calibrating { .. });
-                let cal_label = if calibrating {
-                    "Calibrating... (click 2 points)"
-                } else {
-                    "Calibrate"
-                };
-                if ui.selectable_label(calibrating, cal_label).clicked() {
-                    self.state.toggle_calibrating();
-                }
-                // Key toggle, 'c' for calibration.
-                if ui.ctx().input(|i| i.key_pressed(egui::Key::C)) {
-                    self.state.toggle_calibrating();
-                }
-
-                if let Mode::Calibrating {
-                    known_length_meters, ..
-                } = self.state.mode
-                {
-                    ui.label("known length (m):");
-                    let mut meters = known_length_meters;
-                    if ui
-                        .add(egui::DragValue::new(&mut meters).speed(0.001).range(0.001..=10.0))
-                        .changed()
-                    {
-                        self.state.set_calibration_length(meters);
-                    }
-                }
-
-                ui.separator();
-
-                let paused = self.state.tracking_run.session_state
-                    == Some(tracker_core::SessionState::NeedsReseed);
-                if paused {
-                    // Nudge the user straight into placing a new seed on the
-                    // paused frame.
-                    if self.state.mode != Mode::PlacingSeed {
-                        self.state.mode = Mode::PlacingSeed;
-                    }
-                    let ready = self
-                        .state
-                        .seed
-                        .map(|s| Some(s.frame_index) == self.state.tracking_run.last_frame_index)
-                        .unwrap_or(false);
-                    ui.colored_label(egui::Color32::YELLOW, "tracking paused: click a new seed");
-                    if ui
-                        .add_enabled(ready, egui::Button::new("Resume"))
-                        .clicked()
-                    {
-                        self.state.resume_tracking();
-                    }
-                } else if ui
-                    .add_enabled(
-                        self.state.can_start_tracking(),
-                        egui::Button::new("Track"),
-                    )
-                    .clicked()
-                {
-                    self.state.start_tracking();
-                }
-            });
-        });
-
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "{}  |  frame {}/{}  |  {}",
-                    self.state.video_path.display(),
-                    self.state.current_frame,
-                    self.state.metadata.frame_count.unwrap_or(0).saturating_sub(1),
-                    self.state.status_line(),
-                ));
-                let tracking_active = self.state.tracking.is_some()
-                    || self.state.tracking_run.error.is_some()
-                    || self.state.bar_path.is_some();
-                if tracking_active {
-                    ui.separator();
-                    let is_error = self.state.tracking_run.error.is_some();
-                    let is_paused = self.state.tracking_run.session_state
-                        == Some(tracker_core::SessionState::NeedsReseed);
-                    let color = if is_error {
-                        egui::Color32::RED
-                    } else if is_paused {
-                        egui::Color32::YELLOW
-                    } else {
-                        egui::Color32::LIGHT_GREEN
-                    };
-                    ui.colored_label(color, self.state.tracking_run.status_line());
-                }
-                if !self.state.status.is_empty() {
-                    ui.separator();
-                    ui.colored_label(egui::Color32::RED, &self.state.status);
-                }
-            });
-        });
-
-        egui::TopBottomPanel::bottom("scrub_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("<< prev").clicked() {
-                    self.state.prev_frame();
-                }
-                let max = self.state.metadata.frame_count.unwrap_or(1).saturating_sub(1);
-                let mut frame_val = self.state.current_frame;
-                let slider = ui.add(egui::Slider::new(&mut frame_val, 0..=max));
-                if slider.changed() {
-                    self.state.set_frame(frame_val as i64);
-                }
-                if ui.button("next >>").clicked() {
-                    self.state.next_frame();
-                }
-            });
-        });
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(texture) = &self.texture {
-                let available = ui.available_size();
-                let tex_size = texture.size_vec2();
-                let scale = (available.x / tex_size.x).min(available.y / tex_size.y).min(1.0);
-                let response = ui.add(
-                    egui::Image::new((texture.id(), tex_size * scale))
-                        .sense(egui::Sense::click()),
-                );
-                let image_rect = response.rect;
-
-                let calibrating = matches!(self.state.mode, Mode::Calibrating { .. });
-
-                if response.clicked() {
-                    if let Some(click_pos) = response.interact_pointer_pos() {
-                        if let Some(image_px) = screen_to_image_px(
-                            click_pos,
-                            image_rect,
-                            self.state.metadata.display_width(),
-                            self.state.metadata.display_height(),
-                        ) {
-                            if self.state.mode == Mode::PlacingSeed {
-                                self.state.place_seed(image_px);
-                                if let Some(seed) = self.state.seed {
-                                    if let Ok(frame) = self.cache.get(seed.frame_index) {
-                                        let kind = tracker_core::suggest_tracker(
-                                            &frame,
-                                            seed.position,
-                                            tracker_core::TrackerSuggestionConfig::default(),
-                                        );
-                                        self.state.note_seed_suggestion(kind);
-                                    }
-                                }
-                            } else if calibrating {
-                                self.state.place_calibration_point(image_px);
-                            }
-                        }
-                    }
-                }
-
-                if let Some(seed) = self.state.seed {
-                    if seed.frame_index == self.state.current_frame {
-                        draw_crosshair(
-                            ui.painter(),
-                            image_rect,
-                            tex_size,
-                            seed.position,
-                            egui::Color32::from_rgb(255, 60, 60),
-                        );
-                    }
-                }
-
-                // Live tracking crosshair: the latest tracked/interpolated
-                // position, shown only while the display frame has caught
-                // up to it (the display is driven to follow progress in
-                // `poll_tracking`, so in practice this is almost always
-                // true once a run is active).
-                if let (Some(idx), Some(pos)) = (
-                    self.state.tracking_run.last_frame_index,
-                    self.state.tracking_run.last_position,
-                ) {
-                    if idx == self.state.current_frame {
-                        draw_crosshair(
-                            ui.painter(),
-                            image_rect,
-                            tex_size,
-                            pos,
-                            egui::Color32::from_rgb(60, 255, 120),
-                        );
-                    }
-                }
-
-                if let Mode::Calibrating {
-                    first_point: Some(first),
-                    ..
-                } = self.state.mode
-                {
-                    draw_calibration_pending_point(ui.painter(), image_rect, tex_size, first);
-                }
-
-                if let Some((a, b)) = self.state.last_calibration_segment {
-                    draw_calibration_segment(ui.painter(), image_rect, tex_size, a, b);
-                }
-            } else {
-                ui.label("decoding first frame...");
-            }
-        });
-    }
-}
-
-/// Draw a crosshair marker at an image-pixel position (the Seed, red; the
-/// live tracking position, green — see call sites), converting back to
-/// screen coordinates for the currently drawn (scaled, letterboxed) image
-/// rect. Painter overlay only — never mutates frame pixels.
-fn draw_crosshair(
-    painter: &egui::Painter,
-    image_rect: egui::Rect,
-    image_native_size: egui::Vec2,
-    px: tracker_core::Point,
-    color: egui::Color32,
-) {
-    if image_native_size.x <= 0.0 || image_native_size.y <= 0.0 {
-        return;
-    }
-    let scale_x = image_rect.width() / image_native_size.x;
-    let scale_y = image_rect.height() / image_native_size.y;
-    let screen =
-        image_rect.min + egui::Vec2::new(px.x as f32 * scale_x, px.y as f32 * scale_y);
-
-    let radius = 8.0;
-    let stroke = egui::Stroke::new(2.0, color);
-    painter.line_segment(
-        [
-            egui::pos2(screen.x - radius, screen.y),
-            egui::pos2(screen.x + radius, screen.y),
-        ],
-        stroke,
-    );
-    painter.line_segment(
-        [
-            egui::pos2(screen.x, screen.y - radius),
-            egui::pos2(screen.x, screen.y + radius),
-        ],
-        stroke,
-    );
-    painter.circle_stroke(screen, radius * 0.6, stroke);
-}
-
-/// Convert an image-pixel point to a screen point within the currently
-/// drawn (scaled, letterboxed) image rect. Shared by the seed crosshair and
-/// calibration overlays.
-fn image_px_to_screen(
-    image_rect: egui::Rect,
-    image_native_size: egui::Vec2,
-    px: tracker_core::Point,
-) -> Option<egui::Pos2> {
-    if image_native_size.x <= 0.0 || image_native_size.y <= 0.0 {
-        return None;
-    }
-    let scale_x = image_rect.width() / image_native_size.x;
-    let scale_y = image_rect.height() / image_native_size.y;
-    Some(
-        image_rect.min
-            + egui::Vec2::new(px.x as f32 * scale_x, px.y as f32 * scale_y),
-    )
-}
-
-/// Draw a marker at the first-clicked calibration point, while awaiting the
-/// second click.
-fn draw_calibration_pending_point(
-    painter: &egui::Painter,
-    image_rect: egui::Rect,
-    image_native_size: egui::Vec2,
-    point_px: tracker_core::Point,
-) {
-    if let Some(screen) = image_px_to_screen(image_rect, image_native_size, point_px) {
-        let color = egui::Color32::from_rgb(60, 160, 255);
-        painter.circle_filled(screen, 4.0, color);
-    }
-}
-
-/// Draw a line between the two most recently clicked calibration points,
-/// with endpoint markers. Painter overlay only — never mutates frame pixels.
-fn draw_calibration_segment(
-    painter: &egui::Painter,
-    image_rect: egui::Rect,
-    image_native_size: egui::Vec2,
-    a_px: tracker_core::Point,
-    b_px: tracker_core::Point,
-) {
-    let (Some(a), Some(b)) = (
-        image_px_to_screen(image_rect, image_native_size, a_px),
-        image_px_to_screen(image_rect, image_native_size, b_px),
-    ) else {
-        return;
-    };
-    let color = egui::Color32::from_rgb(60, 160, 255);
-    let stroke = egui::Stroke::new(2.0, color);
-    painter.line_segment([a, b], stroke);
-    painter.circle_filled(a, 4.0, color);
-    painter.circle_filled(b, 4.0, color);
-}
-
-/// Runs the app: creates the native window and hands control to eframe's
-/// event loop. Not called from unit tests (no display in CI); `main.rs`
-/// invokes this after CLI parsing + ffprobe succeed.
-pub fn run(video_path: PathBuf, metadata: VideoMetadata) -> eframe::Result<()> {
-    let options = eframe::NativeOptions::default();
-    eframe::run_native(
-        "image-tracker",
-        options,
-        Box::new(move |_cc| Ok(Box::new(TrackerApp::new(video_path, metadata)))),
-    )
 }
 
 #[cfg(test)]
@@ -923,5 +652,69 @@ mod tests {
         assert!(line.contains("placing seed"));
         assert!(line.contains("4.0"));
         assert!(line.contains("5.0"));
+    }
+
+    #[test]
+    fn current_step_starts_at_place_seed() {
+        let state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        assert_eq!(state.current_step(), WorkflowStep::PlaceSeed);
+    }
+
+    #[test]
+    fn current_step_is_calibrate_once_seed_placed() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_placing_seed();
+        state.place_seed(tracker_core::Point::new(1.0, 1.0));
+        assert_eq!(state.current_step(), WorkflowStep::Calibrate);
+    }
+
+    #[test]
+    fn current_step_is_track_while_tracking_run_state_is_running() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.tracking_run = TrackingRunState::started();
+        assert_eq!(state.current_step(), WorkflowStep::Track);
+    }
+
+    #[test]
+    fn current_step_is_review_once_bar_path_present() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        let tb = tracker_core::Timebase::new(30, 1).unwrap();
+        state.bar_path = Some(tracker_core::BarPath::new(&[], &[], tb, 0));
+        assert_eq!(state.current_step(), WorkflowStep::Review);
+    }
+
+    #[test]
+    fn place_seed_pushes_an_info_event() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_placing_seed();
+        state.place_seed(tracker_core::Point::new(1.0, 2.0));
+        assert_eq!(state.events.len(), 1);
+        let event = state.events.back().unwrap();
+        assert_eq!(event.level, EventLevel::Info);
+        assert!(event.message.contains("seed placed"));
+    }
+
+    #[test]
+    fn calibration_failure_pushes_an_error_event() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_calibrating();
+        state.place_calibration_point(tracker_core::Point::new(5.0, 5.0));
+        state.place_calibration_point(tracker_core::Point::new(5.0, 5.0));
+        let event = state.events.back().unwrap();
+        assert_eq!(event.level, EventLevel::Error);
+        assert!(event.message.contains("calibration failed"));
+    }
+
+    #[test]
+    fn event_ring_buffer_caps_at_max_events() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_placing_seed();
+        for i in 0..(MAX_EVENTS + 5) {
+            state.place_seed(tracker_core::Point::new(i as f64, 0.0));
+        }
+        assert_eq!(state.events.len(), MAX_EVENTS);
+        // Oldest events were evicted; the last pushed one is still there.
+        let last = state.events.back().unwrap();
+        assert!(last.message.contains(&format!("({:.1}", (MAX_EVENTS + 4) as f64)));
     }
 }
