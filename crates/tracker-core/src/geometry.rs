@@ -73,6 +73,13 @@ impl Frame {
         let idx = (y as usize * self.width as usize + x as usize) * 3;
         Some([self.rgb[idx], self.rgb[idx + 1], self.rgb[idx + 2]])
     }
+
+    /// The raw interleaved RGB buffer (`width * height * 3` bytes, no
+    /// padding). For adapters that need to hand pixels to something else
+    /// wholesale (e.g. an egui texture upload) rather than pixel-by-pixel.
+    pub fn rgb(&self) -> &[u8] {
+        &self.rgb
+    }
 }
 
 #[cfg(test)]
