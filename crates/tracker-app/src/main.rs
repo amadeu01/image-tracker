@@ -11,9 +11,20 @@
 
 use std::path::PathBuf;
 
-use tracker_app::{app, cli, ffprobe};
+use tracker_app::{app, cli, ffprobe, telemetry};
 
 fn main() {
+    let (_telemetry_guard, log_path) = telemetry::init();
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        log_path = ?log_path,
+        "tracker-app starting"
+    );
+    match &log_path {
+        Some(p) => println!("logging to {}", p.display()),
+        None => println!("file logging unavailable; console-only"),
+    }
+
     let mut args: Vec<String> = std::env::args().skip(1).collect();
 
     if !args.is_empty() && args[0] == "track" {

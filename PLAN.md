@@ -107,6 +107,6 @@ Rust-idiomatic pluggable telemetry: `tracing` for instrumentation; `tracing-subs
 
 | ID | Task | Size | Status | Observations |
 |----|------|------|--------|--------------|
-| 8.1 | Logging foundation: `tracing` + `tracing-subscriber` in tracker-app; console (pretty) layer + JSON-lines rolling file layer (`tracing-appender`) to `$XDG_STATE_HOME/image-tracker/logs/` (`directories` crate); log path printed at startup; RUST_LOG env filter | M | todo | |
+| 8.1 | Logging foundation: `tracing` + `tracing-subscriber` in tracker-app; console (pretty) layer + JSON-lines rolling file layer (`tracing-appender`) to `$XDG_STATE_HOME/image-tracker/logs/` (`directories` crate); log path printed at startup; RUST_LOG env filter | M | done | sonnet-5, 2026-07-15 |
 | 8.2 | Instrument pipeline: spans for probe/decode/track/encode/export with fields (video, frame index, score, session state); errors + reseed/gap events logged; GUI actions (seed, calibrate, track start/stop) as breadcrumb events | S | todo | |
 | 8.3 | Crash capture: panic hook → panic message + backtrace through tracing to file before exit; startup banner logs version + OS + ffmpeg version | S | todo | |
