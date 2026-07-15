@@ -12,10 +12,12 @@ pub mod overlay;
 pub mod patch;
 pub mod session;
 pub mod tracker;
+pub mod video_sink;
 
 pub use bar_path::{BarPath, PathPoint, Timebase, TimebaseError};
 pub use calibration::{Calibration, CalibrationError};
 pub use frame_source::FrameSource;
+pub use video_sink::VideoSink;
 pub use geometry::{Frame, FrameError, Point};
 pub use metric::{CorrelationMetric, Zncc};
 pub use overlay::{render_overlay, Color, OverlayStyle, OverlayStyleBuilder};
