@@ -83,7 +83,7 @@ Cargo workspace:
 
 | ID | Task | Size | Status | Observations |
 |----|------|------|--------|--------------|
-| 5.1 | Smoothing (moving average / Savitzky-Golay) over positions | S | todo | |
+| 5.1 | Smoothing (moving average / Savitzky-Golay) over positions | S | done | sonnet-5, 2026-07-15 |
 | 5.2 | Velocity series (m/s via Calibration); raw positions preserved in export | S | todo | |
 | 5.3 | Rep segmentation from vertical velocity sign changes | M | todo | |
 | 5.4 | Per-rep metrics: depth, peak/mean concentric velocity; in overlay + export | M | todo | |

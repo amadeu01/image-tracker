@@ -14,6 +14,7 @@ pub mod metric;
 pub mod overlay;
 pub mod patch;
 pub mod session;
+pub mod smoothing;
 pub mod suggest;
 pub mod tracker;
 pub mod video_sink;
@@ -33,6 +34,7 @@ pub use session::{
     Gap, Sample, SessionState, Source, TrackingSession, TrackingSessionConfig,
     TrackingSessionConfigBuilder,
 };
+pub use smoothing::{smooth_positions, SmoothingError};
 pub use suggest::{
     suggest_tracker, TrackerKind, TrackerSuggestionConfig, TrackerSuggestionConfigBuilder,
 };
