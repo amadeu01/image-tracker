@@ -16,6 +16,7 @@ use crate::ffprobe::VideoMetadata;
 use crate::frame_cache::{clamp_frame_index, FrameCache};
 use crate::screen_map::screen_to_image_px;
 use crate::seek_source::SeekingFrameDecoder;
+use crate::tracking::{self, TrackingHandle, TrackingRunState};
 
 /// What clicking on the frame view currently does.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -65,6 +66,17 @@ pub struct AppState {
     /// Bottom status bar text; errors surface here rather than panicking
     /// (project rule — see PLAN.md 2.6).
     pub status: String,
+    /// The active/paused tracking worker's channel handle, once "Track" has
+    /// been clicked (task 2.6). `None` before a run starts and again once
+    /// it finishes/errors.
+    pub tracking: Option<TrackingHandle>,
+    /// Pure reducer over that worker's progress messages; drives the live
+    /// crosshair and status bar while `tracking` is active, and still holds
+    /// the last-known state (including any error) after it finishes.
+    pub tracking_run: TrackingRunState,
+    /// The completed `BarPath`, once a tracking run reaches clean
+    /// end-of-video. Consumed by milestone 3 (overlay render / export).
+    pub bar_path: Option<tracker_core::BarPath>,
 }
 
 impl AppState {
@@ -78,6 +90,9 @@ impl AppState {
             calibration: None,
             last_calibration_segment: None,
             status: String::new(),
+            tracking: None,
+            tracking_run: TrackingRunState::default(),
+            bar_path: None,
         }
     }
 
@@ -210,6 +225,79 @@ impl AppState {
     pub fn prev_frame(&mut self) {
         self.set_frame(self.current_frame as i64 - 1);
     }
+
+    /// Whether the "Track" action should currently be available: a Seed
+    /// must be placed, and no run already active.
+    pub fn can_start_tracking(&self) -> bool {
+        self.seed.is_some() && self.tracking.is_none()
+    }
+
+    /// Spawns a background tracking run from the current Seed, using this
+    /// module's default `TemplateTracker`/`TrackingSession` tuning. No-op if
+    /// `can_start_tracking` is false.
+    pub fn start_tracking(&mut self) {
+        if !self.can_start_tracking() {
+            return;
+        }
+        let Some(seed) = self.seed else { return };
+        let handle = tracking::spawn_tracking(
+            self.video_path.clone(),
+            self.metadata.width,
+            self.metadata.height,
+            self.metadata.fps_num,
+            self.metadata.fps_den,
+            seed.frame_index,
+            seed.position,
+            tracking::default_tracker_config(),
+            tracking::default_session_config(),
+        );
+        self.tracking = Some(handle);
+        self.tracking_run = TrackingRunState::started();
+        self.bar_path = None;
+    }
+
+    /// Drains any pending messages from the active tracking worker,
+    /// applying each to `tracking_run` and advancing the display frame to
+    /// follow the latest tracked/interpolated position. Returns `true` if
+    /// at least one message was processed (the caller should request a
+    /// repaint). Once the run finishes (or errors), stores the completed
+    /// `BarPath` (if any) and drops the worker handle.
+    pub fn poll_tracking(&mut self) -> bool {
+        let Some(handle) = &self.tracking else {
+            return false;
+        };
+        let mut any = false;
+        let mut finished = false;
+        let mut messages = Vec::new();
+        while let Ok(msg) = handle.messages.try_recv() {
+            messages.push(msg);
+        }
+        for msg in messages {
+            any = true;
+            if let Some(frame_index) = msg.video_frame_index() {
+                self.set_frame(frame_index as i64);
+            }
+            if self.tracking_run.apply(msg) {
+                finished = true;
+            }
+        }
+        if finished {
+            self.bar_path = self.tracking_run.bar_path.clone();
+            self.tracking = None;
+        }
+        any
+    }
+
+    /// Sends a reseed command to a paused tracking worker, using the
+    /// current Seed (which must already be placed on the frame the run
+    /// paused at — the UI only enables the Resume action once that's
+    /// true). No-op if there's no active worker or no Seed.
+    pub fn resume_tracking(&mut self) {
+        let (Some(handle), Some(seed)) = (&self.tracking, self.seed) else {
+            return;
+        };
+        handle.resume(seed.frame_index, seed.position);
+    }
 }
 
 /// The eframe `App`. Thin by design: state transitions live on `AppState`
@@ -268,6 +356,14 @@ impl TrackerApp {
 
 impl eframe::App for TrackerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.state.poll_tracking() {
+            ctx.request_repaint();
+        }
+        // While a run is active, keep repainting so progress keeps flowing
+        // even if nothing else prompts a redraw.
+        if self.state.tracking.is_some() {
+            ctx.request_repaint();
+        }
         self.ensure_texture(ctx);
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -314,6 +410,38 @@ impl eframe::App for TrackerApp {
                         self.state.set_calibration_length(meters);
                     }
                 }
+
+                ui.separator();
+
+                let paused = self.state.tracking_run.session_state
+                    == Some(tracker_core::SessionState::NeedsReseed);
+                if paused {
+                    // Nudge the user straight into placing a new seed on the
+                    // paused frame.
+                    if self.state.mode != Mode::PlacingSeed {
+                        self.state.mode = Mode::PlacingSeed;
+                    }
+                    let ready = self
+                        .state
+                        .seed
+                        .map(|s| Some(s.frame_index) == self.state.tracking_run.last_frame_index)
+                        .unwrap_or(false);
+                    ui.colored_label(egui::Color32::YELLOW, "tracking paused: click a new seed");
+                    if ui
+                        .add_enabled(ready, egui::Button::new("Resume"))
+                        .clicked()
+                    {
+                        self.state.resume_tracking();
+                    }
+                } else if ui
+                    .add_enabled(
+                        self.state.can_start_tracking(),
+                        egui::Button::new("Track"),
+                    )
+                    .clicked()
+                {
+                    self.state.start_tracking();
+                }
             });
         });
 
@@ -326,6 +454,23 @@ impl eframe::App for TrackerApp {
                     self.state.metadata.frame_count.unwrap_or(0).saturating_sub(1),
                     self.state.status_line(),
                 ));
+                let tracking_active = self.state.tracking.is_some()
+                    || self.state.tracking_run.error.is_some()
+                    || self.state.bar_path.is_some();
+                if tracking_active {
+                    ui.separator();
+                    let is_error = self.state.tracking_run.error.is_some();
+                    let is_paused = self.state.tracking_run.session_state
+                        == Some(tracker_core::SessionState::NeedsReseed);
+                    let color = if is_error {
+                        egui::Color32::RED
+                    } else if is_paused {
+                        egui::Color32::YELLOW
+                    } else {
+                        egui::Color32::LIGHT_GREEN
+                    };
+                    ui.colored_label(color, self.state.tracking_run.status_line());
+                }
                 if !self.state.status.is_empty() {
                     ui.separator();
                     ui.colored_label(egui::Color32::RED, &self.state.status);
@@ -382,7 +527,33 @@ impl eframe::App for TrackerApp {
 
                 if let Some(seed) = self.state.seed {
                     if seed.frame_index == self.state.current_frame {
-                        draw_seed_crosshair(ui.painter(), image_rect, tex_size, seed.position);
+                        draw_crosshair(
+                            ui.painter(),
+                            image_rect,
+                            tex_size,
+                            seed.position,
+                            egui::Color32::from_rgb(255, 60, 60),
+                        );
+                    }
+                }
+
+                // Live tracking crosshair: the latest tracked/interpolated
+                // position, shown only while the display frame has caught
+                // up to it (the display is driven to follow progress in
+                // `poll_tracking`, so in practice this is almost always
+                // true once a run is active).
+                if let (Some(idx), Some(pos)) = (
+                    self.state.tracking_run.last_frame_index,
+                    self.state.tracking_run.last_position,
+                ) {
+                    if idx == self.state.current_frame {
+                        draw_crosshair(
+                            ui.painter(),
+                            image_rect,
+                            tex_size,
+                            pos,
+                            egui::Color32::from_rgb(60, 255, 120),
+                        );
                     }
                 }
 
@@ -404,25 +575,26 @@ impl eframe::App for TrackerApp {
     }
 }
 
-/// Draw a crosshair marker at the Seed's image-pixel position, converting
-/// back to screen coordinates for the currently drawn (scaled, letterboxed)
-/// image rect. Painter overlay only — never mutates frame pixels.
-fn draw_seed_crosshair(
+/// Draw a crosshair marker at an image-pixel position (the Seed, red; the
+/// live tracking position, green — see call sites), converting back to
+/// screen coordinates for the currently drawn (scaled, letterboxed) image
+/// rect. Painter overlay only — never mutates frame pixels.
+fn draw_crosshair(
     painter: &egui::Painter,
     image_rect: egui::Rect,
     image_native_size: egui::Vec2,
-    seed_px: tracker_core::Point,
+    px: tracker_core::Point,
+    color: egui::Color32,
 ) {
     if image_native_size.x <= 0.0 || image_native_size.y <= 0.0 {
         return;
     }
     let scale_x = image_rect.width() / image_native_size.x;
     let scale_y = image_rect.height() / image_native_size.y;
-    let screen = image_rect.min
-        + egui::Vec2::new(seed_px.x as f32 * scale_x, seed_px.y as f32 * scale_y);
+    let screen =
+        image_rect.min + egui::Vec2::new(px.x as f32 * scale_x, px.y as f32 * scale_y);
 
     let radius = 8.0;
-    let color = egui::Color32::from_rgb(255, 60, 60);
     let stroke = egui::Stroke::new(2.0, color);
     painter.line_segment(
         [
