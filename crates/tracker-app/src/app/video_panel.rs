@@ -118,7 +118,7 @@ fn draw_crosshair(
     let screen = image_rect.min + egui::Vec2::new(px.x as f32 * scale_x, px.y as f32 * scale_y);
 
     let radius = 8.0;
-    let stroke = egui::Stroke::new(2.0, color);
+    let stroke = egui::Stroke::new(2.0_f32, color);
     painter.line_segment(
         [
             egui::pos2(screen.x - radius, screen.y),
@@ -182,7 +182,7 @@ fn draw_calibration_segment(
         return;
     };
     let color = egui::Color32::from_rgb(60, 160, 255);
-    let stroke = egui::Stroke::new(2.0, color);
+    let stroke = egui::Stroke::new(2.0_f32, color);
     painter.line_segment([a, b], stroke);
     painter.circle_filled(a, 4.0, color);
     painter.circle_filled(b, 4.0, color);
