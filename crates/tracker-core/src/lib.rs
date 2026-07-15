@@ -6,6 +6,7 @@
 pub mod bar_path;
 pub mod calibration;
 pub mod color;
+pub mod color_advisor;
 pub mod color_tracker;
 pub mod export;
 pub mod frame_source;
@@ -25,6 +26,9 @@ pub mod video_sink;
 pub use bar_path::{BarPath, PathPoint, Timebase, TimebaseError};
 pub use calibration::{Calibration, CalibrationError};
 pub use color::{rgb_to_hsv, ColorModel, ColorModelConfig, ColorModelError};
+pub use color_advisor::{
+    hue_histogram, recommend_marker_hues, HueHistogram, HueHistogramConfig, HueRecommendation,
+};
 pub use color_tracker::{ColorTracker, ColorTrackerConfig, ColorTrackerConfigBuilder};
 pub use export::{export_csv, export_json, export_reps_csv, export_reps_json};
 pub use frame_source::FrameSource;
