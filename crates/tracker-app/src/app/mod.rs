@@ -264,7 +264,7 @@ impl eframe::App for TrackerApp {
         // Side panel before the central panel so it claims its space first
         // (egui lays out panels in call order); the video then fills
         // whatever's left instead of an empty area to its right.
-        side_panel::show(ctx, self.state.as_ref());
+        side_panel::show(ctx, self.state.as_mut());
         video_panel::show(self, ctx);
     }
 }

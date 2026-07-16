@@ -16,9 +16,9 @@ use std::thread;
 
 use tracker_core::{
     BarPath, Calibration, ColorModel, ColorModelConfig, ColorTracker, ColorTrackerConfig, Frame,
-    FrameSource, Point, RepSegmentationConfig, SessionState, Source as SampleSource, StepOutcome,
-    TemplateTracker, TemplateTrackerConfig, Timebase, Tracker, TrackerKind,
-    TrackerSuggestionConfig, TrackingSession, TrackingSessionConfig,
+    FrameSource, Point, PreprocessorChain, RepSegmentationConfig, SessionState,
+    Source as SampleSource, StepOutcome, TemplateTracker, TemplateTrackerConfig, Timebase, Tracker,
+    TrackerKind, TrackerSuggestionConfig, TrackingSession, TrackingSessionConfig,
 };
 
 use crate::ffmpeg_source::FfmpegFrameSource;
@@ -94,7 +94,15 @@ impl Tracker for AnyTracker {
 /// one field per CLI flag (3.6): `--patch-radius`, `--search-radius`,
 /// `--min-score`, `--update-threshold`, `--coast-limit`. `None` falls back
 /// to the module's `DEFAULT_*` const.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// `preprocessor` (11.3, `--filter`) is the one field here that isn't a
+/// `None`-falls-back-to-a-default override: an empty `PreprocessorChain` (its
+/// `Default`) *is* the default (no filtering), so it needs no `Option`
+/// wrapper. It's not `Copy` (it owns a `Vec<Preprocessor>`), so this struct
+/// dropped its `Copy` derive — the one call site that read a `TrackerTuning`
+/// twice (`cli::run_track`, building both `tracker_config` and
+/// `color_tracker_config`) now clones it explicitly.
+#[derive(Debug, Clone, Default)]
 pub struct TrackerTuning {
     pub patch_radius: Option<u32>,
     pub search_radius: Option<u32>,
@@ -105,6 +113,11 @@ pub struct TrackerTuning {
     /// `DEFAULT_REACQUIRE_MIN_SCORE`, decoupled from `update_threshold` so
     /// each can be tuned independently.
     pub reacquire_min_score: Option<f64>,
+    /// Preprocessor chain (11.3, `--filter gaussian:<sigma>` / `--filter
+    /// median:<k>`, repeatable, chain order = flag order): applied to both
+    /// the `TemplateTracker`'s patch and the `ColorTracker`'s search window
+    /// (see `tracker_config`/`color_tracker_config` below).
+    pub preprocessor: PreprocessorChain,
 }
 
 /// Builds a `TemplateTrackerConfig` from the module's default consts.
@@ -118,11 +131,21 @@ pub fn default_session_config() -> TrackingSessionConfig {
 }
 
 /// Builds a `ColorTrackerConfig` using its own module defaults (search
-/// radius 25, min pixels 5) — the color path doesn't currently expose CLI
-/// tuning flags of its own (4.3 is about *choosing* the tracker, not
-/// re-tuning it).
+/// radius 25, min pixels 5) and an empty (identity) filter chain — the
+/// color path doesn't currently expose CLI tuning flags of its own beyond
+/// `--filter` (4.3 is about *choosing* the tracker, not re-tuning it).
 pub fn default_color_tracker_config() -> ColorTrackerConfig {
-    ColorTrackerConfig::builder().build()
+    color_tracker_config(TrackerTuning::default())
+}
+
+/// Builds a `ColorTrackerConfig`, applying `tuning.preprocessor` (11.3,
+/// `--filter`) on top of the color path's own module defaults (search
+/// radius 25, min pixels 5) — the color path has no other tunable knobs of
+/// its own yet.
+pub fn color_tracker_config(tuning: TrackerTuning) -> ColorTrackerConfig {
+    ColorTrackerConfig::builder()
+        .preprocessor(tuning.preprocessor)
+        .build()
 }
 
 /// Builds a `TemplateTrackerConfig`, using `tuning`'s overrides where set and
@@ -133,6 +156,7 @@ pub fn tracker_config(tuning: TrackerTuning) -> TemplateTrackerConfig {
         .search_radius(tuning.search_radius.unwrap_or(DEFAULT_SEARCH_RADIUS))
         .min_score(tuning.min_score.unwrap_or(DEFAULT_MIN_SCORE))
         .update_threshold(tuning.update_threshold.unwrap_or(DEFAULT_UPDATE_THRESHOLD))
+        .preprocessor(tuning.preprocessor)
         .build()
 }
 
@@ -950,12 +974,38 @@ mod tests {
             update_threshold: Some(0.8),
             coast_limit: None,
             reacquire_min_score: None,
+            preprocessor: PreprocessorChain::default(),
         };
         let config = tracker_config(tuning);
         assert_eq!(config.patch_radius(), 20);
         assert_eq!(config.search_radius(), 40);
         assert_eq!(config.min_score(), 0.55);
         assert_eq!(config.update_threshold(), 0.8);
+    }
+
+    #[test]
+    fn tracker_config_applies_preprocessor_chain() {
+        let chain =
+            PreprocessorChain::from_steps(vec![tracker_core::Preprocessor::Median { k: 3 }]);
+        let tuning = TrackerTuning {
+            preprocessor: chain.clone(),
+            ..Default::default()
+        };
+        assert_eq!(tracker_config(tuning).preprocessor(), &chain);
+    }
+
+    #[test]
+    fn color_tracker_config_applies_preprocessor_chain() {
+        let chain = PreprocessorChain::from_steps(vec![tracker_core::Preprocessor::GaussianBlur {
+            sigma: 1.5,
+        }]);
+        let tuning = TrackerTuning {
+            preprocessor: chain.clone(),
+            ..Default::default()
+        };
+        assert_eq!(color_tracker_config(tuning).preprocessor(), &chain);
+        // Default (no tuning) stays an empty/identity chain.
+        assert!(default_color_tracker_config().preprocessor().is_empty());
     }
 
     #[test]

@@ -115,6 +115,110 @@ pub enum Phase {
     Review,
 }
 
+/// User-editable tracking configuration (task 11.3): tracker kind, filter
+/// chain, and the advanced `TrackerTuning` knobs, gathered on `AppState` so
+/// the side panel's "Tracking settings" section can edit them before Track
+/// and, in Review, before Re-track. Read fresh by `start_tracking` on every
+/// run — there is no separate "apply" step, so changing a value between
+/// runs simply takes effect the next time Track/Re-track is clicked; while
+/// a run is active the panel renders these fields read-only (gated in
+/// `side_panel.rs` on `state.tracking.is_none()`), so "locked while running"
+/// is a rendering concern, not a state one.
+///
+/// Filter chain order is fixed for v1 (documented here and in the panel):
+/// Gaussian is always applied before Median when both are enabled — no
+/// reordering UI yet (PLAN 11.3 allows this: "order fixed
+/// gaussian-then-median is fine for v1").
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackingSettings {
+    pub tracker_selection: tracking::TrackerSelection,
+    pub gaussian_enabled: bool,
+    pub gaussian_sigma: f64,
+    pub median_enabled: bool,
+    /// Neighborhood size for the median filter: 3 or 5 (side panel offers a
+    /// combo box over just these two, per PLAN 11.3).
+    pub median_k: u32,
+    pub patch_radius: u32,
+    pub search_radius: u32,
+    pub min_score: f64,
+    pub update_threshold: f64,
+    pub coast_limit: u32,
+    pub reacquire_min_score: f64,
+}
+
+impl Default for TrackingSettings {
+    fn default() -> Self {
+        Self {
+            tracker_selection: tracking::TrackerSelection::Auto,
+            gaussian_enabled: false,
+            gaussian_sigma: 1.5,
+            median_enabled: false,
+            median_k: 3,
+            patch_radius: tracking::DEFAULT_PATCH_RADIUS,
+            search_radius: tracking::DEFAULT_SEARCH_RADIUS,
+            min_score: tracking::DEFAULT_MIN_SCORE,
+            update_threshold: tracking::DEFAULT_UPDATE_THRESHOLD,
+            coast_limit: tracking::DEFAULT_COAST_LIMIT,
+            reacquire_min_score: tracking::DEFAULT_REACQUIRE_MIN_SCORE,
+        }
+    }
+}
+
+impl TrackingSettings {
+    /// Builds the `PreprocessorChain` these settings describe, in the fixed
+    /// gaussian-then-median order (see the struct doc comment).
+    pub fn preprocessor_chain(&self) -> tracker_core::PreprocessorChain {
+        let mut steps = Vec::new();
+        if self.gaussian_enabled {
+            steps.push(tracker_core::Preprocessor::GaussianBlur {
+                sigma: self.gaussian_sigma,
+            });
+        }
+        if self.median_enabled {
+            steps.push(tracker_core::Preprocessor::Median { k: self.median_k });
+        }
+        tracker_core::PreprocessorChain::from_steps(steps)
+    }
+
+    /// Maps these settings onto a `tracking::TrackerTuning`, the shape
+    /// `tracking::tracker_config`/`session_config`/`color_tracker_config`
+    /// consume — the settings->`TrackingJob` mapping task 11.3 asks for.
+    pub fn tuning(&self) -> tracking::TrackerTuning {
+        tracking::TrackerTuning {
+            patch_radius: Some(self.patch_radius),
+            search_radius: Some(self.search_radius),
+            min_score: Some(self.min_score),
+            update_threshold: Some(self.update_threshold),
+            coast_limit: Some(self.coast_limit),
+            reacquire_min_score: Some(self.reacquire_min_score),
+            preprocessor: self.preprocessor_chain(),
+        }
+    }
+
+    /// Short human-readable summary of the resolved strategy, used for the
+    /// "tracking started" event (task 11.3), e.g. `"template, gaussian σ1.5
+    /// + median 3"` or `"auto"` when no filters are enabled.
+    pub fn describe(&self) -> String {
+        let kind = match self.tracker_selection {
+            tracking::TrackerSelection::Auto => "auto",
+            tracking::TrackerSelection::Template => "template",
+            tracking::TrackerSelection::Color => "color",
+        };
+        let mut parts = Vec::new();
+        if self.gaussian_enabled {
+            parts.push(format!("gaussian σ{:.1}", self.gaussian_sigma));
+        }
+        if self.median_enabled {
+            parts.push(format!("median {}", self.median_k));
+        }
+        if parts.is_empty() {
+            kind.to_string()
+        } else {
+            format!("{kind}, {}", parts.join(" + "))
+        }
+    }
+}
+
 /// Gap/interpolation/reseed summary shown in the Results section's quality
 /// line (10.3). `gap_count` and `reseed_count` are currently the same
 /// number — every gap this run hit paused for a reseed (`TrackingRunState`
@@ -287,6 +391,12 @@ pub struct AppState {
     pub events: VecDeque<AppEvent>,
     /// When this `AppState` was created; used to timestamp `events`.
     start_time: Instant,
+    /// User-editable tracker kind/filter chain/tuning (task 11.3), read by
+    /// `start_tracking` on every run. Persists across "New session"/results
+    /// resets (it's a user preference, not run output) so re-tracking or
+    /// starting a fresh session on the same video keeps whatever the user
+    /// last configured.
+    pub settings: TrackingSettings,
 }
 
 impl AppState {
@@ -310,6 +420,7 @@ impl AppState {
             live_reps: None,
             events: VecDeque::new(),
             start_time: Instant::now(),
+            settings: TrackingSettings::default(),
         }
     }
 
@@ -614,16 +725,22 @@ impl AppState {
             return;
         }
         let Some(seed) = self.seed else { return };
+        let tuning = self.settings.tuning();
         tracing::info!(
             video = %self.video_path.display(),
             seed_frame = seed.frame_index,
             x = seed.position.x,
             y = seed.position.y,
+            strategy = %self.settings.describe(),
             "track started"
         );
         self.push_event(
             EventLevel::Info,
-            format!("track started @ frame {}", seed.frame_index),
+            format!(
+                "tracking started: {} @ frame {}",
+                self.settings.describe(),
+                seed.frame_index
+            ),
         );
         let handle = tracking::spawn_tracking(tracking::TrackingJob {
             video_path: self.video_path.clone(),
@@ -633,10 +750,10 @@ impl AppState {
             fps_den: self.metadata.fps_den,
             seed_frame_index: seed.frame_index,
             seed_position: seed.position,
-            tracker_config: tracking::default_tracker_config(),
-            session_config: tracking::default_session_config(),
-            tracker_selection: tracking::TrackerSelection::Auto,
-            color_tracker_config: tracking::default_color_tracker_config(),
+            tracker_config: tracking::tracker_config(tuning.clone()),
+            session_config: tracking::session_config(tuning.clone()),
+            tracker_selection: self.settings.tracker_selection,
+            color_tracker_config: tracking::color_tracker_config(tuning),
         });
         self.tracking = Some(handle);
         self.tracking_run = TrackingRunState::started();

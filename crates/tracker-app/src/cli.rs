@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use tracker_core::{
     all_rep_metrics, export_csv, export_json, export_reps_csv, export_reps_json, hue_histogram,
     recommend_marker_hues, segment_reps, velocity_series, Calibration, HueHistogramConfig, Point,
-    Source,
+    Preprocessor, Source,
 };
 
 use crate::ffprobe;
@@ -23,6 +23,7 @@ use crate::seek_source::SeekingFrameDecoder;
 use crate::tracking;
 
 /// Parsed `track` subcommand arguments.
+#[derive(Debug)]
 pub struct TrackArgs {
     pub video_path: PathBuf,
     pub seed_frame: u64,
@@ -30,8 +31,11 @@ pub struct TrackArgs {
     pub out_dir: PathBuf,
     /// Optional tracker tuning overrides (task 3.6): `--patch-radius`,
     /// `--search-radius`, `--min-score`, `--update-threshold`,
-    /// `--coast-limit`, `--reacquire-min-score`. Unset fields fall back to
-    /// `tracking`'s defaults.
+    /// `--coast-limit`, `--reacquire-min-score`, and (11.3) a repeatable
+    /// `--filter gaussian:<sigma>`/`--filter median:<k>` chain, applied in
+    /// flag order to both the template and color tracker paths. Unset
+    /// fields fall back to `tracking`'s defaults; an absent `--filter`
+    /// leaves the chain empty (no filtering, unchanged from before 11.3).
     pub tuning: tracking::TrackerTuning,
     /// `--tracker auto|template|color` (task 4.3): which tracker to run.
     /// Defaults to `Auto` (suggest from the seed patch).
@@ -47,6 +51,37 @@ pub struct TrackArgs {
 /// Everything that can go wrong parsing CLI args, probing, tracking, or
 /// writing outputs — collapsed to a single string for `main`'s exit path.
 pub type CliError = String;
+
+/// Parses one `--filter` argument's value (11.3): `gaussian:<sigma>` or
+/// `median:<k>`. Repeatable on the command line; `parse_track_args` collects
+/// each occurrence in order into a `PreprocessorChain`, so `--filter
+/// median:3 --filter gaussian:1.5` filters median-then-gaussian, matching
+/// flag order exactly (this is also the shared parser 11.4's `compare`
+/// subcommand will reuse for its own `--filter` flags).
+pub fn parse_filter_spec(spec: &str) -> Result<Preprocessor, CliError> {
+    let (kind, param) = spec.split_once(':').ok_or_else(|| {
+        format!("bad --filter: expected gaussian:<sigma> or median:<k>, got {spec}")
+    })?;
+    match kind {
+        "gaussian" => {
+            let sigma: f64 = param
+                .trim()
+                .parse()
+                .map_err(|_| format!("bad --filter: expected gaussian:<sigma>, got {spec}"))?;
+            Ok(Preprocessor::GaussianBlur { sigma })
+        }
+        "median" => {
+            let k: u32 = param
+                .trim()
+                .parse()
+                .map_err(|_| format!("bad --filter: expected median:<k>, got {spec}"))?;
+            Ok(Preprocessor::Median { k })
+        }
+        _ => Err(format!(
+            "bad --filter: expected gaussian:<sigma> or median:<k>, got {spec}"
+        )),
+    }
+}
 
 /// Parses `track <video> --seed-frame N --seed X,Y --out <dir>` from the
 /// args following the subcommand name itself.
@@ -129,6 +164,11 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
                 tracker_selection = v.parse()?;
                 i += 2;
             }
+            "--filter" => {
+                let v = args.get(i + 1).ok_or("--filter needs a value")?;
+                tuning.preprocessor.push(parse_filter_spec(v)?);
+                i += 2;
+            }
             "--cal" => {
                 let v = args.get(i + 1).ok_or("--cal needs a value (x1,y1,x2,y2)")?;
                 let parts: Vec<&str> = v.split(',').collect();
@@ -183,10 +223,10 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
         fps_den: metadata.fps_den,
         seed_frame_index: args.seed_frame,
         seed_position: args.seed,
-        tracker_config: tracking::tracker_config(args.tuning),
-        session_config: tracking::session_config(args.tuning),
+        tracker_config: tracking::tracker_config(args.tuning.clone()),
+        session_config: tracking::session_config(args.tuning.clone()),
         tracker_selection: args.tracker_selection,
-        color_tracker_config: tracking::default_color_tracker_config(),
+        color_tracker_config: tracking::color_tracker_config(args.tuning.clone()),
     });
 
     // Headless: no UI to place a new seed on NeedsReseed. Best-effort
@@ -662,6 +702,153 @@ mod tests {
         assert_eq!(parsed.tuning.min_score, Some(0.55));
         assert_eq!(parsed.tuning.update_threshold, Some(0.75));
         assert_eq!(parsed.tuning.coast_limit, Some(8));
+    }
+
+    // --- Task 11.3: --filter ---
+
+    #[test]
+    fn parse_filter_spec_parses_gaussian() {
+        let f = parse_filter_spec("gaussian:1.5").unwrap();
+        assert_eq!(f, tracker_core::Preprocessor::GaussianBlur { sigma: 1.5 });
+    }
+
+    #[test]
+    fn parse_filter_spec_parses_median() {
+        let f = parse_filter_spec("median:3").unwrap();
+        assert_eq!(f, tracker_core::Preprocessor::Median { k: 3 });
+    }
+
+    #[test]
+    fn parse_filter_spec_rejects_unknown_kind() {
+        let err = parse_filter_spec("sharpen:2").unwrap_err();
+        assert!(err.contains("bad --filter"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_filter_spec_rejects_missing_colon() {
+        let err = parse_filter_spec("gaussian1.5").unwrap_err();
+        assert!(err.contains("bad --filter"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_filter_spec_rejects_non_numeric_param() {
+        assert!(parse_filter_spec("gaussian:abc").is_err());
+        assert!(parse_filter_spec("median:abc").is_err());
+    }
+
+    #[test]
+    fn single_filter_flag_is_wired_into_tuning_chain() {
+        let args: Vec<String> = vec![
+            "video.mp4",
+            "--seed-frame",
+            "0",
+            "--seed",
+            "1,2",
+            "--out",
+            "out",
+            "--filter",
+            "gaussian:1.5",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let parsed = parse_track_args(&args).unwrap();
+        assert_eq!(
+            parsed.tuning.preprocessor.steps(),
+            &[tracker_core::Preprocessor::GaussianBlur { sigma: 1.5 }]
+        );
+    }
+
+    #[test]
+    fn repeated_filter_flags_preserve_order_in_the_chain() {
+        let args: Vec<String> = vec![
+            "video.mp4",
+            "--seed-frame",
+            "0",
+            "--seed",
+            "1,2",
+            "--out",
+            "out",
+            "--filter",
+            "median:3",
+            "--filter",
+            "gaussian:1.5",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let parsed = parse_track_args(&args).unwrap();
+        assert_eq!(
+            parsed.tuning.preprocessor.steps(),
+            &[
+                tracker_core::Preprocessor::Median { k: 3 },
+                tracker_core::Preprocessor::GaussianBlur { sigma: 1.5 },
+            ]
+        );
+
+        // Reversed flag order produces the reversed chain order.
+        let args_rev: Vec<String> = vec![
+            "video.mp4",
+            "--seed-frame",
+            "0",
+            "--seed",
+            "1,2",
+            "--out",
+            "out",
+            "--filter",
+            "gaussian:1.5",
+            "--filter",
+            "median:3",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let parsed_rev = parse_track_args(&args_rev).unwrap();
+        assert_eq!(
+            parsed_rev.tuning.preprocessor.steps(),
+            &[
+                tracker_core::Preprocessor::GaussianBlur { sigma: 1.5 },
+                tracker_core::Preprocessor::Median { k: 3 },
+            ]
+        );
+    }
+
+    #[test]
+    fn no_filter_flag_leaves_chain_empty() {
+        let args: Vec<String> = vec![
+            "video.mp4",
+            "--seed-frame",
+            "0",
+            "--seed",
+            "1,2",
+            "--out",
+            "out",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let parsed = parse_track_args(&args).unwrap();
+        assert!(parsed.tuning.preprocessor.is_empty());
+    }
+
+    #[test]
+    fn bad_filter_flag_value_is_an_error() {
+        let args: Vec<String> = vec![
+            "video.mp4",
+            "--seed-frame",
+            "0",
+            "--seed",
+            "1,2",
+            "--out",
+            "out",
+            "--filter",
+            "bogus:1",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let err = parse_track_args(&args).unwrap_err();
+        assert!(err.contains("bad --filter"), "unexpected error: {err}");
     }
 
     #[test]

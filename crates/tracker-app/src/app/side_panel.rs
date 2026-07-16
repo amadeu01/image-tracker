@@ -14,6 +14,7 @@
 use eframe::egui;
 
 use super::state::{AppState, EventLevel};
+use crate::tracking::TrackerSelection;
 
 const PANEL_WIDTH: f32 = 260.0;
 
@@ -58,7 +59,7 @@ const STEP_HOWTO: [(u8, &str); 5] = [
     ),
 ];
 
-pub fn show(ctx: &egui::Context, state: Option<&AppState>) {
+pub fn show(ctx: &egui::Context, state: Option<&mut AppState>) {
     egui::SidePanel::right("side_panel")
         .default_width(PANEL_WIDTH)
         .resizable(true)
@@ -73,6 +74,10 @@ pub fn show(ctx: &egui::Context, state: Option<&AppState>) {
                 ui.separator();
                 ui.add_space(8.0);
                 status_section(ui, state);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+                tracking_settings_section(ui, state);
                 if state.results.is_some() {
                     ui.add_space(8.0);
                     ui.separator();
@@ -237,6 +242,180 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
             kv_row(ui, "reps so far", &count.to_string());
         }
     }
+}
+
+/// "Tracking settings" (task 11.3): tracker kind, filter chain, and advanced
+/// tuning knobs, all read fresh by `AppState::start_tracking` on the next
+/// Track/Re-track click. Always visible (before the first Track, and again
+/// in Review ahead of Re-track) rather than hidden mid-run, so the user can
+/// see what a run *will* use even while one is active — but every widget is
+/// wrapped in `add_enabled_ui(!running, ..)` so nothing can be changed while
+/// a run is actually in flight (that run already captured its own
+/// `TrackerTuning`/chain at spawn time; editing these fields mid-run
+/// wouldn't affect it, so disabling avoids the false impression that it
+/// would).
+fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
+    let running = state.tracking.is_some();
+    let header = if running {
+        "Tracking settings (locked while running)"
+    } else {
+        "Tracking settings"
+    };
+    egui::CollapsingHeader::new(header)
+        .id_salt("tracking_settings")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add_enabled_ui(!running, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("tracker:");
+                    let selected_text = match state.settings.tracker_selection {
+                        TrackerSelection::Auto => "Auto",
+                        TrackerSelection::Template => "Template",
+                        TrackerSelection::Color => "Color",
+                    };
+                    egui::ComboBox::from_id_salt("tracker_selection_combo")
+                        .selected_text(selected_text)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut state.settings.tracker_selection,
+                                TrackerSelection::Auto,
+                                "Auto",
+                            );
+                            ui.selectable_value(
+                                &mut state.settings.tracker_selection,
+                                TrackerSelection::Template,
+                                "Template",
+                            );
+                            ui.selectable_value(
+                                &mut state.settings.tracker_selection,
+                                TrackerSelection::Color,
+                                "Color",
+                            );
+                        });
+                });
+                if state.settings.tracker_selection == TrackerSelection::Auto {
+                    let suggestion = match state.suggested_tracker {
+                        Some(tracker_core::TrackerKind::Color) => "Color",
+                        Some(tracker_core::TrackerKind::Template) => "Template",
+                        None => "—",
+                    };
+                    ui.weak(format!("(current suggestion: {suggestion})"));
+                }
+
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Filter chain").strong());
+                ui.weak("applied gaussian-then-median when both are enabled (v1: fixed order)");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut state.settings.gaussian_enabled, "Gaussian blur");
+                    ui.add_enabled(
+                        state.settings.gaussian_enabled,
+                        egui::DragValue::new(&mut state.settings.gaussian_sigma)
+                            .speed(0.05)
+                            .range(0.5..=5.0)
+                            .prefix("σ="),
+                    )
+                    .on_hover_text("Gaussian blur standard deviation, in pixels (0.5-5.0)");
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut state.settings.median_enabled, "Median filter");
+                    ui.add_enabled_ui(state.settings.median_enabled, |ui| {
+                        egui::ComboBox::from_id_salt("median_k_combo")
+                            .selected_text(format!("k={}", state.settings.median_k))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut state.settings.median_k, 3, "k=3");
+                                ui.selectable_value(&mut state.settings.median_k, 5, "k=5");
+                            });
+                    })
+                    .response
+                    .on_hover_text("median filter neighborhood size (removes salt-and-pepper noise)");
+                });
+
+                ui.add_space(6.0);
+                egui::CollapsingHeader::new("Advanced")
+                    .id_salt("tracking_settings_advanced")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        advanced_tuning_row(
+                            ui,
+                            "patch radius (px)",
+                            &mut state.settings.patch_radius,
+                            1.0,
+                            4..=64,
+                            "half-width of the template patch matched around the seed",
+                        );
+                        advanced_tuning_row(
+                            ui,
+                            "search radius (px)",
+                            &mut state.settings.search_radius,
+                            1.0,
+                            5..=200,
+                            "how far around the last position each frame searches for a match",
+                        );
+                        advanced_tuning_row_f64(
+                            ui,
+                            "min score",
+                            &mut state.settings.min_score,
+                            0.01,
+                            0.0..=1.0,
+                            "minimum correlation score counted as a match (Found vs Miss)",
+                        );
+                        advanced_tuning_row_f64(
+                            ui,
+                            "update threshold",
+                            &mut state.settings.update_threshold,
+                            0.01,
+                            0.0..=1.0,
+                            "score above which the template reference is refreshed each step",
+                        );
+                        advanced_tuning_row(
+                            ui,
+                            "coast limit (frames)",
+                            &mut state.settings.coast_limit,
+                            1.0,
+                            0..=60,
+                            "how many consecutive misses to coast through before pausing for a reseed",
+                        );
+                        advanced_tuning_row_f64(
+                            ui,
+                            "reacquire min score",
+                            &mut state.settings.reacquire_min_score,
+                            0.01,
+                            0.0..=1.0,
+                            "minimum score a mid-gap Found must clear to count as reacquisition",
+                        );
+                    });
+            });
+        });
+}
+
+fn advanced_tuning_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut u32,
+    speed: f64,
+    range: std::ops::RangeInclusive<u32>,
+    hover: &str,
+) {
+    ui.horizontal(|ui| {
+        ui.weak(format!("{label}:"));
+        ui.add(egui::DragValue::new(value).speed(speed).range(range))
+            .on_hover_text(hover);
+    });
+}
+
+fn advanced_tuning_row_f64(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f64,
+    speed: f64,
+    range: std::ops::RangeInclusive<f64>,
+    hover: &str,
+) {
+    ui.horizontal(|ui| {
+        ui.weak(format!("{label}:"));
+        ui.add(egui::DragValue::new(value).speed(speed).range(range))
+            .on_hover_text(hover);
+    });
 }
 
 /// Results section (task 10.3), shown only once a run has finished
