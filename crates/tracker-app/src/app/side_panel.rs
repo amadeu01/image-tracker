@@ -120,6 +120,7 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
     let run = &state.tracking_run;
     let is_error = run.error.is_some();
     let is_paused = run.session_state == Some(tracker_core::SessionState::NeedsReseed);
+    let is_searching = run.is_searching();
     let is_done = !run.running && run.bar_path.is_some();
     let (state_label, color) = if is_error {
         ("error", egui::Color32::from_rgb(230, 70, 70))
@@ -130,6 +131,8 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
         )
     } else if is_done {
         ("complete", egui::Color32::from_rgb(90, 200, 110))
+    } else if is_searching {
+        ("object lost — searching…", egui::Color32::GRAY)
     } else if run.running {
         ("tracking", egui::Color32::from_rgb(90, 200, 110))
     } else {

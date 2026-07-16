@@ -120,9 +120,19 @@ pub fn tracker_config(tuning: TrackerTuning) -> TemplateTrackerConfig {
 
 /// Builds a `TrackingSessionConfig`, using `tuning`'s coast_limit override
 /// where set and the module default otherwise.
+///
+/// `reacquire_min_score` (10.2) is always wired to `update_threshold`
+/// (tuning override if set, else `DEFAULT_UPDATE_THRESHOLD`): while a gap is
+/// open, a `Found` must clear the tracker's *update* threshold — not just
+/// its looser `min_score` — to count as reacquisition. This is what stops
+/// the crosshair from locking onto background clutter (a rack, a mirror)
+/// that scores just above `min_score` after the real object has left the
+/// frame. There's no separate CLI flag for it: it inherits
+/// `--update-threshold` so tuning one tunes both.
 pub fn session_config(tuning: TrackerTuning) -> TrackingSessionConfig {
     TrackingSessionConfig::builder()
         .coast_limit(tuning.coast_limit.unwrap_or(DEFAULT_COAST_LIMIT))
+        .reacquire_min_score(tuning.update_threshold.unwrap_or(DEFAULT_UPDATE_THRESHOLD))
         .build()
 }
 
@@ -176,6 +186,14 @@ pub struct TrackingRunState {
     pub last_frame_index: Option<u64>,
     pub last_position: Option<Point>,
     pub last_source: Option<SampleSource>,
+    /// The position of the most recent *tracked* (not coasted/interpolated)
+    /// sample (10.2). While the session is coasting through a gap,
+    /// `last_position` still moves (interpolated per frame) but the UI
+    /// crosshair should freeze here instead — otherwise it visibly wanders
+    /// toward wherever the linear interpolation happens to land while the
+    /// object is actually lost, which is exactly the "crosshair jumped to
+    /// the rack and kept tracking garbage" symptom that motivated this.
+    pub last_tracked_position: Option<Point>,
     pub session_state: Option<SessionState>,
     pub frames_processed: u64,
     /// How many times this run has transitioned into `SessionState::NeedsReseed`
@@ -214,6 +232,9 @@ impl TrackingRunState {
                 self.last_frame_index = Some(video_frame_index);
                 self.last_position = Some(position);
                 self.last_source = Some(source);
+                if source == SampleSource::Tracked {
+                    self.last_tracked_position = Some(position);
+                }
                 self.session_state = Some(state);
                 self.frames_processed += 1;
                 false
@@ -231,6 +252,16 @@ impl TrackingRunState {
         }
     }
 
+    /// True while the session is coasting over an open gap (last sample was
+    /// `Interpolated`) or paused awaiting a reseed (10.2): the honest state
+    /// is "object lost, searching" rather than confidently tracking, so the
+    /// crosshair/status/panel should say so instead of implying a live
+    /// lock.
+    pub fn is_searching(&self) -> bool {
+        self.last_source == Some(SampleSource::Interpolated)
+            || self.session_state == Some(SessionState::NeedsReseed)
+    }
+
     /// Human-readable status-bar text reflecting the run's current phase.
     pub fn status_line(&self) -> String {
         if let Some(e) = &self.error {
@@ -245,6 +276,12 @@ impl TrackingRunState {
         match (self.last_frame_index, self.session_state) {
             (Some(idx), Some(SessionState::NeedsReseed)) => {
                 format!("tracking paused at frame {idx}: object lost, place a new seed then Resume")
+            }
+            (Some(idx), _) if self.last_source == Some(SampleSource::Interpolated) => {
+                format!(
+                    "tracking… frame {idx}: object lost — searching… ({} processed)",
+                    self.frames_processed
+                )
             }
             (Some(idx), _) => {
                 format!(
@@ -728,6 +765,21 @@ mod tests {
     }
 
     #[test]
+    fn session_config_wires_reacquire_min_score_to_update_threshold() {
+        // Default: inherits DEFAULT_UPDATE_THRESHOLD (10.2 app wiring).
+        assert_eq!(
+            session_config(TrackerTuning::default()).reacquire_min_score(),
+            Some(DEFAULT_UPDATE_THRESHOLD)
+        );
+        // Overriding --update-threshold moves the reacquire floor with it.
+        let tuning = TrackerTuning {
+            update_threshold: Some(0.85),
+            ..Default::default()
+        };
+        assert_eq!(session_config(tuning).reacquire_min_score(), Some(0.85));
+    }
+
+    #[test]
     fn started_state_is_running_with_no_data_yet() {
         let state = TrackingRunState::started();
         assert!(state.running);
@@ -765,6 +817,48 @@ mod tests {
         let line = state.status_line();
         assert!(line.contains("paused"));
         assert!(line.contains('7'));
+    }
+
+    #[test]
+    fn coasting_progress_is_reported_as_searching_and_freezes_tracked_position() {
+        let mut state = TrackingRunState::started();
+        state.apply(TrackingMessage::Progress {
+            video_frame_index: 4,
+            position: Point::new(10.0, 10.0),
+            source: SampleSource::Tracked,
+            state: SessionState::Tracking,
+        });
+        assert_eq!(state.last_tracked_position, Some(Point::new(10.0, 10.0)));
+        assert!(!state.is_searching());
+
+        // Gap opens: the session keeps coasting (still `Tracking`, not yet
+        // `NeedsReseed`), but the sample source is `Interpolated`.
+        state.apply(TrackingMessage::Progress {
+            video_frame_index: 5,
+            position: Point::new(25.0, 25.0), // interpolated toward garbage
+            source: SampleSource::Interpolated,
+            state: SessionState::Tracking,
+        });
+        assert!(state.is_searching());
+        let line = state.status_line();
+        assert!(line.contains("lost"));
+        assert!(line.contains("searching"));
+        // The frozen position stays at the last real tracked sample, not
+        // wherever the interpolation currently sits.
+        assert_eq!(state.last_tracked_position, Some(Point::new(10.0, 10.0)));
+        assert_eq!(state.last_position, Some(Point::new(25.0, 25.0)));
+    }
+
+    #[test]
+    fn paused_state_is_also_reported_as_searching() {
+        let mut state = TrackingRunState::started();
+        state.apply(TrackingMessage::Progress {
+            video_frame_index: 7,
+            position: Point::new(0.0, 0.0),
+            source: SampleSource::Interpolated,
+            state: SessionState::NeedsReseed,
+        });
+        assert!(state.is_searching());
     }
 
     #[test]

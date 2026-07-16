@@ -66,22 +66,29 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
             }
         }
 
-        // Live tracking crosshair: the latest tracked/interpolated
-        // position, shown only while the display frame has caught up to it
-        // (the display is driven to follow progress in `poll_tracking`, so
-        // in practice this is almost always true once a run is active).
+        // Live tracking crosshair: shown only while the display frame has
+        // caught up to the run's progress (the display is driven to follow
+        // progress in `poll_tracking`, so in practice this is almost always
+        // true once a run is active).
+        //
+        // 10.2: while the session is coasting through a gap or paused
+        // awaiting reseed, drawing at `last_position` would show the
+        // crosshair wandering along the interpolated path toward wherever
+        // it eventually (mis)reacquires — the "jumped to the rack" bug.
+        // Instead freeze at `last_tracked_position` (the last real match)
+        // and render gray, honestly showing "lost" rather than a confident
+        // green lock.
         if let (Some(idx), Some(pos)) = (
             app.state.tracking_run.last_frame_index,
-            app.state.tracking_run.last_position,
+            app.state.tracking_run.last_tracked_position,
         ) {
             if idx == app.state.current_frame {
-                draw_crosshair(
-                    ui.painter(),
-                    image_rect,
-                    tex_size,
-                    pos,
-                    egui::Color32::from_rgb(60, 255, 120),
-                );
+                let color = if app.state.tracking_run.is_searching() {
+                    egui::Color32::from_rgb(150, 150, 150)
+                } else {
+                    egui::Color32::from_rgb(60, 255, 120)
+                };
+                draw_crosshair(ui.painter(), image_rect, tex_size, pos, color);
             }
         }
 

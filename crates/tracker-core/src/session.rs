@@ -14,6 +14,7 @@ use crate::tracker::{StepOutcome, Tracker};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TrackingSessionConfig {
     coast_limit: u32,
+    reacquire_min_score: Option<f64>,
 }
 
 impl TrackingSessionConfig {
@@ -27,31 +28,47 @@ impl TrackingSessionConfig {
     pub fn coast_limit(&self) -> u32 {
         self.coast_limit
     }
+
+    /// Minimum score a `Found` outcome must clear to count as a
+    /// reacquisition while a gap is open (`miss_count > 0`). `None` (the
+    /// default) preserves the old behavior of trusting the tracker's own
+    /// `min_score` gate unconditionally — set this from the app to the
+    /// tracker's `update_threshold` (10.2) so a marginal match against
+    /// background clutter (e.g. a rack/mirror that happens to resemble the
+    /// template) doesn't end a gap and start "tracking" garbage. Normal
+    /// (non-gap) stepping is unaffected either way.
+    pub fn reacquire_min_score(&self) -> Option<f64> {
+        self.reacquire_min_score
+    }
 }
 
 /// Builder for `TrackingSessionConfig`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct TrackingSessionConfigBuilder {
-    coast_limit: u32,
-}
-
-impl Default for TrackingSessionConfigBuilder {
-    fn default() -> Self {
-        Self { coast_limit: 5 }
-    }
+    coast_limit: Option<u32>,
+    reacquire_min_score: Option<f64>,
 }
 
 impl TrackingSessionConfigBuilder {
     /// Sets the maximum number of consecutive missed frames coasted over
     /// before the session pauses and needs a reseed.
     pub fn coast_limit(mut self, limit: u32) -> Self {
-        self.coast_limit = limit;
+        self.coast_limit = Some(limit);
+        self
+    }
+
+    /// Sets the minimum score a `Found` outcome must clear, while a gap is
+    /// open, to count as reacquisition rather than another miss. Leave
+    /// unset for the backward-compatible behavior of accepting any `Found`.
+    pub fn reacquire_min_score(mut self, score: f64) -> Self {
+        self.reacquire_min_score = Some(score);
         self
     }
 
     pub fn build(self) -> TrackingSessionConfig {
         TrackingSessionConfig {
-            coast_limit: self.coast_limit,
+            coast_limit: self.coast_limit.unwrap_or(5),
+            reacquire_min_score: self.reacquire_min_score,
         }
     }
 }
@@ -161,7 +178,30 @@ impl<T: Tracker> TrackingSession<T> {
         }
 
         let next_index = self.frame_index + 1;
-        match self.tracker.step(frame, self.last_pos) {
+        let outcome = self.tracker.step(frame, self.last_pos);
+
+        // Reacquisition strictness (10.2): mid-gap, a `Found` only counts
+        // as reacquiring the object if its score clears
+        // `reacquire_min_score` — otherwise it's demoted to a `Miss` so the
+        // gap keeps coasting instead of locking onto a marginal match
+        // (rack, mirror, whatever else scores just above the tracker's own
+        // `min_score`). Normal (non-gap) stepping is untouched: this only
+        // applies while `open_gap_start` is set, i.e. we're already in a
+        // miss streak.
+        let outcome = match outcome {
+            StepOutcome::Found { score, .. }
+                if self.open_gap_start.is_some()
+                    && self
+                        .config
+                        .reacquire_min_score
+                        .is_some_and(|threshold| score < threshold) =>
+            {
+                StepOutcome::Miss
+            }
+            other => other,
+        };
+
+        match outcome {
             StepOutcome::Found { position, .. } => {
                 if let Some(gap_start) = self.open_gap_start.take() {
                     self.gaps.push(Gap {
@@ -394,5 +434,145 @@ mod tests {
         assert_eq!(session.state(), SessionState::Tracking);
         // No closed gap recorded yet: it's still open.
         assert!(session.gaps().is_empty());
+    }
+
+    // -- 10.2: reacquisition strictness --------------------------------
+
+    /// A `Tracker` test double that returns a scripted sequence of
+    /// `StepOutcome`s (one per `step` call, repeating the last entry once
+    /// exhausted), so reacquisition-threshold tests can control scores
+    /// precisely without needing real image patches to happen to score in a
+    /// particular band.
+    struct ScriptedTracker {
+        outcomes: std::vec::IntoIter<StepOutcome>,
+        last: StepOutcome,
+    }
+
+    impl ScriptedTracker {
+        fn new(outcomes: Vec<StepOutcome>) -> Self {
+            let last = outcomes.last().copied().unwrap_or(StepOutcome::Miss);
+            Self {
+                outcomes: outcomes.into_iter(),
+                last,
+            }
+        }
+    }
+
+    impl Tracker for ScriptedTracker {
+        fn step(&mut self, _frame: &Frame, _last_pos: Point) -> StepOutcome {
+            self.outcomes.next().unwrap_or(self.last)
+        }
+    }
+
+    fn make_scripted_session(
+        coast_limit: u32,
+        reacquire_min_score: Option<f64>,
+        outcomes: Vec<StepOutcome>,
+    ) -> TrackingSession<ScriptedTracker> {
+        let tracker = ScriptedTracker::new(outcomes);
+        let mut builder = TrackingSessionConfig::builder().coast_limit(coast_limit);
+        if let Some(score) = reacquire_min_score {
+            builder = builder.reacquire_min_score(score);
+        }
+        TrackingSession::new(tracker, 0, Point::new(5.0, 5.0), builder.build())
+    }
+
+    #[test]
+    fn mid_gap_weak_match_below_reacquire_threshold_stays_a_gap() {
+        // Miss, then a weak "Found" (score 0.55) that clears the tracker's
+        // own min_score but sits below the configured reacquire_min_score
+        // (0.7) — must be treated as another miss, keeping the gap open.
+        let mut session = make_scripted_session(
+            5,
+            Some(0.7),
+            vec![
+                StepOutcome::Miss,
+                StepOutcome::Found {
+                    position: Point::new(40.0, 40.0), // e.g. the rack, far off
+                    score: 0.55,
+                },
+            ],
+        );
+        session.step(&blank_frame(W, H)); // frame 1: miss
+        session.step(&blank_frame(W, H)); // frame 2: weak match, demoted to miss
+        assert_eq!(session.state(), SessionState::Tracking);
+        assert!(
+            session.gaps().is_empty(),
+            "gap should still be open (not yet closed)"
+        );
+        // No sample was recorded for the demoted "Found" at (40, 40); the
+        // session must not have jumped there.
+        assert!(session
+            .samples()
+            .iter()
+            .all(|s| s.position != Point::new(40.0, 40.0)));
+    }
+
+    #[test]
+    fn mid_gap_strong_match_at_or_above_reacquire_threshold_closes_gap() {
+        let mut session = make_scripted_session(
+            5,
+            Some(0.7),
+            vec![
+                StepOutcome::Miss,
+                StepOutcome::Found {
+                    position: Point::new(20.0, 20.0),
+                    score: 0.9,
+                },
+            ],
+        );
+        session.step(&blank_frame(W, H)); // frame 1: miss
+        session.step(&blank_frame(W, H)); // frame 2: strong match, reacquires
+        assert_eq!(session.state(), SessionState::Tracking);
+        assert_eq!(session.gaps(), &[Gap { start: 1, end: 1 }]);
+        let last = session.samples().last().unwrap();
+        assert_eq!(last.position, Point::new(20.0, 20.0));
+        assert_eq!(last.source, Source::Tracked);
+    }
+
+    #[test]
+    fn reacquire_threshold_does_not_affect_normal_non_gap_tracking() {
+        // No gap open: a weak-but-above-min_score Found is accepted exactly
+        // as it always was, threshold or not — the strictness only kicks in
+        // once a miss streak is underway.
+        let mut session = make_scripted_session(
+            5,
+            Some(0.7),
+            vec![StepOutcome::Found {
+                position: Point::new(6.0, 6.0),
+                score: 0.55,
+            }],
+        );
+        session.step(&blank_frame(W, H)); // frame 1: weak Found, but no gap open
+        assert_eq!(session.state(), SessionState::Tracking);
+        assert!(session.gaps().is_empty());
+        let last = session.samples().last().unwrap();
+        assert_eq!(last.position, Point::new(6.0, 6.0));
+        assert_eq!(last.source, Source::Tracked);
+    }
+
+    #[test]
+    fn without_reacquire_min_score_behavior_is_unchanged_backward_compat() {
+        // reacquire_min_score left unset (None): any Found — however
+        // marginal — closes the gap, exactly as before this feature
+        // existed.
+        let mut session = make_scripted_session(
+            5,
+            None,
+            vec![
+                StepOutcome::Miss,
+                StepOutcome::Found {
+                    position: Point::new(20.0, 20.0),
+                    score: 0.05, // would fail any sane reacquire threshold
+                },
+            ],
+        );
+        session.step(&blank_frame(W, H)); // frame 1: miss
+        session.step(&blank_frame(W, H)); // frame 2: marginal match, still reacquires
+        assert_eq!(session.state(), SessionState::Tracking);
+        assert_eq!(session.gaps(), &[Gap { start: 1, end: 1 }]);
+        let last = session.samples().last().unwrap();
+        assert_eq!(last.position, Point::new(20.0, 20.0));
+        assert_eq!(last.source, Source::Tracked);
     }
 }
