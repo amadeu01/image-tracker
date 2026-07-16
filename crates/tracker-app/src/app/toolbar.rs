@@ -13,7 +13,11 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
             // Always available (10.5): opening a video works from an empty
             // window and any time afterward (loads a fresh session on the
             // new file).
-            if ui.button("Open video…").clicked() {
+            if ui
+                .button("Open video…")
+                .on_hover_text("open a video file to track (Ctrl+O)")
+                .clicked()
+            {
                 app.prompt_open_video();
             }
             let ctrl_o = ui.ctx().input(|i| {
@@ -35,6 +39,7 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
             };
             if ui
                 .selectable_label(state.mode == Mode::PlacingSeed, label)
+                .on_hover_text("click a frame to mark the object to track (S toggles this mode)")
                 .clicked()
             {
                 state.toggle_placing_seed();
@@ -52,7 +57,14 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
             } else {
                 "Calibrate"
             };
-            if ui.selectable_label(calibrating, cal_label).clicked() {
+            if ui
+                .selectable_label(calibrating, cal_label)
+                .on_hover_text(
+                    "click two points a known real-world distance apart, \
+                     to convert pixels to meters (C toggles this mode)",
+                )
+                .clicked()
+            {
                 state.toggle_calibrating();
             }
             // Key toggle, 'c' for calibration.
@@ -72,6 +84,10 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                         egui::DragValue::new(&mut meters)
                             .speed(0.001)
                             .range(0.001..=10.0),
+                    )
+                    .on_hover_text(
+                        "real-world distance between the two calibration points, in meters \
+                         (defaults to a 0.450 m competition plate diameter)",
                     )
                     .changed()
                 {
@@ -94,7 +110,13 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                     .map(|s| Some(s.frame_index) == state.tracking_run.last_frame_index)
                     .unwrap_or(false);
                 ui.colored_label(egui::Color32::YELLOW, "tracking paused: click a new seed");
-                if ui.add_enabled(ready, egui::Button::new("Resume")).clicked() {
+                if ui
+                    .add_enabled(ready, egui::Button::new("Resume"))
+                    .on_hover_text(
+                        "resume tracking from the new seed you just placed on the paused frame",
+                    )
+                    .clicked()
+                {
                     state.resume_tracking();
                 }
             } else if state.tracking.is_some() {
@@ -103,29 +125,37 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                 // button — mirrors the reseed-pause branch above, which
                 // swaps Track for its own Resume.
                 if state.paused {
-                    if ui.button("Resume").clicked() {
+                    if ui
+                        .button("Resume")
+                        .on_hover_text("resume the paused tracking run")
+                        .clicked()
+                    {
                         state.unpause_tracking();
                     }
                 } else if ui
                     .add_enabled(state.can_pause_tracking(), egui::Button::new("Pause"))
+                    .on_hover_text("pause the active tracking run")
                     .clicked()
                 {
                     state.pause_tracking();
                 }
                 if ui
                     .add_enabled(state.can_stop_tracking(), egui::Button::new("Stop"))
+                    .on_hover_text("stop now and keep the results collected so far")
                     .clicked()
                 {
                     state.stop_tracking();
                 }
                 if ui
                     .add_enabled(state.can_discard_tracking(), egui::Button::new("Discard"))
+                    .on_hover_text("abort the run and throw away its results, keeping the seed")
                     .clicked()
                 {
                     state.discard_tracking();
                 }
             } else if ui
                 .add_enabled(state.can_start_tracking(), egui::Button::new("Track"))
+                .on_hover_text("start tracking the seeded object from its frame to the end")
                 .clicked()
             {
                 state.start_tracking();
@@ -135,6 +165,10 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                 ui.separator();
                 if ui
                     .add_enabled(state.can_retrack(), egui::Button::new("Re-track"))
+                    .on_hover_text(
+                        "clear this run's results and immediately start a new run \
+                         from the same seed and calibration",
+                    )
                     .clicked()
                 {
                     state.retrack();
@@ -143,6 +177,10 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                     .add_enabled(
                         state.can_start_new_session(),
                         egui::Button::new("New session"),
+                    )
+                    .on_hover_text(
+                        "clear the seed, calibration, and results and start over \
+                         on the same video",
                     )
                     .clicked()
                 {

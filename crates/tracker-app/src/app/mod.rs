@@ -17,6 +17,7 @@
 mod bottom_bar;
 mod side_panel;
 mod state;
+mod thumbnail_panel;
 mod toolbar;
 mod video_panel;
 
@@ -29,6 +30,7 @@ use eframe::egui;
 use crate::ffprobe::VideoMetadata;
 use crate::frame_cache::FrameCache;
 use crate::seek_source::SeekingFrameDecoder;
+use crate::thumbnail_worker::{self, ThumbnailHandle, ThumbnailMessage};
 
 /// Video extensions offered in the "Open video…" file dialog (10.5). Not
 /// exhaustive (ffmpeg reads far more), just the common ones a user is likely
@@ -56,6 +58,19 @@ pub struct TrackerApp {
     /// the empty-state central panel (which has no `AppState.status` to
     /// write to). Cleared as soon as an open succeeds.
     pub open_error: Option<String>,
+    /// The background thumbnail-decode worker for the current video (10.6),
+    /// once spawned by `load_video`. `None` before the first video loads;
+    /// dropping a previous handle here (on a second "Open video") also
+    /// stops that worker sending any more messages into the void — see
+    /// `thumbnail_worker::spawn_thumbnails`'s early-return-on-send-error.
+    thumbnails: Option<ThumbnailHandle>,
+    /// Decoded thumbnail textures, indexed the same way as
+    /// `thumbnails.frame_indices` (slot `i` here <-> `frame_indices[i]`
+    /// there). `None` entries are still-loading placeholders; sized to
+    /// `frame_indices.len()` as soon as the handle is spawned so the strip
+    /// can lay out every placeholder box immediately (10.6's "placeholder
+    /// boxes fill in as thumbs arrive").
+    thumbnail_textures: Vec<Option<egui::TextureHandle>>,
 }
 
 impl TrackerApp {
@@ -77,6 +92,8 @@ impl TrackerApp {
             texture: None,
             texture_frame: None,
             open_error: None,
+            thumbnails: None,
+            thumbnail_textures: Vec::new(),
         }
     }
 
@@ -94,10 +111,54 @@ impl TrackerApp {
             metadata.fps_num,
             metadata.fps_den,
         );
+        let thumb_handle = thumbnail_worker::spawn_thumbnails(
+            video_path.clone(),
+            metadata.display_width(),
+            metadata.display_height(),
+            metadata.fps_num,
+            metadata.fps_den,
+            metadata.frame_count.unwrap_or(1),
+        );
+        self.thumbnail_textures = vec![None; thumb_handle.frame_indices.len()];
+        self.thumbnails = Some(thumb_handle);
         self.state = Some(AppState::new(video_path, metadata));
         self.cache = Some(FrameCache::new(decoder, 16));
         self.texture = None;
         self.texture_frame = None;
+    }
+
+    /// Drains any pending messages from the thumbnail-decode worker (10.6),
+    /// uploading each arriving thumbnail as its own small texture as soon as
+    /// it's ready — the strip shows placeholders for slots that haven't
+    /// arrived yet rather than blocking on the whole batch. Returns `true`
+    /// if at least one message was processed (caller should request a
+    /// repaint), mirroring `AppState::poll_tracking`/`poll_export`'s shape.
+    fn poll_thumbnails(&mut self, ctx: &egui::Context) -> bool {
+        let Some(handle) = &self.thumbnails else {
+            return false;
+        };
+        let mut any = false;
+        while let Ok(msg) = handle.messages.try_recv() {
+            any = true;
+            match msg {
+                ThumbnailMessage::Thumb {
+                    slot,
+                    width,
+                    height,
+                    rgb,
+                    ..
+                } => {
+                    let image = egui::ColorImage::from_rgb([width as usize, height as usize], &rgb);
+                    let name = format!("thumb-{slot}");
+                    let tex = ctx.load_texture(name, image, egui::TextureOptions::NEAREST);
+                    if let Some(slot_ref) = self.thumbnail_textures.get_mut(slot) {
+                        *slot_ref = Some(tex);
+                    }
+                }
+                ThumbnailMessage::Done => {}
+            }
+        }
+        any
     }
 
     /// Opens the "Open video…" native file dialog (`rfd`), filtered to
@@ -184,16 +245,53 @@ impl eframe::App for TrackerApp {
                 ctx.request_repaint();
             }
         }
+        if self.poll_thumbnails(ctx) {
+            ctx.request_repaint();
+        }
         self.ensure_texture(ctx);
+        handle_frame_step_shortcuts(ctx, self.state.as_mut());
 
         toolbar::show(ctx, self);
         bottom_bar::show_status_bar(ctx, self.state.as_ref());
         bottom_bar::show_scrub_bar(ctx, self.state.as_mut());
+        // Thumbnail strip after the scrub bar so it stacks above it
+        // (`TopBottomPanel::bottom` panels stack upward from the bottom in
+        // call order); hidden entirely in the empty state (10.5) since
+        // there's no video/thumbnails to show.
+        thumbnail_panel::show(ctx, self);
         // Side panel before the central panel so it claims its space first
         // (egui lays out panels in call order); the video then fills
         // whatever's left instead of an empty area to its right.
         side_panel::show(ctx, self.state.as_ref());
         video_panel::show(self, ctx);
+    }
+}
+
+/// ←/→ = ±1 frame, Shift+←/→ = ±10 (task 10.6). Guarded by
+/// `wants_keyboard_input` so this doesn't steal arrow-key input from a
+/// focused text field — e.g. the calibration "known length" `DragValue`,
+/// which egui lets left/right arrows nudge while it's focused. No-op with
+/// no video loaded.
+fn handle_frame_step_shortcuts(ctx: &egui::Context, state: Option<&mut AppState>) {
+    let Some(state) = state else {
+        return;
+    };
+    if ctx.wants_keyboard_input() {
+        return;
+    }
+    let (left, right, shift) = ctx.input(|i| {
+        (
+            i.key_pressed(egui::Key::ArrowLeft),
+            i.key_pressed(egui::Key::ArrowRight),
+            i.modifiers.shift,
+        )
+    });
+    let step: i64 = if shift { 10 } else { 1 };
+    if left {
+        state.set_frame(state.current_frame as i64 - step);
+    }
+    if right {
+        state.set_frame(state.current_frame as i64 + step);
     }
 }
 

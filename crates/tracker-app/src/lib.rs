@@ -11,4 +11,6 @@ pub mod overlay_export;
 pub mod screen_map;
 pub mod seek_source;
 pub mod telemetry;
+pub mod thumbnail_strip;
+pub mod thumbnail_worker;
 pub mod tracking;

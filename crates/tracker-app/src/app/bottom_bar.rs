@@ -51,16 +51,30 @@ pub fn show_scrub_bar(ctx: &egui::Context, state: Option<&mut AppState>) {
             return;
         };
         ui.horizontal(|ui| {
-            if ui.button("<< prev").clicked() {
+            // Bigger prev/next buttons (10.6) -- easier click targets than
+            // the old text-sized buttons, since these get used far more
+            // often than a one-off toolbar action.
+            let button_size = egui::vec2(56.0, 28.0);
+            if ui
+                .add_sized(button_size, egui::Button::new("<< prev"))
+                .on_hover_text("previous frame (←)")
+                .clicked()
+            {
                 state.prev_frame();
             }
             let max = state.metadata.frame_count.unwrap_or(1).saturating_sub(1);
             let mut frame_val = state.current_frame;
-            let slider = ui.add(egui::Slider::new(&mut frame_val, 0..=max));
+            let slider = ui
+                .add(egui::Slider::new(&mut frame_val, 0..=max))
+                .on_hover_text("scrub to a frame (←/→ = ±1, Shift+←/→ = ±10)");
             if slider.changed() {
                 state.set_frame(frame_val as i64);
             }
-            if ui.button("next >>").clicked() {
+            if ui
+                .add_sized(button_size, egui::Button::new("next >>"))
+                .on_hover_text("next frame (→)")
+                .clicked()
+            {
                 state.next_frame();
             }
         });
