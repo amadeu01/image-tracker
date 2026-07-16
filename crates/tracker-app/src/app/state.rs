@@ -397,6 +397,19 @@ pub struct AppState {
     /// starting a fresh session on the same video keeps whatever the user
     /// last configured.
     pub settings: TrackingSettings,
+    /// The active background strategy-benchmark worker (task 11.4, "Test
+    /// strategies" button), once started. `None` before it's clicked and
+    /// again once the run finishes/errors.
+    pub benchmark: Option<crate::compare::BenchmarkHandle>,
+    /// How many of the 6 strategies the active benchmark has started
+    /// (`0..=6`), for the side panel's progress display. `None` outside an
+    /// active run.
+    pub benchmark_progress: Option<(usize, usize)>,
+    /// The finished benchmark's rows, once `benchmark` reaches `Done`.
+    /// Persists after the run finishes so the results table/"Apply winner"
+    /// button stay visible until a new benchmark is started or the session
+    /// resets.
+    pub benchmark_rows: Option<Vec<crate::compare::BenchmarkRow>>,
 }
 
 impl AppState {
@@ -421,6 +434,9 @@ impl AppState {
             events: VecDeque::new(),
             start_time: Instant::now(),
             settings: TrackingSettings::default(),
+            benchmark: None,
+            benchmark_progress: None,
+            benchmark_rows: None,
         }
     }
 
@@ -872,6 +888,123 @@ impl AppState {
             }
         }
         any
+    }
+
+    /// Whether the "Test strategies" button (task 11.4) should currently be
+    /// available: a Seed must be placed, and neither a tracking run nor
+    /// another benchmark is already active.
+    pub fn can_test_strategies(&self) -> bool {
+        self.seed.is_some() && self.tracking.is_none() && self.benchmark.is_none()
+    }
+
+    /// Spawns the background strategy benchmark (task 11.4): the fixed
+    /// 6-strategy matrix over a `compare::DEFAULT_COMPARE_FRAMES`-frame
+    /// segment starting at the current Seed. No-op if
+    /// `can_test_strategies` is false. Reuses the current settings' tuning
+    /// as the shared baseline (patch/search radius etc); only the filter
+    /// chain and tracker kind vary per strategy, same as the CLI `compare`
+    /// subcommand.
+    pub fn start_strategy_benchmark(&mut self) {
+        if !self.can_test_strategies() {
+            return;
+        }
+        let Some(seed) = self.seed else { return };
+        let tuning = self.settings.tuning();
+        let coast_limit = self.settings.coast_limit;
+        self.push_event(
+            EventLevel::Info,
+            format!("strategy benchmark started @ frame {}", seed.frame_index),
+        );
+        let handle = crate::compare::spawn_benchmark(
+            self.video_path.clone(),
+            self.metadata.display_width(),
+            self.metadata.display_height(),
+            seed.frame_index,
+            seed.position,
+            crate::compare::DEFAULT_COMPARE_FRAMES,
+            coast_limit,
+            tuning,
+        );
+        self.benchmark = Some(handle);
+        self.benchmark_progress = Some((0, 6));
+        self.benchmark_rows = None;
+    }
+
+    /// Drains any pending messages from the active benchmark worker.
+    /// Returns `true` if at least one message was processed (the caller
+    /// should request a repaint), mirroring `poll_tracking`/`poll_export`'s
+    /// shape.
+    pub fn poll_benchmark(&mut self) -> bool {
+        let Some(handle) = &self.benchmark else {
+            return false;
+        };
+        let mut any = false;
+        let mut messages = Vec::new();
+        while let Ok(msg) = handle.messages.try_recv() {
+            messages.push(msg);
+        }
+        for msg in messages {
+            any = true;
+            match msg {
+                crate::compare::BenchmarkMessage::Progress {
+                    strategy_index,
+                    total,
+                } => {
+                    self.benchmark_progress = Some((strategy_index, total));
+                }
+                crate::compare::BenchmarkMessage::Done(rows) => {
+                    self.push_event(
+                        EventLevel::Info,
+                        format!("strategy benchmark complete ({} strategies)", rows.len()),
+                    );
+                    self.benchmark_rows = Some(rows);
+                    self.benchmark = None;
+                    self.benchmark_progress = None;
+                }
+                crate::compare::BenchmarkMessage::Error(e) => {
+                    self.push_event(EventLevel::Error, format!("strategy benchmark error: {e}"));
+                    self.benchmark = None;
+                    self.benchmark_progress = None;
+                }
+            }
+        }
+        any
+    }
+
+    /// Applies the benchmarked winner's filter chain + tracker kind to
+    /// `self.settings` ("Apply winner" button, task 11.4). No-op if there
+    /// are no benchmark results yet. Mirrors `TrackingSettings::default`'s
+    /// gaussian-then-median fixed order: a strategy is always exactly one
+    /// filter (or none), so at most one of `gaussian_enabled`/
+    /// `median_enabled` is ever set true here.
+    pub fn apply_benchmark_winner(&mut self) {
+        let Some(rows) = &self.benchmark_rows else {
+            return;
+        };
+        let metrics: Vec<crate::compare::StrategyMetrics> =
+            rows.iter().map(|r| r.metrics).collect();
+        let Some(winner_index) = crate::compare::recommend(&metrics) else {
+            return;
+        };
+        let winner = rows[winner_index].strategy;
+        self.settings.tracker_selection = winner.tracker;
+        self.settings.gaussian_enabled = false;
+        self.settings.median_enabled = false;
+        match winner.filter {
+            crate::compare::FilterKind::None => {}
+            crate::compare::FilterKind::Gaussian1_5 => {
+                self.settings.gaussian_enabled = true;
+                self.settings.gaussian_sigma = 1.5;
+            }
+            crate::compare::FilterKind::Median3 => {
+                self.settings.median_enabled = true;
+                self.settings.median_k = 3;
+            }
+        }
+        self.push_event(
+            EventLevel::Info,
+            format!("applied benchmark winner: {}", winner.label()),
+        );
     }
 
     /// Kicks off the background auto-export job for a just-finished run

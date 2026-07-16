@@ -384,8 +384,76 @@ fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                             "minimum score a mid-gap Found must clear to count as reacquisition",
                         );
                     });
+
+                ui.add_space(6.0);
             });
+            strategy_benchmark_section(ui, state);
         });
+}
+
+/// "Test strategies" button + progress/results (task 11.4): runs the
+/// fixed 6-strategy matrix in the background over a ~200-frame segment
+/// starting at the current Seed, then shows a compact table (strategy /
+/// tracked% / jitter) with the recommended winner highlighted and an
+/// "Apply winner" button that copies its filter chain + tracker kind into
+/// `state.settings`. Not nested inside the `add_enabled_ui(!running, ..)`
+/// block above since its own enabled-ness has an extra condition
+/// (`can_test_strategies`, which also checks no benchmark is already
+/// running) rather than just "not tracking".
+fn strategy_benchmark_section(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.horizontal(|ui| {
+        let enabled = state.can_test_strategies();
+        if ui
+            .add_enabled(enabled, egui::Button::new("Test strategies"))
+            .on_hover_text(
+                "runs a ~200-frame benchmark of every filter x tracker combination \
+                 from the current seed, in the background",
+            )
+            .clicked()
+        {
+            state.start_strategy_benchmark();
+        }
+        if let Some((done, total)) = state.benchmark_progress {
+            ui.weak(format!("running… {done}/{total}"));
+        }
+    });
+
+    let Some(rows) = state.benchmark_rows.clone() else {
+        return;
+    };
+    let metrics: Vec<crate::compare::StrategyMetrics> = rows.iter().map(|r| r.metrics).collect();
+    let winner = crate::compare::recommend(&metrics);
+
+    egui::Grid::new("strategy_benchmark_results")
+        .num_columns(3)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new("strategy").strong());
+            ui.label(egui::RichText::new("tracked%").strong());
+            ui.label(egui::RichText::new("jitter(px)").strong());
+            ui.end_row();
+            for (i, row) in rows.iter().enumerate() {
+                let is_winner = winner == Some(i);
+                let label = if is_winner {
+                    egui::RichText::new(row.strategy.label())
+                        .strong()
+                        .color(egui::Color32::GREEN)
+                } else {
+                    egui::RichText::new(row.strategy.label())
+                };
+                ui.label(label);
+                ui.label(format!("{:.1}%", row.metrics.tracked_pct));
+                match row.metrics.mean_jitter {
+                    Some(j) => ui.label(format!("{j:.2}")),
+                    None => ui.label("-"),
+                };
+                ui.end_row();
+            }
+        });
+
+    if winner.is_some() && ui.button("Apply winner").clicked() {
+        state.apply_benchmark_winner();
+    }
 }
 
 fn advanced_tuning_row(

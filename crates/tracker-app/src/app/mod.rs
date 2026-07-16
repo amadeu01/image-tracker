@@ -240,9 +240,12 @@ impl eframe::App for TrackerApp {
             if state.poll_export() {
                 ctx.request_repaint();
             }
-            // While a run/export is active, keep repainting so progress
-            // keeps flowing even if nothing else prompts a redraw.
-            if state.tracking.is_some() || state.export.is_some() {
+            if state.poll_benchmark() {
+                ctx.request_repaint();
+            }
+            // While a run/export/benchmark is active, keep repainting so
+            // progress keeps flowing even if nothing else prompts a redraw.
+            if state.tracking.is_some() || state.export.is_some() || state.benchmark.is_some() {
                 ctx.request_repaint();
             }
         }

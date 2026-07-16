@@ -859,7 +859,10 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
 /// up to and including index `target` (0-based). Returns `Ok(None)` if the
 /// source ends before reaching it. Generic over any `FrameSource` so it's
 /// unit-testable against an in-memory reader, not just a real ffmpeg pipe.
-fn decode_up_to<S: FrameSource>(source: &mut S, target: u64) -> Result<Option<Frame>, S::Error> {
+pub(crate) fn decode_up_to<S: FrameSource>(
+    source: &mut S,
+    target: u64,
+) -> Result<Option<Frame>, S::Error> {
     let mut last = None;
     for _ in 0..=target {
         match source.next_frame()? {

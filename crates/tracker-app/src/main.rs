@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 
-use tracker_app::{app, cli, ffprobe, telemetry};
+use tracker_app::{app, cli, compare, ffprobe, telemetry};
 
 fn main() {
     let (_telemetry_guard, log_path) = telemetry::init();
@@ -67,6 +67,24 @@ fn main() {
             }
         };
         if let Err(e) = cli::run_advise(advise_args) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if !args.is_empty() && args[0] == "compare" {
+        let compare_args = match compare::parse_compare_args(&args[1..]) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!(
+                    "usage: tracker-app compare <video> --seed-frame N --seed X,Y [--frames N] [--out path.json]"
+                );
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+        };
+        if let Err(e) = compare::run_compare(compare_args) {
             eprintln!("error: {e}");
             std::process::exit(1);
         }

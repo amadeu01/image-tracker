@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod compare;
 pub mod export_job;
 pub mod ffmpeg_sink;
 pub mod ffmpeg_source;
