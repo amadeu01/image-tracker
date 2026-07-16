@@ -13,5 +13,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
 directories = "5"
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+# async-std backend: self-contained executor — the tokio feature panics
+# ("no reactor running") unless a tokio runtime is active, which a plain
+# eframe app doesn't have. See crash log 2026-07-16.
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
