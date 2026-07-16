@@ -13,8 +13,9 @@
 
 use eframe::egui;
 
-use super::palette::{self, StatusKind};
+use super::palette::{self, LossSeverity, StatusKind};
 use super::state::{AppState, EventLevel};
+use super::theme;
 use crate::tracking::TrackerSelection;
 
 const PANEL_WIDTH: f32 = 260.0;
@@ -353,6 +354,25 @@ fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                 });
 
                 ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.weak("stop-set threshold:");
+                    let response = ui
+                        .add(
+                            egui::DragValue::new(&mut state.settings.stop_threshold_pct)
+                                .speed(0.5)
+                                .range(5.0..=40.0)
+                                .suffix("%"),
+                        )
+                        .on_hover_text(
+                            "velocity loss (vs rep 1) at which the Results header recommends \
+                             stopping the set (5-40%, default 20%)",
+                        );
+                    if response.changed() {
+                        theme::save_stop_threshold(state.settings.stop_threshold_pct);
+                    }
+                });
+
+                ui.add_space(6.0);
                 egui::CollapsingHeader::new("Advanced")
                     .id_salt("tracking_settings_advanced")
                     .default_open(false)
@@ -509,11 +529,15 @@ fn advanced_tuning_row_f64(
     });
 }
 
-/// Results section (task 10.3), shown only once a run has finished
-/// (`state.results.is_some()`, the Review step). Headline rep count, a
-/// per-rep depth/peak/mean table, a quality line (gaps/interpolated%
-/// /reseeds), and — when `velocity_series` failed (10.9's GUI seam) — a
-/// warning in place of the table rather than a silent empty one.
+/// Results section (task 10.3, headline cards + stop-set banner + loss
+/// column added 13.5), shown only once a run has finished
+/// (`state.results.is_some()`, the Review step). Three headline cards
+/// (REPS / SET TIME / VEL. LOSS, per the design), a "Stop set recommended"
+/// banner once any rep's loss crosses `state.settings.stop_threshold_pct`,
+/// an uncalibrated-units chip, a per-rep depth/peak/mean/loss table, a
+/// quality line (gaps/interpolated%/reseeds), and — when `velocity_series`
+/// failed (10.9's GUI seam) — a warning in place of the table rather than a
+/// silent empty one.
 fn results_section(ui: &mut egui::Ui, state: &AppState) {
     let Some(results) = &state.results else {
         return;
@@ -528,6 +552,91 @@ fn results_section(ui: &mut egui::Ui, state: &AppState) {
             );
         }
         Ok(_) => {
+            let dark_mode = ui.visuals().dark_mode;
+            let threshold = state.settings.stop_threshold_pct;
+            let uncalibrated = !matches!(
+                results.unit,
+                Some(tracker_core::VelocityUnit::MetersPerSecond)
+            );
+            let stop = results.stop_set_evaluation(threshold);
+            let max_loss = results
+                .loss_percent
+                .iter()
+                .flatten()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+
+            // -- Headline cards: REPS / SET TIME / VEL. LOSS -------------
+            ui.horizontal(|ui| {
+                headline_card(ui, "REPS", results.reps.len().to_string(), None);
+                let set_time = results
+                    .set_duration_seconds()
+                    .map(|s| format!("{s:.1}s"))
+                    .unwrap_or_else(|| "—".to_string());
+                headline_card(ui, "SET TIME", set_time, None);
+                let (loss_text, loss_color) = if max_loss.is_finite() {
+                    let severity = palette::loss_severity(max_loss, threshold);
+                    (
+                        format!("-{max_loss:.1}%"),
+                        Some(palette::loss_severity_color(dark_mode, severity)),
+                    )
+                } else {
+                    ("—".to_string(), None)
+                };
+                headline_card(ui, "VEL. LOSS", loss_text, loss_color);
+            });
+
+            // -- "Stop set recommended" banner ---------------------------
+            if let Some(stop) = stop {
+                ui.add_space(6.0);
+                let over_color = palette::loss_severity_color(dark_mode, LossSeverity::Over);
+                egui::Frame::none()
+                    .fill(over_color.linear_multiply(0.15))
+                    .stroke(egui::Stroke::new(1.0, over_color))
+                    .rounding(6.0)
+                    .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("Stop set recommended")
+                                    .strong()
+                                    .color(over_color),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Velocity loss reached {:.1}% — over your {:.0}% \
+                                     threshold at rep {}.",
+                                    stop.loss,
+                                    threshold,
+                                    stop.rep_index + 1
+                                ))
+                                .small(),
+                            );
+                        });
+                    });
+            }
+
+            // -- Uncalibrated chip ----------------------------------------
+            if uncalibrated {
+                ui.add_space(6.0);
+                let warn_color = palette::status_color(dark_mode, StatusKind::Warn);
+                egui::Frame::none()
+                    .fill(warn_color.linear_multiply(0.12))
+                    .stroke(egui::Stroke::new(1.0, warn_color))
+                    .rounding(6.0)
+                    .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "Calibration not set — values shown in px/s. \
+                                 Calibrate for m/s.",
+                            )
+                            .small(),
+                        );
+                    });
+            }
+
+            ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(format!("Reps: {}", results.reps.len()))
                     .heading()
@@ -545,19 +654,32 @@ fn results_section(ui: &mut egui::Ui, state: &AppState) {
 
             if !results.metrics.is_empty() {
                 egui::Grid::new("results_reps_grid")
-                    .num_columns(4)
+                    .num_columns(5)
                     .striped(true)
                     .show(ui, |ui| {
                         ui.strong("#");
                         ui.strong(format!("depth ({depth_unit})"));
                         ui.strong(format!("peak ({unit})"));
                         ui.strong(format!("mean ({unit})"));
+                        ui.strong("loss");
                         ui.end_row();
                         for (i, m) in results.metrics.iter().enumerate() {
                             ui.label(i.to_string());
                             ui.label(format!("{:.2}", m.depth));
                             ui.label(format!("{:.2}", m.peak_concentric_speed));
                             ui.label(format!("{:.2}", m.mean_concentric_velocity));
+                            match results.loss_percent.get(i).copied().flatten() {
+                                Some(loss) => {
+                                    let severity = palette::loss_severity(loss, threshold);
+                                    ui.colored_label(
+                                        palette::loss_severity_color(dark_mode, severity),
+                                        format!("-{loss:.1}%"),
+                                    );
+                                }
+                                None => {
+                                    ui.weak("—");
+                                }
+                            }
                             ui.end_row();
                         }
                     });
@@ -591,6 +713,38 @@ fn results_section(ui: &mut egui::Ui, state: &AppState) {
     });
 
     files_section(ui, state);
+}
+
+/// One of the Results header's three headline cards (REPS / SET TIME /
+/// VEL. LOSS, task 13.5): an uppercase, letter-spaced label over a large
+/// monospace value. `value_color` overrides the value's color (used for
+/// VEL. LOSS's loss-severity coloring); `None` uses the default text color.
+fn headline_card(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: String,
+    value_color: Option<egui::Color32>,
+) {
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new(label)
+                        .small()
+                        .weak()
+                        .text_style(egui::TextStyle::Small),
+                );
+                let mut text = egui::RichText::new(value)
+                    .text_style(egui::TextStyle::Monospace)
+                    .strong()
+                    .size(18.0);
+                if let Some(color) = value_color {
+                    text = text.color(color);
+                }
+                ui.label(text);
+            });
+        });
 }
 
 /// "Files" list (task 12.6): every export written this session, kept

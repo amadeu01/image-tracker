@@ -98,6 +98,57 @@ pub fn banner_colors(dark_mode: bool, kind: BannerKind) -> (Color32, Color32) {
     }
 }
 
+/// Per-rep velocity-loss severity vs the stop-set threshold (task 13.5's
+/// VBT design), a distinct classification from `StatusKind`/`BannerKind`
+/// (those are generic app-status colors; this one has its own design-spec
+/// hex values, see `loss_severity_color`). `Ok` is under half the
+/// threshold, `Warn` is at or above half but under the full threshold,
+/// `Over` has reached (or passed) the stop-set threshold itself — exactly
+/// the design's "green < threshold/2 <= amber < threshold <= red" rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LossSeverity {
+    Ok,
+    Warn,
+    Over,
+}
+
+/// Classifies a rep's velocity `loss` (%) against the stop-set
+/// `threshold_pct`, per the design's banding rule (see `LossSeverity`).
+pub fn loss_severity(loss: f64, threshold_pct: f64) -> LossSeverity {
+    if loss >= threshold_pct {
+        LossSeverity::Over
+    } else if loss >= threshold_pct / 2.0 {
+        LossSeverity::Warn
+    } else {
+        LossSeverity::Ok
+    }
+}
+
+/// Returns the design's loss-severity color for `severity`, theme-aware.
+/// Dark-mode values are the design mock's exact hex triples (`#3fbf77`
+/// green / `#d9a53f` amber / `#e05252` red) rather than the nearby-but-not-
+/// identical `StatusKind::Success`/`Warn`/`Error` dark colors, since this is
+/// specifically the VBT loss-column/chart palette the design specifies.
+/// Light-mode values reuse `StatusKind::Success`/`Warn`/`Error`'s existing
+/// light colors (already proven >=3:1 against the light panel background by
+/// `status_colors_are_readable_against_their_own_panel_background` below)
+/// rather than inventing new ones.
+pub fn loss_severity_color(dark_mode: bool, severity: LossSeverity) -> Color32 {
+    if dark_mode {
+        match severity {
+            LossSeverity::Ok => Color32::from_rgb(0x3f, 0xbf, 0x77),
+            LossSeverity::Warn => Color32::from_rgb(0xd9, 0xa5, 0x3f),
+            LossSeverity::Over => Color32::from_rgb(0xe0, 0x52, 0x52),
+        }
+    } else {
+        match severity {
+            LossSeverity::Ok => Color32::from_rgb(20, 120, 40),
+            LossSeverity::Warn => Color32::from_rgb(150, 105, 0),
+            LossSeverity::Over => Color32::from_rgb(180, 30, 30),
+        }
+    }
+}
+
 /// Relative luminance (WCAG-style, sRGB-approximated) used only by the
 /// tests below to assert a text/background pair is actually readable,
 /// rather than eyeballing hex triples.
@@ -185,6 +236,59 @@ mod tests {
                     "{kind:?} dark_mode={dark_mode} bg={bg:?} text={text:?} contrast too low"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn loss_severity_bands_match_the_design_rule() {
+        // green < threshold/2 <= amber < threshold <= red, threshold=20.
+        assert_eq!(loss_severity(9.9, 20.0), LossSeverity::Ok);
+        assert_eq!(loss_severity(10.0, 20.0), LossSeverity::Warn);
+        assert_eq!(loss_severity(19.9, 20.0), LossSeverity::Warn);
+        assert_eq!(loss_severity(20.0, 20.0), LossSeverity::Over);
+        assert_eq!(loss_severity(40.0, 20.0), LossSeverity::Over);
+        assert_eq!(loss_severity(-5.0, 20.0), LossSeverity::Ok);
+    }
+
+    #[test]
+    fn loss_severity_dark_colors_match_the_design_hex_values() {
+        assert_eq!(
+            loss_severity_color(true, LossSeverity::Ok),
+            Color32::from_rgb(0x3f, 0xbf, 0x77)
+        );
+        assert_eq!(
+            loss_severity_color(true, LossSeverity::Warn),
+            Color32::from_rgb(0xd9, 0xa5, 0x3f)
+        );
+        assert_eq!(
+            loss_severity_color(true, LossSeverity::Over),
+            Color32::from_rgb(0xe0, 0x52, 0x52)
+        );
+    }
+
+    #[test]
+    fn loss_severity_colors_differ_between_dark_and_light_mode() {
+        for severity in [LossSeverity::Ok, LossSeverity::Warn, LossSeverity::Over] {
+            assert_ne!(
+                loss_severity_color(true, severity),
+                loss_severity_color(false, severity)
+            );
+        }
+    }
+
+    #[test]
+    fn loss_severity_colors_are_readable_against_their_own_panel_background() {
+        for severity in [LossSeverity::Ok, LossSeverity::Warn, LossSeverity::Over] {
+            let dark = loss_severity_color(true, severity);
+            let light = loss_severity_color(false, severity);
+            assert!(
+                contrast_ratio(dark, DARK_PANEL_BG) >= 3.0,
+                "{severity:?} dark color {dark:?} too low contrast on dark panel"
+            );
+            assert!(
+                contrast_ratio(light, LIGHT_PANEL_BG) >= 3.0,
+                "{severity:?} light color {light:?} too low contrast on light panel"
+            );
         }
     }
 

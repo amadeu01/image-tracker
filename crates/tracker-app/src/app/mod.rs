@@ -146,7 +146,17 @@ impl TrackerApp {
         );
         self.thumbnail_textures = vec![None; thumb_handle.frame_indices.len()];
         self.thumbnails = Some(thumb_handle);
-        self.state = Some(AppState::new(video_path, metadata));
+        let mut state = AppState::new(video_path, metadata);
+        // Restore the persisted stop-set threshold (task 13.5), if the user
+        // has ever changed it from `TrackingSettings::default`'s 20% —
+        // mirrors `theme_override`'s load-once-at-startup pattern above,
+        // kept out of `AppState::new` itself so state.rs stays free of
+        // filesystem IO (its tests construct `AppState` directly, often
+        // many times per test).
+        if let Some(pct) = theme::load_stop_threshold() {
+            state.settings.stop_threshold_pct = pct;
+        }
+        self.state = Some(state);
         self.cache = Some(FrameCache::new(decoder, 16));
         self.texture = None;
         self.texture_frame = None;

@@ -144,7 +144,18 @@ pub struct TrackingSettings {
     pub update_threshold: f64,
     pub coast_limit: u32,
     pub reacquire_min_score: f64,
+    /// Stop-set velocity-loss threshold (%, task 13.5): the Results
+    /// header's "Stop set recommended" banner fires once any rep's loss
+    /// (vs rep 1, `tracker_core::velocity_loss_percent`) reaches this
+    /// value. Range 5-40 (side panel slider/`DragValue`), default 20 per
+    /// the design spec. Persisted across restarts via
+    /// `theme::load_stop_threshold`/`save_stop_threshold`, same as the
+    /// theme override — it's a user preference, not run output.
+    pub stop_threshold_pct: f64,
 }
+
+/// Default stop-set velocity-loss threshold (%, task 13.5's design spec).
+pub const DEFAULT_STOP_THRESHOLD_PCT: f64 = 20.0;
 
 impl Default for TrackingSettings {
     fn default() -> Self {
@@ -160,6 +171,7 @@ impl Default for TrackingSettings {
             update_threshold: tracking::DEFAULT_UPDATE_THRESHOLD,
             coast_limit: tracking::DEFAULT_COAST_LIMIT,
             reacquire_min_score: tracking::DEFAULT_REACQUIRE_MIN_SCORE,
+            stop_threshold_pct: DEFAULT_STOP_THRESHOLD_PCT,
         }
     }
 }
@@ -264,6 +276,13 @@ pub struct SessionResults {
     pub metrics: Vec<tracker_core::RepMetrics>,
     pub unit: Option<tracker_core::VelocityUnit>,
     pub quality: ResultsQuality,
+    /// Velocity loss (%) of each rep vs rep 1's mean concentric velocity
+    /// (task 13.5, `tracker_core::velocity_loss_percent`), parallel to
+    /// `metrics`/`reps` — index `i` here is rep `i`'s loss. Rep 1 (index 0)
+    /// is always `None` ("—" in the table/chart per the design). The
+    /// 13.3/13.4 rep table and velocity chart consume this directly rather
+    /// than recomputing it, so both agree on the same numbers.
+    pub loss_percent: Vec<Option<f64>>,
 }
 
 impl SessionResults {
@@ -292,6 +311,7 @@ impl SessionResults {
             }
             Err(_) => Vec::new(),
         };
+        let loss_percent = tracker_core::velocity_loss_percent(&metrics);
         let unit = metrics.first().map(|m| m.unit).or_else(|| {
             velocity
                 .as_ref()
@@ -318,7 +338,20 @@ impl SessionResults {
             metrics,
             unit,
             quality,
+            loss_percent,
         }
+    }
+
+    /// Wall-clock duration (seconds) of the set (the "SET TIME" headline
+    /// card, task 13.5): `None` when there are no reps yet.
+    pub fn set_duration_seconds(&self) -> Option<f64> {
+        tracker_core::set_duration_seconds(&self.metrics)
+    }
+
+    /// The first rep whose loss crossed `threshold_pct`, if any (the "stop
+    /// set recommended" banner's trigger, task 13.5).
+    pub fn stop_set_evaluation(&self, threshold_pct: f64) -> Option<tracker_core::StopSet> {
+        tracker_core::stop_set_evaluation(&self.loss_percent, threshold_pct)
     }
 }
 

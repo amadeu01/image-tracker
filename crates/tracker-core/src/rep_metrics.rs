@@ -151,6 +151,69 @@ pub fn all_rep_metrics(
         .collect()
 }
 
+/// Velocity loss (%) of each rep's `mean_concentric_velocity` vs rep 1's,
+/// per the VBT-tracker design spec's formula: `loss_i = (1 - mean_i /
+/// mean_1) * 100`. Rep 1 (index 0) always has no loss to report against
+/// itself, so it's `None` (displayed as "—" per the design). Every other
+/// rep is `Some(loss)` — `loss` is negative if a rep is *faster* than rep 1
+/// (e.g. a warm-up rep), which callers should display as-is rather than
+/// clamp, since a negative "loss" is meaningful signal, not an error.
+///
+/// Guards the degenerate case of rep 1 having a zero (or non-finite) mean
+/// velocity — a `NaN`/`inf` ratio would otherwise poison every subsequent
+/// rep's loss — by returning `None` for every rep rather than fabricating a
+/// number from an undefined baseline. An empty `metrics` returns an empty
+/// `Vec`.
+pub fn velocity_loss_percent(metrics: &[RepMetrics]) -> Vec<Option<f64>> {
+    let Some(first) = metrics.first() else {
+        return Vec::new();
+    };
+    let mean1 = first.mean_concentric_velocity;
+    let baseline_valid = mean1.is_finite() && mean1 != 0.0;
+    metrics
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            if i == 0 || !baseline_valid {
+                None
+            } else {
+                Some((1.0 - m.mean_concentric_velocity / mean1) * 100.0)
+            }
+        })
+        .collect()
+}
+
+/// The first rep whose velocity loss (vs rep 1) reaches `threshold_pct`,
+/// per the VBT-tracker design's "stop set recommended" banner. `losses` is
+/// expected to be `velocity_loss_percent`'s output (rep-1's `None` is
+/// simply skipped, never a match). Returns `None` if no rep crosses the
+/// threshold (including when `losses` is empty or every entry is `None`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StopSet {
+    /// Index into `losses` (and thus into the `metrics`/`reps` it was
+    /// derived from) of the first rep that crossed the threshold.
+    pub rep_index: usize,
+    /// That rep's velocity loss (%), always `>= threshold_pct`.
+    pub loss: f64,
+}
+
+pub fn stop_set_evaluation(losses: &[Option<f64>], threshold_pct: f64) -> Option<StopSet> {
+    losses.iter().enumerate().find_map(|(rep_index, loss)| {
+        loss.filter(|&l| l >= threshold_pct)
+            .map(|loss| StopSet { rep_index, loss })
+    })
+}
+
+/// Wall-clock duration (seconds) spanned by the set: rep 1's
+/// `eccentric_start` timestamp to the last rep's `concentric_end`
+/// timestamp (the "SET TIME" headline card). `None` for an empty `metrics`
+/// (nothing to span).
+pub fn set_duration_seconds(metrics: &[RepMetrics]) -> Option<f64> {
+    let first = metrics.first()?;
+    let last = metrics.last()?;
+    Some(last.end_t - first.start_t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +313,85 @@ mod tests {
         let metrics = all_rep_metrics(&reps, &velocity, &points, None);
         assert_eq!(metrics.len(), 2);
         assert_eq!(metrics[0], metrics[1]);
+    }
+
+    /// Builds a synthetic `Vec<RepMetrics>` with hand-picked
+    /// `mean_concentric_velocity`s (everything else zeroed/arbitrary, since
+    /// `velocity_loss_percent`/`stop_set_evaluation`/`set_duration_seconds`
+    /// only look at `mean_concentric_velocity` and the `start_t`/`end_t`
+    /// timestamps).
+    fn metrics_with_means(means: &[f64]) -> Vec<RepMetrics> {
+        means
+            .iter()
+            .enumerate()
+            .map(|(i, &mean_concentric_velocity)| RepMetrics {
+                start_t: i as f64,
+                bottom_t: i as f64 + 0.5,
+                end_t: i as f64 + 1.0,
+                depth: 0.0,
+                peak_concentric_speed: 0.0,
+                mean_concentric_velocity,
+                unit: VelocityUnit::PixelsPerSecond,
+                excluded_interpolated_samples: 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn velocity_loss_percent_rep_one_is_none_rest_vs_rep_one_mean() {
+        // Rep 1 mean 100, rep 2 mean 80 (20% loss), rep 3 mean 120 (20%
+        // *faster*, i.e. -20% "loss").
+        let metrics = metrics_with_means(&[100.0, 80.0, 120.0]);
+        let losses = velocity_loss_percent(&metrics);
+        assert_eq!(losses.len(), 3);
+        assert_eq!(losses[0], None);
+        assert!((losses[1].unwrap() - 20.0).abs() < 1e-9);
+        assert!((losses[2].unwrap() - (-20.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn velocity_loss_percent_is_empty_for_empty_metrics() {
+        assert_eq!(velocity_loss_percent(&[]), Vec::<Option<f64>>::new());
+    }
+
+    #[test]
+    fn velocity_loss_percent_guards_zero_rep_one_mean() {
+        let metrics = metrics_with_means(&[0.0, 50.0]);
+        let losses = velocity_loss_percent(&metrics);
+        assert_eq!(losses, vec![None, None]);
+    }
+
+    #[test]
+    fn stop_set_evaluation_finds_first_rep_at_or_above_threshold() {
+        let metrics = metrics_with_means(&[100.0, 90.0, 75.0, 60.0]);
+        let losses = velocity_loss_percent(&metrics);
+        // losses: [None, 10%, 25%, 40%]
+        let stop = stop_set_evaluation(&losses, 20.0).unwrap();
+        assert_eq!(stop.rep_index, 2);
+        assert!((stop.loss - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stop_set_evaluation_none_when_never_crossed() {
+        let metrics = metrics_with_means(&[100.0, 95.0, 90.0]);
+        let losses = velocity_loss_percent(&metrics);
+        assert_eq!(stop_set_evaluation(&losses, 20.0), None);
+    }
+
+    #[test]
+    fn stop_set_evaluation_none_for_empty_losses() {
+        assert_eq!(stop_set_evaluation(&[], 20.0), None);
+    }
+
+    #[test]
+    fn set_duration_seconds_spans_first_start_to_last_end() {
+        let metrics = metrics_with_means(&[100.0, 90.0, 80.0]);
+        // start_t/end_t built as i, i+1 above -> spans 0.0..=3.0.
+        assert!((set_duration_seconds(&metrics).unwrap() - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn set_duration_seconds_none_for_empty_metrics() {
+        assert_eq!(set_duration_seconds(&[]), None);
     }
 }
