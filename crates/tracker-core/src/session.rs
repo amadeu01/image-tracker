@@ -15,6 +15,7 @@ use crate::tracker::{StepOutcome, Tracker};
 pub struct TrackingSessionConfig {
     coast_limit: u32,
     reacquire_min_score: Option<f64>,
+    max_reacquire_distance: Option<f64>,
 }
 
 impl TrackingSessionConfig {
@@ -40,6 +41,19 @@ impl TrackingSessionConfig {
     pub fn reacquire_min_score(&self) -> Option<f64> {
         self.reacquire_min_score
     }
+
+    /// Maximum distance (pixels) a mid-gap `Found` may be from the last
+    /// tracked position and still count as reacquisition (10.2b). `None`
+    /// (the default) disables this guard. Set from the app to roughly
+    /// `2 * search_radius`: a genuine reacquisition should be found within
+    /// the tracker's own search window plus some slack for drift during the
+    /// gap, whereas a false lock onto unrelated background clutter (rack,
+    /// mirror) elsewhere in frame is usually much farther away — this is a
+    /// belt-and-suspenders check alongside `reacquire_min_score`, catching
+    /// far jumps regardless of score.
+    pub fn max_reacquire_distance(&self) -> Option<f64> {
+        self.max_reacquire_distance
+    }
 }
 
 /// Builder for `TrackingSessionConfig`.
@@ -47,6 +61,7 @@ impl TrackingSessionConfig {
 pub struct TrackingSessionConfigBuilder {
     coast_limit: Option<u32>,
     reacquire_min_score: Option<f64>,
+    max_reacquire_distance: Option<f64>,
 }
 
 impl TrackingSessionConfigBuilder {
@@ -65,10 +80,19 @@ impl TrackingSessionConfigBuilder {
         self
     }
 
+    /// Sets the maximum distance (pixels) a mid-gap `Found` may be from the
+    /// last tracked position and still count as reacquisition. Leave unset
+    /// to disable the guard.
+    pub fn max_reacquire_distance(mut self, distance: f64) -> Self {
+        self.max_reacquire_distance = Some(distance);
+        self
+    }
+
     pub fn build(self) -> TrackingSessionConfig {
         TrackingSessionConfig {
             coast_limit: self.coast_limit.unwrap_or(5),
             reacquire_min_score: self.reacquire_min_score,
+            max_reacquire_distance: self.max_reacquire_distance,
         }
     }
 }
@@ -103,6 +127,12 @@ pub struct Sample {
 pub struct Gap {
     pub start: u64,
     pub end: u64,
+}
+
+/// Euclidean distance between two points, used by the mid-gap distance
+/// guard (10.2b).
+fn distance(a: Point, b: Point) -> f64 {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
 }
 
 /// Whether the session is actively tracking or paused awaiting a reseed.
@@ -188,6 +218,24 @@ impl<T: Tracker> TrackingSession<T> {
         // `min_score`). Normal (non-gap) stepping is untouched: this only
         // applies while `open_gap_start` is set, i.e. we're already in a
         // miss streak.
+        // Distance guard (10.2b): mid-gap, a `Found` far from the last
+        // tracked position is demoted to `Miss` regardless of score — a
+        // second, independent check alongside `reacquire_min_score` that
+        // catches a confident-but-wrong lock onto background clutter
+        // elsewhere in frame.
+        let outcome = match outcome {
+            StepOutcome::Found { position, .. }
+                if self.open_gap_start.is_some()
+                    && self
+                        .config
+                        .max_reacquire_distance
+                        .is_some_and(|max_dist| distance(self.last_pos, position) > max_dist) =>
+            {
+                StepOutcome::Miss
+            }
+            other => other,
+        };
+
         let outcome = match outcome {
             StepOutcome::Found { score, .. }
                 if self.open_gap_start.is_some()
@@ -549,6 +597,115 @@ mod tests {
         let last = session.samples().last().unwrap();
         assert_eq!(last.position, Point::new(6.0, 6.0));
         assert_eq!(last.source, Source::Tracked);
+    }
+
+    // -- 10.2b: max_reacquire_distance guard -----------------------------
+
+    fn make_scripted_session_with_distance_guard(
+        coast_limit: u32,
+        max_reacquire_distance: f64,
+        outcomes: Vec<StepOutcome>,
+    ) -> TrackingSession<ScriptedTracker> {
+        let tracker = ScriptedTracker::new(outcomes);
+        let config = TrackingSessionConfig::builder()
+            .coast_limit(coast_limit)
+            .max_reacquire_distance(max_reacquire_distance)
+            .build();
+        TrackingSession::new(tracker, 0, Point::new(5.0, 5.0), config)
+    }
+
+    #[test]
+    fn mid_gap_found_far_from_last_position_is_demoted_to_miss_even_with_high_score() {
+        // Last tracked position is (5, 5); the "reacquisition" lands at
+        // (100, 100), ~134px away, with a perfect score — a confident lock
+        // onto something that clearly isn't the object that just went
+        // missing this close to where it was last seen.
+        let mut session = make_scripted_session_with_distance_guard(
+            5,
+            50.0,
+            vec![
+                StepOutcome::Miss,
+                StepOutcome::Found {
+                    position: Point::new(100.0, 100.0),
+                    score: 1.0,
+                },
+            ],
+        );
+        session.step(&blank_frame(W, H)); // frame 1: miss
+        session.step(&blank_frame(W, H)); // frame 2: far match, demoted to miss
+        assert_eq!(session.state(), SessionState::Tracking);
+        assert!(
+            session.gaps().is_empty(),
+            "gap should still be open (not yet closed)"
+        );
+        assert!(session
+            .samples()
+            .iter()
+            .all(|s| s.position != Point::new(100.0, 100.0)));
+    }
+
+    #[test]
+    fn mid_gap_found_within_distance_guard_still_reacquires() {
+        let mut session = make_scripted_session_with_distance_guard(
+            5,
+            50.0,
+            vec![
+                StepOutcome::Miss,
+                StepOutcome::Found {
+                    position: Point::new(20.0, 20.0), // ~21px away
+                    score: 1.0,
+                },
+            ],
+        );
+        session.step(&blank_frame(W, H)); // frame 1: miss
+        session.step(&blank_frame(W, H)); // frame 2: close match, reacquires
+        assert_eq!(session.state(), SessionState::Tracking);
+        assert_eq!(session.gaps(), &[Gap { start: 1, end: 1 }]);
+        let last = session.samples().last().unwrap();
+        assert_eq!(last.position, Point::new(20.0, 20.0));
+        assert_eq!(last.source, Source::Tracked);
+    }
+
+    #[test]
+    fn distance_guard_does_not_affect_normal_non_gap_tracking() {
+        // No gap open: a Found far from last_pos is accepted as usual — the
+        // distance guard, like the score gate, only kicks in mid-gap.
+        let tracker = ScriptedTracker::new(vec![StepOutcome::Found {
+            position: Point::new(100.0, 100.0),
+            score: 1.0,
+        }]);
+        let config = TrackingSessionConfig::builder()
+            .coast_limit(5)
+            .max_reacquire_distance(50.0)
+            .build();
+        let mut session = TrackingSession::new(tracker, 0, Point::new(5.0, 5.0), config);
+        session.step(&blank_frame(W, H));
+        assert_eq!(session.state(), SessionState::Tracking);
+        let last = session.samples().last().unwrap();
+        assert_eq!(last.position, Point::new(100.0, 100.0));
+        assert_eq!(last.source, Source::Tracked);
+    }
+
+    #[test]
+    fn without_max_reacquire_distance_behavior_is_unchanged_backward_compat() {
+        // max_reacquire_distance left unset (None): a far mid-gap Found
+        // still reacquires as before this guard existed (subject only to
+        // reacquire_min_score, if that's set).
+        let mut session = make_scripted_session(
+            5,
+            None,
+            vec![
+                StepOutcome::Miss,
+                StepOutcome::Found {
+                    position: Point::new(500.0, 500.0),
+                    score: 1.0,
+                },
+            ],
+        );
+        session.step(&blank_frame(W, H));
+        session.step(&blank_frame(W, H));
+        assert_eq!(session.state(), SessionState::Tracking);
+        assert_eq!(session.gaps(), &[Gap { start: 1, end: 1 }]);
     }
 
     #[test]

@@ -197,3 +197,84 @@ BIN=./target/release/tracker-app
 "$BIN" track "test_videos/WhatsApp Video 2026-07-08 at 22.55.51.mp4" --seed-frame 300 --seed 260,120 --out out/v3d
 "$BIN" track "test_videos/WhatsApp Video 2026-07-08 at 22.56.32.mp4" --seed-frame 300 --seed 232,148 --out out/v4d
 ```
+
+## 10.2b: decoupling and tuning `reacquire_min_score`
+
+10.2 fixed the rack/mirror false-lock bug by requiring a mid-gap `Found` to
+clear a `reacquire_min_score` before it counts as reacquisition, but wired
+that threshold straight to `update_threshold` (0.7) — which, on v1, pushed
+gaps/reseeds from 2/0 (pre-10.2 baseline) to 8/7: the stricter gate was
+demoting genuine marginal reacquisitions (e.g. the plate sliding back into a
+partially-occluded rack corner) as readily as false rack/mirror locks. This
+task decouples `reacquire_min_score` from `update_threshold` (its own
+`DEFAULT_REACQUIRE_MIN_SCORE` const and `--reacquire-min-score` CLI flag)
+and tunes it independently.
+
+### Sweep on v1 (seed frame 789, (312, 430))
+
+| `reacquire_min_score` | Points | Tracked | Interpolated | Gaps | Reseed events | Tracked-sample max jump |
+|---|---|---|---|---|---|---|
+| 0.7 (10.2 baseline, = update_threshold) | — | — | — | 8 | 7 | — |
+| 0.6 | 1187 | 1184 | 3 | 8 | 7 | 42.4px |
+| 0.55 | 1175 | 1169 | 6 | 11 | 9 | 42.4px |
+| **0.5 (chosen)** | **1192** | **1187** | **5** | **8** | **6** | **42.4px** |
+| 0.45 | 1192 | 1187 | 5 | 8 | 6 | 42.4px |
+| 0.4 (= min_score, gate is a no-op) | 1222 | 1216 | 6 | 2 | 0 | 42.4px |
+
+"Tracked-sample max jump" is the max Euclidean distance between
+*consecutive tracked (non-interpolated) samples* — i.e. the jump actually
+taken at the moment of reacquisition, skipping over the smoothly
+interpolated in-between frames of a gap. This is the metric that would show
+a jump spike if a lower threshold let a reacquisition lock onto something
+far away (a rack, a mirror) instead of the real object: it is **identical
+(42.4px, `search_radius`×√2, the geometric ceiling of one search step)
+across the entire swept range**, including all the way down to 0.4 where
+the score gate is effectively disabled. In other words, on this clip
+nothing in the 0.4–0.7 range ever reacquired somewhere alarmingly far from
+where the object was last seen — the risk 10.2 guarded against didn't
+reproduce at these lower thresholds, at least not in a way this metric
+would catch (visual review of the overlay would be the stronger check but
+wasn't re-run here since 10.2's finding of "worse gaps/reseeds, not a
+correctness regression" was the operative concern for this task).
+
+Picked **0.5**: smallest gaps+reseeds (8/6) among 0.5/0.55/0.6 with no
+jump-spike regression. 0.4 reproduces the pre-10.2 baseline (2/0) exactly
+because it equals `min_score`, making the gate a no-op — rejected on
+principle even though this particular clip doesn't show a jump artifact at
+that setting, since it defeats the whole purpose of 10.2's fix for clips
+that do have a nearby rack/mirror.
+
+### Sanity checks at 0.5
+
+| Video | Points | Tracked | Interpolated | Gaps | Reseed events |
+|---|---|---|---|---|---|
+| v1 (789, 312,430) | 1192 | 1187 | 5 | 8 | 6 |
+| v2 (1200, 283,430) | 872 | 852 | 20 | 15 | 8 |
+| v3 (300, 260,120) | 2887 | 2887 | 0 | 0 | 0 |
+
+v3 stays 0 gaps/0 reseeds (unaffected, as at every threshold tried). v2
+stays in the same ballpark as its 10.2 baseline — no blow-up.
+
+### Distance guard
+
+Also added `TrackingSessionConfig::max_reacquire_distance` (10.2b): a
+mid-gap `Found` is demoted to `Miss` if it lands farther than this from the
+last tracked position, independent of score — a second, cheap guard against
+a confident-but-wrong lock far away. Wired in the app to `2 * search_radius`
+(no separate CLI flag; derives from `--search-radius`). TDD'd in
+`crates/tracker-core/src/session.rs` (5 new tests: far match demoted, close
+match still reacquires, non-gap tracking unaffected, `None` reproduces old
+behavior). Re-running the three videos above with the guard active produced
+byte-identical gap/reseed counts to the table above — on these clips the
+score gate was already the binding constraint, so the distance guard is
+currently inert but cheap insurance for clips where it wouldn't be.
+
+### Reproducing
+
+```
+cargo build --release --bin tracker-app
+BIN=./target/release/tracker-app
+"$BIN" track "test_videos/WhatsApp Video 2026-07-05 at 14.03.30.mp4" --seed-frame 789 --seed 312,430 --reacquire-min-score 0.5 --out out/tune-v1-0.5
+"$BIN" track "test_videos/WhatsApp Video 2026-07-05 at 14.11.05.mp4" --seed-frame 1200 --seed 283,430 --reacquire-min-score 0.5 --out out/tune-v2-0.5
+"$BIN" track "test_videos/WhatsApp Video 2026-07-08 at 22.55.51.mp4" --seed-frame 300 --seed 260,120 --reacquire-min-score 0.5 --out out/tune-v3-0.5
+```

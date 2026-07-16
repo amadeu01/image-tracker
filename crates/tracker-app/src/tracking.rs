@@ -31,6 +31,20 @@ pub const DEFAULT_SEARCH_RADIUS: u32 = 30;
 pub const DEFAULT_MIN_SCORE: f64 = 0.4;
 pub const DEFAULT_UPDATE_THRESHOLD: f64 = 0.7;
 pub const DEFAULT_COAST_LIMIT: u32 = 5;
+/// Minimum score a mid-gap `Found` must clear to count as reacquisition
+/// (10.2/10.2b). Originally wired straight to `update_threshold` (0.7),
+/// which fixed the rack/mirror false-lock bug but, on the v1 e2e clip,
+/// pushed gaps/reseeds from 2/0 to 8/7 — 0.7 also demoted plenty of
+/// genuine-but-marginal reacquisitions (e.g. the plate sliding back into a
+/// partially occluded rack corner) to misses. Tuned independently (10.2b):
+/// swept 0.5/0.55/0.6 on v1 and picked 0.5, the smallest gaps+reseeds (8/6,
+/// vs 11/9 at 0.55 and 8/7 at 0.6) with no jump-spike regression (tracked
+/// max frame-to-frame displacement identical — 42.4px — across the whole
+/// swept range including all the way down to `min_score` 0.4); v3 stays
+/// 0 gaps/0 reseeds at every value and v2 stays in the same ballpark
+/// (11-15 gaps/8-10 reseeds) — no blow-up. See docs/e2e-results.md's 10.2b
+/// section for the full sweep table.
+pub const DEFAULT_REACQUIRE_MIN_SCORE: f64 = 0.5;
 
 /// Which tracker `run_tracking_worker` should use once it has decoded the
 /// seed frame (task 4.3): `Auto` runs `tracker_core::suggest_tracker` on the
@@ -87,6 +101,10 @@ pub struct TrackerTuning {
     pub min_score: Option<f64>,
     pub update_threshold: Option<f64>,
     pub coast_limit: Option<u32>,
+    /// `--reacquire-min-score` (10.2b): overrides
+    /// `DEFAULT_REACQUIRE_MIN_SCORE`, decoupled from `update_threshold` so
+    /// each can be tuned independently.
+    pub reacquire_min_score: Option<f64>,
 }
 
 /// Builds a `TemplateTrackerConfig` from the module's default consts.
@@ -118,21 +136,36 @@ pub fn tracker_config(tuning: TrackerTuning) -> TemplateTrackerConfig {
         .build()
 }
 
-/// Builds a `TrackingSessionConfig`, using `tuning`'s coast_limit override
-/// where set and the module default otherwise.
+/// Builds a `TrackingSessionConfig`, using `tuning`'s overrides where set
+/// and the module defaults otherwise.
 ///
-/// `reacquire_min_score` (10.2) is always wired to `update_threshold`
-/// (tuning override if set, else `DEFAULT_UPDATE_THRESHOLD`): while a gap is
-/// open, a `Found` must clear the tracker's *update* threshold — not just
-/// its looser `min_score` — to count as reacquisition. This is what stops
-/// the crosshair from locking onto background clutter (a rack, a mirror)
-/// that scores just above `min_score` after the real object has left the
-/// frame. There's no separate CLI flag for it: it inherits
-/// `--update-threshold` so tuning one tunes both.
+/// `reacquire_min_score` (10.2, decoupled in 10.2b) gates mid-gap
+/// reacquisition: while a gap is open, a `Found` must clear this score —
+/// not just the tracker's looser `min_score` — to count as reacquisition,
+/// which is what stops the crosshair from locking onto background clutter
+/// (a rack, a mirror) that scores just above `min_score` after the real
+/// object has left the frame. It used to inherit `update_threshold`
+/// directly (0.7), but that turned out too strict on genuine marginal
+/// reacquisitions (v1 e2e: 2 gaps/0 reseeds -> 8 gaps/7 reseeds); it now has
+/// its own default (`DEFAULT_REACQUIRE_MIN_SCORE`, tuned to 0.5) and its
+/// own `--reacquire-min-score` CLI override, independent of
+/// `--update-threshold`.
+/// `max_reacquire_distance` (10.2b) is always set to `2 * search_radius`: a
+/// genuine reacquisition should land within the tracker's own search window
+/// plus some slack for drift during the gap, whereas a false lock onto
+/// unrelated clutter elsewhere in frame is usually much farther away. This
+/// is a second, independent guard alongside `reacquire_min_score` — it has
+/// no separate CLI flag since it derives from `--search-radius`.
 pub fn session_config(tuning: TrackerTuning) -> TrackingSessionConfig {
+    let search_radius = tuning.search_radius.unwrap_or(DEFAULT_SEARCH_RADIUS);
     TrackingSessionConfig::builder()
         .coast_limit(tuning.coast_limit.unwrap_or(DEFAULT_COAST_LIMIT))
-        .reacquire_min_score(tuning.update_threshold.unwrap_or(DEFAULT_UPDATE_THRESHOLD))
+        .reacquire_min_score(
+            tuning
+                .reacquire_min_score
+                .unwrap_or(DEFAULT_REACQUIRE_MIN_SCORE),
+        )
+        .max_reacquire_distance(2.0 * search_radius as f64)
         .build()
 }
 
@@ -743,6 +776,7 @@ mod tests {
             min_score: Some(0.55),
             update_threshold: Some(0.8),
             coast_limit: None,
+            reacquire_min_score: None,
         };
         let config = tracker_config(tuning);
         assert_eq!(config.patch_radius(), 20);
@@ -765,18 +799,40 @@ mod tests {
     }
 
     #[test]
-    fn session_config_wires_reacquire_min_score_to_update_threshold() {
-        // Default: inherits DEFAULT_UPDATE_THRESHOLD (10.2 app wiring).
+    fn session_config_reacquire_min_score_defaults_and_is_decoupled_from_update_threshold() {
+        // Default: DEFAULT_REACQUIRE_MIN_SCORE, not update_threshold (10.2b).
         assert_eq!(
             session_config(TrackerTuning::default()).reacquire_min_score(),
-            Some(DEFAULT_UPDATE_THRESHOLD)
+            Some(DEFAULT_REACQUIRE_MIN_SCORE)
         );
-        // Overriding --update-threshold moves the reacquire floor with it.
+        // Overriding --update-threshold no longer moves the reacquire floor.
         let tuning = TrackerTuning {
             update_threshold: Some(0.85),
             ..Default::default()
         };
-        assert_eq!(session_config(tuning).reacquire_min_score(), Some(0.85));
+        assert_eq!(
+            session_config(tuning).reacquire_min_score(),
+            Some(DEFAULT_REACQUIRE_MIN_SCORE)
+        );
+        // Its own override is independent.
+        let tuning = TrackerTuning {
+            reacquire_min_score: Some(0.6),
+            ..Default::default()
+        };
+        assert_eq!(session_config(tuning).reacquire_min_score(), Some(0.6));
+    }
+
+    #[test]
+    fn session_config_derives_max_reacquire_distance_from_search_radius() {
+        assert_eq!(
+            session_config(TrackerTuning::default()).max_reacquire_distance(),
+            Some(2.0 * DEFAULT_SEARCH_RADIUS as f64)
+        );
+        let tuning = TrackerTuning {
+            search_radius: Some(50),
+            ..Default::default()
+        };
+        assert_eq!(session_config(tuning).max_reacquire_distance(), Some(100.0));
     }
 
     #[test]

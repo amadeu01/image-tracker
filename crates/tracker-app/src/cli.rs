@@ -31,7 +31,8 @@ pub struct TrackArgs {
     pub out_dir: PathBuf,
     /// Optional tracker tuning overrides (task 3.6): `--patch-radius`,
     /// `--search-radius`, `--min-score`, `--update-threshold`,
-    /// `--coast-limit`. Unset fields fall back to `tracking`'s defaults.
+    /// `--coast-limit`, `--reacquire-min-score`. Unset fields fall back to
+    /// `tracking`'s defaults.
     pub tuning: tracking::TrackerTuning,
     /// `--tracker auto|template|color` (task 4.3): which tracker to run.
     /// Defaults to `Auto` (suggest from the seed patch).
@@ -112,6 +113,16 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
                 let v = args.get(i + 1).ok_or("--coast-limit needs a value")?;
                 tuning.coast_limit =
                     Some(v.parse().map_err(|_| format!("bad --coast-limit: {v}"))?);
+                i += 2;
+            }
+            "--reacquire-min-score" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or("--reacquire-min-score needs a value")?;
+                tuning.reacquire_min_score = Some(
+                    v.parse()
+                        .map_err(|_| format!("bad --reacquire-min-score: {v}"))?,
+                );
                 i += 2;
             }
             "--tracker" => {
