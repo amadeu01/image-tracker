@@ -151,6 +151,16 @@ impl FfmpegFrameSource<ChildStdout> {
     /// Waits for the child to exit and surfaces a non-zero status as an
     /// error with captured stderr. Called automatically once `next_frame`
     /// observes clean EOF.
+    ///
+    /// Public as `reap_after_eof` for callers (the tracking worker) that
+    /// drive this source generically through the `FrameSource` trait (so
+    /// their main decode loop is testable against in-memory sources) and
+    /// reap the concrete ffmpeg child separately, once, right after that
+    /// loop reports clean EOF.
+    pub fn reap_after_eof(&mut self) -> Result<(), FfmpegDecodeError> {
+        self.reap()
+    }
+
     fn reap(&mut self) -> Result<(), FfmpegDecodeError> {
         if let Some(mut child) = self.child.take() {
             // stdout was already taken/consumed; stderr may still be open.

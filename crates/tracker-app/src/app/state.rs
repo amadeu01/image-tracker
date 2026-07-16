@@ -411,6 +411,22 @@ impl AppState {
         for msg in messages {
             any = true;
             if let Some(frame_index) = msg.video_frame_index() {
+                // `ffprobe`'s `nb_frames` (this crate's `metadata.frame_count`)
+                // is only an estimate for some containers/frame rates (this
+                // project's test footage reports odd rates like `600/19`)
+                // and can undercount the frames ffmpeg actually decodes
+                // (PLAN 10.1). If tracking reports a frame past what we
+                // thought the video's length was, that means the video
+                // genuinely has more frames than ffprobe estimated: grow
+                // the known length to match rather than clamping the
+                // display frame to the stale (too-small) estimate, which
+                // would otherwise freeze the video panel while the status
+                // text kept climbing past it — exactly the "runs past
+                // video end" symptom the user saw.
+                let seen = frame_index + 1;
+                if self.metadata.frame_count.unwrap_or(0) < seen {
+                    self.metadata.frame_count = Some(seen);
+                }
                 self.set_frame(frame_index as i64);
             }
             let was_paused =
