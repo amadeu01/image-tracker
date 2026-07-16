@@ -15,8 +15,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use tracker_core::{
-    BarPath, ColorModel, ColorModelConfig, ColorTracker, ColorTrackerConfig, Frame, FrameSource,
-    Point, RepSegmentationConfig, SessionState, Source as SampleSource, StepOutcome,
+    BarPath, Calibration, ColorModel, ColorModelConfig, ColorTracker, ColorTrackerConfig, Frame,
+    FrameSource, Point, RepSegmentationConfig, SessionState, Source as SampleSource, StepOutcome,
     TemplateTracker, TemplateTrackerConfig, Timebase, Tracker, TrackerKind,
     TrackerSuggestionConfig, TrackingSession, TrackingSessionConfig,
 };
@@ -184,6 +184,14 @@ pub fn rep_segmentation_config(calibrated: bool) -> RepSegmentationConfig {
     }
 }
 
+/// How often (in processed frames) the side panel recomputes a live rep
+/// count from the partial path (task 10.8). `velocity_series`+`segment_reps`
+/// over a few thousand points is cheap pure math, but there's no reason to
+/// re-run it every single frame when the number only meaningfully changes
+/// every several dozen — 30 keeps the "reps so far" counter visibly live
+/// without doing real work on every `poll_tracking` drain.
+pub const LIVE_REP_RECOMPUTE_INTERVAL: u64 = 30;
+
 /// A message sent from the tracking worker thread to the UI thread.
 #[derive(Debug, Clone)]
 pub enum TrackingMessage {
@@ -269,6 +277,13 @@ pub struct TrackingRunState {
     pub gap_count: u64,
     pub error: Option<String>,
     pub bar_path: Option<BarPath>,
+    /// Every sample reported so far this run (task 10.8), mirroring what the
+    /// worker's `TrackingSession` will eventually hand `BarPath::new` at
+    /// `Done` — kept here too so the side panel can build a *partial*
+    /// `BarPath`/rep count mid-run without waiting for completion. Cheap:
+    /// one `Sample` (two `f64`s + an enum tag) per processed frame, and a
+    /// run is at most a few thousand frames.
+    pub samples: Vec<tracker_core::Sample>,
 }
 
 impl TrackingRunState {
@@ -304,6 +319,11 @@ impl TrackingRunState {
                 }
                 self.session_state = Some(state);
                 self.frames_processed += 1;
+                self.samples.push(tracker_core::Sample {
+                    frame_index: video_frame_index,
+                    position,
+                    source,
+                });
                 false
             }
             TrackingMessage::Done(bar_path) => {
@@ -357,6 +377,53 @@ impl TrackingRunState {
                 )
             }
             _ => "tracking starting…".to_string(),
+        }
+    }
+
+    /// Whether this frame's `Progress` should trigger a live rep
+    /// recompute (task 10.8): every `LIVE_REP_RECOMPUTE_INTERVAL`th
+    /// processed frame, and not before the run has processed at least one
+    /// (so an idle/fresh state never fires). Pure/throttle-only — the
+    /// actual recompute is `live_rep_count`, kept separate so this cheap
+    /// check can gate it without doing any math itself.
+    pub fn should_recompute_live_reps(&self) -> bool {
+        self.frames_processed > 0
+            && self
+                .frames_processed
+                .is_multiple_of(LIVE_REP_RECOMPUTE_INTERVAL)
+    }
+
+    /// Recomputes a rep count from the samples collected so far, using the
+    /// same smoothing window/dead-band tuning `SessionResults::build` uses
+    /// for the final result (`rep_segmentation_config`) so the live counter
+    /// never disagrees with the final one just from different tuning.
+    ///
+    /// Returns `None` if there isn't enough data yet (e.g.
+    /// `VelocityError::TooFewPoints` early in a run) — never panics. Callers
+    /// (state.rs) treat a `None` here as "skip this recompute, keep
+    /// whatever count was last shown" rather than resetting the counter to
+    /// nothing, since a transient failure (or a coasting stretch with too
+    /// few *tracked* points) shouldn't make an already-correct number
+    /// disappear.
+    pub fn live_rep_count(
+        &self,
+        timebase: Timebase,
+        calibration: Option<Calibration>,
+    ) -> Option<usize> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let bar_path = BarPath::new(&self.samples, &[], timebase, 0);
+        let velocity = tracker_core::velocity_series(bar_path.points(), 5, calibration.as_ref());
+        match velocity {
+            Ok(v) => Some(
+                tracker_core::segment_reps(&v, rep_segmentation_config(calibration.is_some()))
+                    .len(),
+            ),
+            Err(e) => {
+                tracing::debug!(error = %e, "live rep recompute skipped: not enough data yet");
+                None
+            }
         }
     }
 }
@@ -1075,6 +1142,76 @@ mod tests {
         assert!(!state.running);
         assert_eq!(state.error, Some("boom".to_string()));
         assert!(state.status_line().contains("boom"));
+    }
+
+    // -- Task 10.8: live rep counter ---------------------------------------
+
+    fn progress(frame: u64, y: f64) -> TrackingMessage {
+        TrackingMessage::Progress {
+            video_frame_index: frame,
+            position: Point::new(0.0, y),
+            source: SampleSource::Tracked,
+            state: SessionState::Tracking,
+        }
+    }
+
+    #[test]
+    fn should_recompute_live_reps_fires_every_30th_processed_frame() {
+        let mut state = TrackingRunState::started();
+        for frame in 0..90u64 {
+            state.apply(progress(frame, frame as f64));
+            let should = state.should_recompute_live_reps();
+            if state
+                .frames_processed
+                .is_multiple_of(LIVE_REP_RECOMPUTE_INTERVAL)
+            {
+                assert!(should, "frame {frame}: expected a recompute trigger");
+            } else {
+                assert!(!should, "frame {frame}: expected no recompute trigger");
+            }
+        }
+    }
+
+    #[test]
+    fn should_recompute_live_reps_is_false_before_any_frame_processed() {
+        let state = TrackingRunState::started();
+        assert!(!state.should_recompute_live_reps());
+    }
+
+    #[test]
+    fn apply_progress_accumulates_samples_for_partial_rep_compute() {
+        let mut state = TrackingRunState::started();
+        state.apply(progress(0, 0.0));
+        state.apply(progress(1, 5.0));
+        assert_eq!(state.samples.len(), 2);
+        assert_eq!(state.samples[1].frame_index, 1);
+    }
+
+    #[test]
+    fn live_rep_count_is_none_with_too_few_samples() {
+        let state = TrackingRunState::started();
+        let tb = Timebase::new(30, 1).unwrap();
+        assert_eq!(state.live_rep_count(tb, None), None);
+    }
+
+    /// A synthetic one-rep descent/ascent, fed in as partial `Progress`
+    /// samples the same way a live run would accumulate them, must be
+    /// detected by `live_rep_count` exactly like `SessionResults::build`
+    /// detects it from the final `BarPath` (state.rs's
+    /// `session_results_build_detects_reps_and_reports_units` test uses the
+    /// same shape) — the live and final counters must never disagree on
+    /// tuning.
+    #[test]
+    fn live_rep_count_detects_a_rep_from_partial_samples() {
+        let mut state = TrackingRunState::started();
+        for i in 0..=10u64 {
+            state.apply(progress(i, i as f64 * 10.0));
+        }
+        for i in 11..=20u64 {
+            state.apply(progress(i, (20 - i) as f64 * 10.0));
+        }
+        let tb = Timebase::new(30, 1).unwrap();
+        assert_eq!(state.live_rep_count(tb, None), Some(1));
     }
 
     #[test]

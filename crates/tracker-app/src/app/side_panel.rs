@@ -227,6 +227,16 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
             &format!("({:.1}, {:.1})", pos.x, pos.y),
         );
     }
+    // Task 10.8: live rep counter, recomputed every ~30 processed frames
+    // from the partial path (`AppState::poll_tracking`). Shown only while
+    // a run is active and at least one recompute has succeeded — before
+    // that there's nothing honest to say yet, so the row is omitted rather
+    // than showing a misleading "0".
+    if run.running {
+        if let Some(count) = state.live_reps {
+            kv_row(ui, "reps so far", &count.to_string());
+        }
+    }
 }
 
 /// Results section (task 10.3), shown only once a run has finished

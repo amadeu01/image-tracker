@@ -272,6 +272,14 @@ pub struct AppState {
     /// evaluate (`TrackerApp::ensure_texture`/click handler sets this via
     /// `note_seed_suggestion`, since `AppState` alone has no frame access).
     pub suggested_tracker: Option<tracker_core::TrackerKind>,
+    /// Live rep count (task 10.8), recomputed from the partial path every
+    /// `LIVE_REP_RECOMPUTE_INTERVAL` processed frames while a run is active
+    /// (`poll_tracking`, via `TrackingRunState::live_rep_count`). `None`
+    /// before the first successful recompute (too few samples yet) or
+    /// outside an active run; on a *failed* recompute (e.g. a transient
+    /// `VelocityError`), the previous value is left in place rather than
+    /// cleared — see `live_rep_count`'s doc comment for why.
+    pub live_reps: Option<usize>,
     /// Recent app events (task 7.2), newest last, capped at `MAX_EVENTS`.
     /// Fed from the same call sites that already emit `tracing` breadcrumbs,
     /// so the side panel gives on-screen visibility into the same history
@@ -299,6 +307,7 @@ impl AppState {
             results: None,
             export: None,
             suggested_tracker: None,
+            live_reps: None,
             events: VecDeque::new(),
             start_time: Instant::now(),
         }
@@ -632,6 +641,7 @@ impl AppState {
         self.tracking = Some(handle);
         self.tracking_run = TrackingRunState::started();
         self.bar_path = None;
+        self.live_reps = None;
     }
 
     /// Drains any pending messages from the active tracking worker,
@@ -686,6 +696,23 @@ impl AppState {
                         self.tracking_run.last_frame_index.unwrap_or_default()
                     ),
                 );
+            }
+            // Task 10.8: live rep counter, thrown every
+            // `LIVE_REP_RECOMPUTE_INTERVAL` processed frames. Cheap pure
+            // math over the partial path, but still guarded: a failed
+            // recompute (e.g. too few samples yet) just skips the update
+            // rather than touching `tracking_run`/`tracking` — it must
+            // never disturb the run itself.
+            if self.tracking_run.should_recompute_live_reps() {
+                if let Ok(timebase) =
+                    tracker_core::Timebase::new(self.metadata.fps_num, self.metadata.fps_den)
+                {
+                    if let Some(count) =
+                        self.tracking_run.live_rep_count(timebase, self.calibration)
+                    {
+                        self.live_reps = Some(count);
+                    }
+                }
             }
         }
         if finished {
@@ -911,6 +938,7 @@ impl AppState {
         self.results = None;
         self.export = None;
         self.paused = false;
+        self.live_reps = None;
         self.mode = Mode::PlacingSeed;
         tracing::info!("tracking discarded (user)");
         self.push_event(EventLevel::Warn, "tracking discarded".to_string());
@@ -945,6 +973,7 @@ impl AppState {
         self.bar_path = None;
         self.results = None;
         self.export = None;
+        self.live_reps = None;
         self.mode = Mode::ViewOnly;
         self.status.clear();
         self.events.clear();
@@ -1602,6 +1631,175 @@ mod tests {
         assert!(reopened.bar_path.is_none());
         assert!(reopened.events.is_empty());
         assert_eq!(reopened.current_step(), WorkflowStep::PlaceSeed);
+    }
+
+    // -- Task 10.7: instruction banners --------------------------------------
+
+    #[test]
+    fn banner_text_prompts_for_seed_before_one_is_placed() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_placing_seed();
+        assert!(state.banner_text().contains("Click the barbell"));
+    }
+
+    #[test]
+    fn banner_text_shows_calibration_progress_across_both_clicks() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_calibrating();
+        let before = state.banner_text();
+        assert!(before.contains("0 of 2 points placed"));
+        assert!(before.contains("0.450"));
+
+        state.place_calibration_point(tracker_core::Point::new(0.0, 0.0));
+        let after_first = state.banner_text();
+        assert!(after_first.contains("1 of 2 points placed"));
+
+        state.place_calibration_point(tracker_core::Point::new(100.0, 0.0));
+        // Third click restarts the pair (see `third_click_restarts_the_pair`).
+        let after_second = state.banner_text();
+        assert!(after_second.contains("0 of 2 points placed"));
+    }
+
+    #[test]
+    fn banner_text_shows_tracking_progress_with_frame_and_total() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(120)));
+        state.tracking_run = TrackingRunState::started();
+        state
+            .tracking_run
+            .apply(tracking::TrackingMessage::Progress {
+                video_frame_index: 42,
+                position: tracker_core::Point::new(0.0, 0.0),
+                source: tracker_core::Source::Tracked,
+                state: tracker_core::SessionState::Tracking,
+            });
+        let text = state.banner_text();
+        assert!(text.contains("42"));
+        assert!(text.contains("120"));
+        assert!(text.to_lowercase().contains("tracking"));
+    }
+
+    #[test]
+    fn banner_text_reports_done_once_review_results_are_ready() {
+        let state = state_in_review();
+        assert!(state.banner_text().contains("Done"));
+        assert!(state.banner_text().contains("Exports"));
+    }
+
+    #[test]
+    fn phase_is_idle_before_a_run_starts() {
+        let state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        assert_eq!(state.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn phase_is_tracking_path_with_frame_and_total_while_a_run_is_active() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(50)));
+        state.tracking_run = TrackingRunState::started();
+        state
+            .tracking_run
+            .apply(tracking::TrackingMessage::Progress {
+                video_frame_index: 7,
+                position: tracker_core::Point::new(0.0, 0.0),
+                source: tracker_core::Source::Tracked,
+                state: tracker_core::SessionState::Tracking,
+            });
+        assert_eq!(
+            state.phase(),
+            Phase::TrackingPath {
+                frame: 7,
+                total: 50
+            }
+        );
+    }
+
+    #[test]
+    fn phase_is_review_once_results_are_built() {
+        let state = state_in_review();
+        assert_eq!(state.phase(), Phase::Review);
+    }
+
+    #[test]
+    fn phase_is_computing_metrics_when_bar_path_exists_without_results_yet() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        let tb = tracker_core::Timebase::new(30, 1).unwrap();
+        state.bar_path = Some(tracker_core::BarPath::new(&[], &[], tb, 0));
+        assert_eq!(state.phase(), Phase::ComputingMetrics);
+    }
+
+    // -- Task 10.8: live rep counter -----------------------------------------
+
+    #[test]
+    fn poll_tracking_updates_live_reps_every_30_processed_frames() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(200)));
+        state.tracking = Some(dummy_tracking_handle());
+        state.tracking_run = TrackingRunState::started();
+        assert!(state.live_reps.is_none());
+
+        // Feed a one-rep descent/ascent shape directly through the reducer
+        // the way `poll_tracking` would (mirrors `state_with_active_run`'s
+        // approach of driving `tracking_run` without a real worker thread).
+        for i in 0..=10u64 {
+            state
+                .tracking_run
+                .apply(tracking::TrackingMessage::Progress {
+                    video_frame_index: i,
+                    position: tracker_core::Point::new(0.0, i as f64 * 10.0),
+                    source: tracker_core::Source::Tracked,
+                    state: tracker_core::SessionState::Tracking,
+                });
+        }
+        for i in 11..=20u64 {
+            state
+                .tracking_run
+                .apply(tracking::TrackingMessage::Progress {
+                    video_frame_index: i,
+                    position: tracker_core::Point::new(0.0, (20 - i) as f64 * 10.0),
+                    source: tracker_core::Source::Tracked,
+                    state: tracker_core::SessionState::Tracking,
+                });
+        }
+        // Not yet a multiple of 30: no recompute triggered by the reducer
+        // alone (this test drives the reducer directly rather than through
+        // `poll_tracking`'s channel drain, so replicate its throttle call
+        // here too).
+        if state.tracking_run.should_recompute_live_reps() {
+            let tb = tracker_core::Timebase::new(30, 1).unwrap();
+            if let Some(count) = state.tracking_run.live_rep_count(tb, state.calibration) {
+                state.live_reps = Some(count);
+            }
+        }
+        assert!(
+            state.live_reps.is_none(),
+            "20 frames processed: not yet a multiple of 30"
+        );
+
+        for i in 21..=29u64 {
+            state
+                .tracking_run
+                .apply(tracking::TrackingMessage::Progress {
+                    video_frame_index: i,
+                    position: tracker_core::Point::new(0.0, 0.0),
+                    source: tracker_core::Source::Tracked,
+                    state: tracker_core::SessionState::Tracking,
+                });
+        }
+        assert!(state.tracking_run.should_recompute_live_reps());
+        let tb = tracker_core::Timebase::new(30, 1).unwrap();
+        let count = state
+            .tracking_run
+            .live_rep_count(tb, state.calibration)
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn live_reps_resets_when_a_new_run_starts() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.live_reps = Some(3);
+        state.toggle_placing_seed();
+        state.place_seed(tracker_core::Point::new(1.0, 1.0));
+        state.start_tracking();
+        assert!(state.live_reps.is_none());
     }
 
     #[test]
