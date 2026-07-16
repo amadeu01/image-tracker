@@ -10,6 +10,21 @@ use super::TrackerApp;
 pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
+            // Theme toggle (task 12.4): always available, independent of
+            // whether a video is loaded. Reflects the *effective* theme
+            // (`ctx.style().visuals.dark_mode`), which follows the system
+            // theme until the user overrides it here.
+            let dark_mode = ctx.style().visuals.dark_mode;
+            let (icon, hover) = if dark_mode {
+                ("☀", "switch to light theme")
+            } else {
+                ("🌙", "switch to dark theme")
+            };
+            if ui.button(icon).on_hover_text(hover).clicked() {
+                app.toggle_theme(ctx);
+            }
+            ui.separator();
+
             // Always available (10.5): opening a video works from an empty
             // window and any time afterward (loads a fresh session on the
             // new file).

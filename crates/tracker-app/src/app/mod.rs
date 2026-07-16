@@ -16,8 +16,10 @@
 
 mod banner;
 mod bottom_bar;
+mod palette;
 mod side_panel;
 mod state;
+mod theme;
 mod thumbnail_panel;
 mod toolbar;
 mod video_panel;
@@ -72,6 +74,12 @@ pub struct TrackerApp {
     /// can lay out every placeholder box immediately (10.6's "placeholder
     /// boxes fill in as thumbs arrive").
     thumbnail_textures: Vec<Option<egui::TextureHandle>>,
+    /// User's explicit theme override (task 12.4), persisted via
+    /// `theme::save_override`/loaded via `theme::load_override`. `None`
+    /// means "no override yet" — egui/winit already applied the system
+    /// theme before the first frame, and `update` leaves it alone rather
+    /// than fighting further `ThemeChanged` events.
+    theme_override: Option<bool>,
 }
 
 impl TrackerApp {
@@ -95,7 +103,23 @@ impl TrackerApp {
             open_error: None,
             thumbnails: None,
             thumbnail_textures: Vec::new(),
+            theme_override: theme::load_override(),
         }
+    }
+
+    /// Flips the effective theme and persists the new choice (task 12.4).
+    /// Called from the toolbar's sun/moon button; applies immediately via
+    /// `ctx.set_visuals` rather than waiting for the next frame's poll so
+    /// the click feels instant.
+    pub fn toggle_theme(&mut self, ctx: &egui::Context) {
+        let new_dark = !ctx.style().visuals.dark_mode;
+        ctx.set_visuals(if new_dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        });
+        self.theme_override = Some(new_dark);
+        theme::save_override(new_dark);
     }
 
     /// Rebuilds every video-dependent piece of state (`AppState`, the seek
@@ -237,6 +261,22 @@ impl TrackerApp {
 
 impl eframe::App for TrackerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Re-apply a persisted user override (task 12.4) once the effective
+        // theme drifts from it — only ever happens on the very first frame
+        // after launch (there's no other code path that changes
+        // `dark_mode` behind the override's back), but checking rather than
+        // unconditionally calling `set_visuals` every frame avoids fighting
+        // any future system `ThemeChanged` re-application when there's no
+        // override at all (`theme_override: None`, the common case).
+        if let Some(dark) = self.theme_override {
+            if ctx.style().visuals.dark_mode != dark {
+                ctx.set_visuals(if dark {
+                    egui::Visuals::dark()
+                } else {
+                    egui::Visuals::light()
+                });
+            }
+        }
         if let Some(state) = &mut self.state {
             if state.poll_tracking() {
                 ctx.request_repaint();

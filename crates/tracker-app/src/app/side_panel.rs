@@ -13,6 +13,7 @@
 
 use eframe::egui;
 
+use super::palette::{self, StatusKind};
 use super::state::{AppState, EventLevel};
 use crate::tracking::TrackerSelection;
 
@@ -97,7 +98,7 @@ pub fn show(ctx: &egui::Context, state: Option<&mut AppState>) {
 fn empty_guide_section(ui: &mut egui::Ui) {
     ui.heading("Guide");
     ui.colored_label(
-        egui::Color32::from_rgb(90, 170, 255),
+        palette::status_color(ui.visuals().dark_mode, StatusKind::Info),
         "▶ 0. Open a video [Ctrl+O]",
     );
     for (id, label) in STEPS {
@@ -122,10 +123,13 @@ fn guide_section(ui: &mut egui::Ui, state: &AppState) {
 /// whoever wants it, not forced on everyone.
 fn guide_step_row(ui: &mut egui::Ui, id: u8, label: &str, done: bool, is_current: bool) {
     let text = format!("{id}. {label}");
+    let dark_mode = ui.visuals().dark_mode;
     let header_text = if is_current {
-        egui::RichText::new(format!("▶ {text}")).color(egui::Color32::from_rgb(90, 170, 255))
+        egui::RichText::new(format!("▶ {text}"))
+            .color(palette::status_color(dark_mode, StatusKind::Info))
     } else if done {
-        egui::RichText::new(format!("✓ {text}")).color(egui::Color32::GRAY)
+        egui::RichText::new(format!("✓ {text}"))
+            .color(palette::status_color(dark_mode, StatusKind::Neutral))
     } else {
         egui::RichText::new(format!("   {text}"))
     };
@@ -203,25 +207,43 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
     let is_paused = run.session_state == Some(tracker_core::SessionState::NeedsReseed);
     let is_searching = run.is_searching();
     let is_done = !run.running && run.bar_path.is_some();
+    let dark_mode = ui.visuals().dark_mode;
     let (state_label, color) = if is_error {
-        ("error", egui::Color32::from_rgb(230, 70, 70))
+        ("error", palette::status_color(dark_mode, StatusKind::Error))
     } else if is_paused {
         (
             "paused — reseed needed",
-            egui::Color32::from_rgb(230, 200, 60),
+            palette::status_color(dark_mode, StatusKind::Warn),
         )
     } else if is_done {
-        ("complete", egui::Color32::from_rgb(90, 200, 110))
+        (
+            "complete",
+            palette::status_color(dark_mode, StatusKind::Success),
+        )
     } else if is_searching {
-        ("object lost — searching…", egui::Color32::GRAY)
+        (
+            "object lost — searching…",
+            palette::status_color(dark_mode, StatusKind::Neutral),
+        )
     } else if run.running {
-        ("tracking", egui::Color32::from_rgb(90, 200, 110))
+        (
+            "tracking",
+            palette::status_color(dark_mode, StatusKind::Success),
+        )
     } else {
-        ("idle", egui::Color32::GRAY)
+        (
+            "idle",
+            palette::status_color(dark_mode, StatusKind::Neutral),
+        )
     };
     kv_row_colored(ui, "state", state_label, color);
     if let Some(e) = &run.error {
-        kv_row_colored(ui, "last error", e, egui::Color32::from_rgb(230, 70, 70));
+        kv_row_colored(
+            ui,
+            "last error",
+            e,
+            palette::status_color(dark_mode, StatusKind::Error),
+        );
     }
     kv_row(ui, "frames processed", &run.frames_processed.to_string());
     kv_row(ui, "gaps", &run.gap_count.to_string());
@@ -434,13 +456,14 @@ fn strategy_benchmark_section(ui: &mut egui::Ui, state: &mut AppState) {
             ui.end_row();
             for (i, row) in rows.iter().enumerate() {
                 let is_winner = winner == Some(i);
-                let label = if is_winner {
-                    egui::RichText::new(row.strategy.label())
-                        .strong()
-                        .color(egui::Color32::GREEN)
-                } else {
-                    egui::RichText::new(row.strategy.label())
-                };
+                let label =
+                    if is_winner {
+                        egui::RichText::new(row.strategy.label()).strong().color(
+                            palette::status_color(ui.visuals().dark_mode, StatusKind::Success),
+                        )
+                    } else {
+                        egui::RichText::new(row.strategy.label())
+                    };
                 ui.label(label);
                 ui.label(format!("{:.1}%", row.metrics.tracked_pct));
                 match row.metrics.mean_jitter {
@@ -500,7 +523,7 @@ fn results_section(ui: &mut egui::Ui, state: &AppState) {
     match &results.velocity {
         Err(e) => {
             ui.colored_label(
-                egui::Color32::from_rgb(230, 200, 60),
+                palette::status_color(ui.visuals().dark_mode, StatusKind::Warn),
                 format!("velocity unavailable: {e}"),
             );
         }
@@ -550,7 +573,7 @@ fn results_section(ui: &mut egui::Ui, state: &AppState) {
     kv_row(ui, "gaps", &q.gap_count.to_string());
     kv_row(ui, "reseeds", &q.reseed_count.to_string());
     let interp_color = if q.interpolated_percent() > 20.0 {
-        egui::Color32::from_rgb(230, 200, 60)
+        palette::status_color(ui.visuals().dark_mode, StatusKind::Warn)
     } else {
         ui.visuals().text_color()
     };

@@ -8,44 +8,40 @@
 
 use eframe::egui;
 
+use super::palette::{self, BannerKind};
 use super::state::{AppState, Mode, Phase};
 
 pub fn show(ctx: &egui::Context, state: Option<&AppState>) {
     let Some(state) = state else {
         return;
     };
-    let color = banner_color(state);
+    let dark_mode = ctx.style().visuals.dark_mode;
+    let (bg, text) = palette::banner_colors(dark_mode, banner_kind(state));
     egui::TopBottomPanel::top("mode_banner")
         .frame(
             egui::Frame::default()
-                .fill(color)
+                .fill(bg)
                 .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
         )
         .show_separator_line(false)
         .show(ctx, |ui| {
-            ui.colored_label(banner_text_color(color), state.banner_text());
+            ui.colored_label(text, state.banner_text());
         });
 }
 
-/// Background color for the banner: distinct per mode/phase so the strip is
-/// glanceable even before reading it (task 10.7's "colored background per
-/// mode"). Falls back to a neutral gray for the between-steps idle state.
-fn banner_color(state: &AppState) -> egui::Color32 {
+/// Which of `palette::banner_colors`'s four "temperatures" the banner
+/// currently expresses, distinct per mode/phase so the strip is glanceable
+/// even before reading it (task 10.7's "colored background per mode").
+/// Falls back to `Neutral` for the between-steps idle state.
+fn banner_kind(state: &AppState) -> BannerKind {
     match state.phase() {
-        Phase::TrackingPath { .. } => egui::Color32::from_rgb(40, 70, 110), // blue: working
-        Phase::ComputingMetrics => egui::Color32::from_rgb(40, 70, 110),
-        Phase::Review => egui::Color32::from_rgb(35, 90, 55), // green: done
+        Phase::TrackingPath { .. } => BannerKind::Working,
+        Phase::ComputingMetrics => BannerKind::Working,
+        Phase::Review => BannerKind::Done,
         Phase::Idle => match state.mode {
-            Mode::PlacingSeed => egui::Color32::from_rgb(90, 70, 20), // amber: action needed
-            Mode::Calibrating { .. } => egui::Color32::from_rgb(90, 70, 20),
-            Mode::ViewOnly => egui::Color32::from_rgb(45, 45, 45), // neutral
+            Mode::PlacingSeed => BannerKind::ActionNeeded,
+            Mode::Calibrating { .. } => BannerKind::ActionNeeded,
+            Mode::ViewOnly => BannerKind::Neutral,
         },
     }
-}
-
-/// White reads on every one of `banner_color`'s dark fills; kept as its own
-/// function (rather than a hardcoded constant inline) so a future banner
-/// color change stays paired with its readable text color.
-fn banner_text_color(_bg: egui::Color32) -> egui::Color32 {
-    egui::Color32::WHITE
 }
