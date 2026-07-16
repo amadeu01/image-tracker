@@ -23,3 +23,6 @@ Features we've agreed on but deliberately deferred, so nothing gets lost. Near-t
 - **cargo-dist / homebrew tap** distribution polish (PLAN 7.3).
 - **Sentry/Datadog telemetry layer** — slot into the existing `tracing` Layer stack.
 - **Bar-only velocity zones / VBT targets**: configurable velocity thresholds with visual feedback per rep.
+- **Full strategy parameter sweep / auto-tune** (beyond milestone 11's fixed-matrix `compare`): search over filter params + thresholds per video.
+- **CLAHE / histogram equalization preprocessor**: deliberately skipped in milestone 11 (ZNCC is already contrast-invariant — see docs/theory.md); revisit only if a tracker that isn't contrast-invariant lands.
+- **User-facing "how it works" explainer** (blog-style distillation of docs/theory.md).
