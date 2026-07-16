@@ -367,6 +367,20 @@ impl SessionResults {
     pub fn stop_set_evaluation(&self, threshold_pct: f64) -> Option<tracker_core::StopSet> {
         tracker_core::stop_set_evaluation(&self.loss_percent, threshold_pct)
     }
+
+    /// Video-absolute `(start_frame, end_frame)` of rep `index` (task 13.2's
+    /// scrub-bar segments). `Rep`'s fields are *indices into the velocity
+    /// slice*, not frame numbers — this resolves them through the velocity
+    /// samples' `frame_index` (which already carries the session's
+    /// `start_frame` offset). `None` when the index is out of range or the
+    /// velocity series errored (no reps exist then anyway).
+    pub fn rep_frame_bounds(&self, index: usize) -> Option<(u64, u64)> {
+        let velocity = self.velocity.as_ref().ok()?;
+        let rep = self.reps.get(index)?;
+        let start = velocity.get(rep.eccentric_start)?.frame_index;
+        let end = velocity.get(rep.concentric_end)?.frame_index;
+        Some((start, end))
+    }
 }
 
 /// UI/session state, independent of egui so the index-clamping logic can be
@@ -472,6 +486,19 @@ pub struct AppState {
     /// `start_tracking` flips it to `Live`; nothing currently flips it back
     /// automatically (left for 13.6, which owns the dedicated Live panel).
     pub display_mode: DisplayMode,
+    /// The selected rep (0-based index into `results.reps`), task 13.2 —
+    /// shared selection state: the scrub bar's segment highlight now, the
+    /// 13.3 table row highlight and video path segment highlight later, all
+    /// read this same field. `None` when nothing is selected; cleared with
+    /// `results` on retrack/new session/discard (a stale index into a new
+    /// run's reps would silently select the wrong rep).
+    pub selected_rep: Option<usize>,
+    /// The rep whose *clip* is active (13.3's ▶ per-rep playback) — drives
+    /// the scrub bar's in/out markers, which 13.2 already draws. Distinct
+    /// from `selected_rep` per the design mock: clicking a segment/row
+    /// selects (and clears any clip); only ▶ arms a clip. Nothing sets this
+    /// yet — 13.3 owns that.
+    pub rep_clip: Option<usize>,
 }
 
 impl AppState {
@@ -501,7 +528,26 @@ impl AppState {
             benchmark_rows: None,
             exported_files: Vec::new(),
             display_mode: DisplayMode::Results,
+            selected_rep: None,
+            rep_clip: None,
         }
+    }
+
+    /// Selects rep `index` and jumps the playhead to its start frame (the
+    /// design's segment/row `onSelect`: select + jump + clear any active
+    /// clip). No-op when `index` doesn't resolve to a rep in the current
+    /// `results` — a stale click racing a reset must not select garbage.
+    pub fn select_rep(&mut self, index: usize) {
+        let Some(bounds) = self
+            .results
+            .as_ref()
+            .and_then(|r| r.rep_frame_bounds(index))
+        else {
+            return;
+        };
+        self.selected_rep = Some(index);
+        self.rep_clip = None;
+        self.set_frame(bounds.0 as i64);
     }
 
     /// Sets the Live/Results pill selection (task 13.1's toolbar toggle).
@@ -869,6 +915,8 @@ impl AppState {
         self.tracking_run = TrackingRunState::started();
         self.bar_path = None;
         self.live_reps = None;
+        self.selected_rep = None;
+        self.rep_clip = None;
         // A fresh run has no results to show yet — flip the pill to Live
         // (task 13.1) so the toolbar reflects what's actually happening.
         self.display_mode = DisplayMode::Live;
@@ -1315,6 +1363,8 @@ impl AppState {
         self.export = None;
         self.paused = false;
         self.live_reps = None;
+        self.selected_rep = None;
+        self.rep_clip = None;
         self.mode = Mode::PlacingSeed;
         tracing::info!("tracking discarded (user)");
         self.push_event(EventLevel::Warn, "tracking discarded".to_string());
@@ -1350,6 +1400,8 @@ impl AppState {
         self.results = None;
         self.export = None;
         self.live_reps = None;
+        self.selected_rep = None;
+        self.rep_clip = None;
         self.mode = Mode::ViewOnly;
         self.status.clear();
         self.events.clear();
@@ -1374,6 +1426,8 @@ impl AppState {
         self.bar_path = None;
         self.results = None;
         self.export = None;
+        self.selected_rep = None;
+        self.rep_clip = None;
         self.tracking_run = TrackingRunState::default();
         self.paused = false;
         tracing::info!("re-track started");
@@ -1724,6 +1778,67 @@ mod tests {
         );
         assert!(results.reps.is_empty());
         assert!(results.metrics.is_empty());
+    }
+
+    #[test]
+    fn rep_frame_bounds_resolves_velocity_indices_to_video_frames() {
+        let results = SessionResults::build(one_rep_bar_path(), None, 0);
+        let (start, end) = results.rep_frame_bounds(0).expect("one rep exists");
+        // The synthetic rep spans (nearly) the whole 0..=20 path; whatever
+        // exact indices segment_reps picks, the bounds must be ordered,
+        // within the path's frame range, and genuinely apart.
+        assert!(start < end);
+        assert!(end <= 20);
+        assert_eq!(results.rep_frame_bounds(1), None, "only one rep");
+    }
+
+    #[test]
+    fn rep_frame_bounds_is_none_when_velocity_errored() {
+        let tb = tracker_core::Timebase::new(30, 1).unwrap();
+        let samples = vec![sample(0, 0.0, 0.0, tracker_core::Source::Tracked)];
+        let results =
+            SessionResults::build(tracker_core::BarPath::new(&samples, &[], tb, 0), None, 0);
+        assert_eq!(results.rep_frame_bounds(0), None);
+    }
+
+    #[test]
+    fn select_rep_sets_selection_jumps_playhead_to_rep_start_and_clears_clip() {
+        let mut state = state_in_review();
+        state.rep_clip = Some(0);
+        state.set_frame(20);
+        state.select_rep(0);
+        assert_eq!(state.selected_rep, Some(0));
+        assert_eq!(state.rep_clip, None);
+        let (start, _) = state.results.as_ref().unwrap().rep_frame_bounds(0).unwrap();
+        assert_eq!(state.current_frame, start);
+    }
+
+    #[test]
+    fn select_rep_ignores_out_of_range_index_and_missing_results() {
+        let mut state = state_in_review();
+        state.select_rep(5); // only one rep exists
+        assert_eq!(state.selected_rep, None);
+
+        let mut fresh = AppState::new(PathBuf::from("v.mp4"), meta(Some(100)));
+        fresh.select_rep(0); // no results at all
+        assert_eq!(fresh.selected_rep, None);
+    }
+
+    #[test]
+    fn rep_selection_is_cleared_on_new_session_retrack_and_discard() {
+        let mut state = state_in_review();
+        state.select_rep(0);
+        assert_eq!(state.selected_rep, Some(0));
+        state.start_new_session();
+        assert_eq!(state.selected_rep, None);
+        assert_eq!(state.rep_clip, None);
+
+        let mut state = state_in_review();
+        state.select_rep(0);
+        state.rep_clip = Some(0);
+        state.retrack();
+        assert_eq!(state.selected_rep, None);
+        assert_eq!(state.rep_clip, None);
     }
 
     #[test]
