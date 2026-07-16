@@ -5,14 +5,16 @@
 use crate::geometry::{Frame, Point};
 use crate::metric::{CorrelationMetric, Zncc};
 use crate::patch::{extract_patch, Patch};
+use crate::preprocessor::PreprocessorChain;
 
 /// Configuration for a `TemplateTracker`, built via `TemplateTrackerConfig::builder()`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TemplateTrackerConfig {
     patch_radius: u32,
     search_radius: u32,
     min_score: f64,
     update_threshold: f64,
+    preprocessor: PreprocessorChain,
 }
 
 impl TemplateTrackerConfig {
@@ -41,15 +43,23 @@ impl TemplateTrackerConfig {
     pub fn update_threshold(&self) -> f64 {
         self.update_threshold
     }
+
+    /// The `Preprocessor` chain applied to the reference patch (at
+    /// construction) and to every candidate patch (per step). Empty
+    /// (identity/no-op) by default.
+    pub fn preprocessor(&self) -> &PreprocessorChain {
+        &self.preprocessor
+    }
 }
 
 /// Builder for `TemplateTrackerConfig`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TemplateTrackerConfigBuilder {
     patch_radius: u32,
     search_radius: u32,
     min_score: f64,
     update_threshold: f64,
+    preprocessor: PreprocessorChain,
 }
 
 impl Default for TemplateTrackerConfigBuilder {
@@ -59,6 +69,7 @@ impl Default for TemplateTrackerConfigBuilder {
             search_radius: 15,
             min_score: 0.5,
             update_threshold: 0.7,
+            preprocessor: PreprocessorChain::new(),
         }
     }
 }
@@ -88,12 +99,20 @@ impl TemplateTrackerConfigBuilder {
         self
     }
 
+    /// Sets the `Preprocessor` chain applied to the reference patch and
+    /// every candidate patch (see CONTEXT.md, "Preprocessor").
+    pub fn preprocessor(mut self, chain: PreprocessorChain) -> Self {
+        self.preprocessor = chain;
+        self
+    }
+
     pub fn build(self) -> TemplateTrackerConfig {
         TemplateTrackerConfig {
             patch_radius: self.patch_radius,
             search_radius: self.search_radius,
             min_score: self.min_score,
             update_threshold: self.update_threshold,
+            preprocessor: self.preprocessor,
         }
     }
 }
@@ -172,6 +191,10 @@ impl TemplateTracker {
             config.patch_radius,
         )
         .ok_or(TemplateTrackerError::SeedPatchOutOfBounds)?;
+        // Same-space invariant (CONTEXT.md "Preprocessor"): the reference
+        // patch must go through the identical chain every candidate patch
+        // will go through in `step`.
+        let template = config.preprocessor.apply_patch(&template);
         Ok(Self {
             config,
             anchor: template.clone(),
@@ -198,6 +221,7 @@ impl TemplateTracker {
                 let Some(candidate) = extract_patch(frame, x, y, self.config.patch_radius) else {
                     continue;
                 };
+                let candidate = self.config.preprocessor.apply_patch(&candidate);
                 let anchor_score = metric.score(&self.anchor, &candidate);
                 let adaptive_score = metric.score(&self.adaptive, &candidate);
                 let score = match (anchor_score, adaptive_score) {
@@ -424,7 +448,7 @@ mod tests {
 
         let seed_frame = frame_with_blended_pattern(width, height, cx, cy, radius, 0.0);
         let config = dual_template_config();
-        let mut tracker = TemplateTracker::new(&seed_frame, pos, config).unwrap();
+        let mut tracker = TemplateTracker::new(&seed_frame, pos, config.clone()).unwrap();
 
         // Walk the appearance gradually from pattern_a (t=0.0) to pattern_b
         // (t=1.0) in small per-frame steps small enough that each
@@ -500,7 +524,7 @@ mod tests {
 
         let seed_frame = frame_with_blended_pattern(width, height, cx, cy, radius, 0.0);
         let config = dual_template_config();
-        let mut tracker = TemplateTracker::new(&seed_frame, pos, config).unwrap();
+        let mut tracker = TemplateTracker::new(&seed_frame, pos, config.clone()).unwrap();
 
         // t=0.55: scores ~0.53 against the anchor — above min_score (0.5)
         // but below update_threshold (0.7), a marginal match that should be
@@ -571,5 +595,130 @@ mod tests {
             }
             StepOutcome::Miss => panic!("expected Found near seed"),
         }
+    }
+
+    // --- Preprocessor integration (task 11.2) ---
+
+    use crate::preprocessor::{Preprocessor, PreprocessorChain};
+
+    #[test]
+    fn filtered_tracker_self_matches_the_seed_frame_at_score_near_one() {
+        // Same-space invariant (CONTEXT.md "Preprocessor"): if the chain is
+        // applied identically to the reference and every candidate, a
+        // tracker stepping on its own seed frame must still self-match
+        // near-perfectly, exactly as an unfiltered tracker would.
+        let width = 30;
+        let height = 30;
+        let seed_frame = frame_with_square(width, height, 12, 12, 6);
+        let seed = Point::new(15.0, 15.0);
+        let chain = PreprocessorChain::from_steps(vec![Preprocessor::GaussianBlur { sigma: 1.2 }]);
+        let config = TemplateTrackerConfig::builder()
+            .patch_radius(4)
+            .search_radius(4)
+            .min_score(0.5)
+            .preprocessor(chain)
+            .build();
+        let mut tracker = TemplateTracker::new(&seed_frame, seed, config).unwrap();
+
+        let outcome = tracker.step(&seed_frame, seed);
+        match outcome {
+            StepOutcome::Found { position, score } => {
+                assert_eq!(position, seed);
+                assert!(
+                    score > 0.99,
+                    "expected near-perfect self-match, got {score}"
+                );
+            }
+            StepOutcome::Miss => panic!("expected Found: filtered tracker must self-match"),
+        }
+    }
+
+    /// A simple xorshift-style LCG for reproducible per-pixel noise.
+    fn lcg_next(state: &mut u32) -> u32 {
+        *state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+        *state
+    }
+
+    /// Builds a frame with a bright moving square plus independent per-pixel
+    /// noise (salt/pepper style: occasional large jumps), seeded
+    /// deterministically from `frame_index` so consecutive frames are
+    /// independent noise draws over the same moving object.
+    fn noisy_frame_with_square(
+        width: u32,
+        height: u32,
+        sx: i64,
+        sy: i64,
+        size: i64,
+        frame_index: u32,
+    ) -> Frame {
+        let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+        let mut state = 0x9e3779b9u32.wrapping_add(frame_index.wrapping_mul(2654435761));
+        for y in 0..height as i64 {
+            for x in 0..width as i64 {
+                let inside = x >= sx && x < sx + size && y >= sy && y < sy + size;
+                let base = if inside { 220i32 } else { 20i32 };
+                let r = lcg_next(&mut state);
+                // Heavy-tailed impulse noise: most pixels are clean, roughly
+                // 1 in 6 gets knocked to a near-random extreme value —
+                // enough to routinely flip the ZNCC winner among nearby
+                // candidates without a denoising preprocessor.
+                let v = if r.is_multiple_of(6) {
+                    (r >> 8) % 256
+                } else {
+                    base.clamp(0, 255) as u32
+                };
+                let v = v as u8;
+                rgb.extend_from_slice(&[v, v, v]);
+            }
+        }
+        Frame::new(width, height, rgb).unwrap()
+    }
+
+    #[test]
+    fn gaussian_chain_tracks_a_moving_noisy_square_at_least_as_well_as_unfiltered() {
+        let width = 50;
+        let height = 50;
+        let size = 6;
+        let seed = Point::new(13.0, 13.0);
+        // Moves by (1, 1) every frame, plus per-frame impulse noise.
+        let positions: Vec<(i64, i64)> = (0..10).map(|i| (10 + i, 10 + i)).collect();
+
+        let run = |chain: PreprocessorChain| -> (u32, f64) {
+            let seed_frame = noisy_frame_with_square(width, height, 10, 10, size, 0);
+            let config = TemplateTrackerConfig::builder()
+                .patch_radius(4)
+                .search_radius(4)
+                .min_score(0.0) // count every step so score sums are comparable
+                .preprocessor(chain)
+                .build();
+            let mut tracker = TemplateTracker::new(&seed_frame, seed, config).unwrap();
+            let mut last_pos = seed;
+            let mut found_count = 0u32;
+            let mut score_sum = 0.0;
+            for (i, &(sx, sy)) in positions.iter().enumerate() {
+                let frame = noisy_frame_with_square(width, height, sx, sy, size, i as u32 + 1);
+                match tracker.step(&frame, last_pos) {
+                    StepOutcome::Found { position, score } => {
+                        found_count += 1;
+                        score_sum += score;
+                        last_pos = position;
+                    }
+                    StepOutcome::Miss => {}
+                }
+            }
+            (found_count, score_sum)
+        };
+
+        let (_, unfiltered_score_sum) = run(PreprocessorChain::new());
+        let (_, filtered_score_sum) = run(PreprocessorChain::from_steps(vec![
+            Preprocessor::GaussianBlur { sigma: 1.2 },
+        ]));
+
+        assert!(
+            filtered_score_sum >= unfiltered_score_sum,
+            "expected the gaussian-filtered chain to score at least as well as unfiltered on \
+             this noisy moving-square sequence: filtered={filtered_score_sum}, \
+             unfiltered={unfiltered_score_sum}"
+        );
     }
 }

@@ -36,6 +36,18 @@ impl Patch {
         }
         self.values.get((dy * side + dx) as usize).copied()
     }
+
+    /// Rebuilds a `Patch` of the given `radius` from a row-major `values`
+    /// buffer (e.g. the output of a `Preprocessor` applied to
+    /// `self.values()`). Returns `None` if `values.len() != side()^2`,
+    /// where `side = 2*radius + 1`.
+    pub fn from_values(radius: u32, values: Vec<f32>) -> Option<Patch> {
+        let side = (2 * radius + 1) as usize;
+        if values.len() != side * side {
+            return None;
+        }
+        Some(Patch { radius, values })
+    }
 }
 
 /// Converts an RGB triple to luma using standard broadcast weights.

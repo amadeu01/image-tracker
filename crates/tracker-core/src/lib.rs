@@ -14,6 +14,7 @@ pub mod geometry;
 pub mod metric;
 pub mod overlay;
 pub mod patch;
+pub mod preprocessor;
 pub mod rep;
 pub mod rep_metrics;
 pub mod session;
@@ -36,6 +37,7 @@ pub use geometry::{Frame, FrameError, Point};
 pub use metric::{CorrelationMetric, Zncc};
 pub use overlay::{render_overlay, render_rep_bottoms, Color, OverlayStyle, OverlayStyleBuilder};
 pub use patch::{extract_patch, Patch};
+pub use preprocessor::{Preprocessor, PreprocessorChain};
 pub use rep::{segment_reps, Rep, RepSegmentationConfig, RepSegmentationConfigBuilder};
 pub use rep_metrics::{all_rep_metrics, rep_metrics, RepMetrics};
 pub use session::{
