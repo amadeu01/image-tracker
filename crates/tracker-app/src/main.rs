@@ -30,10 +30,14 @@ fn main() {
         log_path = ?log_path,
         "tracker-app starting"
     );
-    println!(
+    let banner = format!(
         "tracker-app {} ({os}/{arch}); ffmpeg: {ffmpeg_version}",
         env!("CARGO_PKG_VERSION")
     );
+    // Captured once here (task 12.2) so a later panic hook can include it in
+    // the crash bundle without re-spawning `ffmpeg -version`.
+    telemetry::set_startup_banner(banner.clone());
+    println!("{banner}");
     match &log_path {
         Some(p) => println!("logging to {}", p.display()),
         None => println!("file logging unavailable; console-only"),
