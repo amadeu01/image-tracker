@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #141416; height: 100%; }
+  a { color: #6ea3ec; text-decoration: none; }
+  a:hover { color: #8fbaf2; text-decoration: underline; }
+  @keyframes pulseDot { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+</style>
+</helmet>
+<div style="display: flex; flex-direction: column; height: 100vh; background: #141416; color: #e8e8ea; font-family: 'IBM Plex Sans', sans-serif; font-size: 13px; overflow: hidden;">
+
+  <!-- Toolbar -->
+  <div style="display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: #1d1d21; border-bottom: 1px solid #2c2c31; flex-shrink: 0;">
+    <button style="background: #26262b; border: 1px solid #3a3a40; color: #e8e8ea; padding: 5px 12px; border-radius: 4px; font-family: inherit; font-size: 13px; cursor: pointer;" style-hover="background: #2e2e34;">Open video…</button>
+    <button style="background: #26262b; border: 1px solid #3a3a40; color: #e8e8ea; padding: 5px 12px; border-radius: 4px; font-family: inherit; font-size: 13px; cursor: pointer;" style-hover="background: #2e2e34;">Place Seed</button>
+    <button style="background: #26262b; border: 1px solid #3a3a40; color: #e8e8ea; padding: 5px 12px; border-radius: 4px; font-family: inherit; font-size: 13px; cursor: pointer;" style-hover="background: #2e2e34;">Calibrate</button>
+    <button style="background: #26262b; border: 1px solid #3a3a40; color: #e8e8ea; padding: 5px 12px; border-radius: 4px; font-family: inherit; font-size: 13px; cursor: pointer;" style-hover="background: #2e2e34;">Track</button>
+    <div style="flex: 1;"></div>
+    <div style="display: flex; background: #1a1a1e; border: 1px solid #3a3a40; border-radius: 5px; overflow: hidden;">
+      <button onClick="{{ goLive }}" style="background: {{ liveBg }}; border: none; color: {{ liveFg }}; padding: 5px 14px; font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px;"><span style="width: 7px; height: 7px; border-radius: 50%; background: {{ liveDot }}; animation: pulseDot 1.4s infinite;"></span>Live</button>
+      <button onClick="{{ goResults }}" style="background: {{ resBg }}; border: none; color: {{ resFg }}; padding: 5px 14px; font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer;">Results</button>
+    </div>
+  </div>
+
+  <!-- Hint bar -->
+  <div style="padding: 6px 12px; background: #202024; border-bottom: 1px solid #2c2c31; color: #9a9aa2; font-size: 12.5px; flex-shrink: 0;">{{ hintText }}</div>
+
+  <!-- Main -->
+  <div style="display: flex; flex: 1; min-height: 0;">
+
+    <!-- Video pane -->
+    <div style="flex: 1.2; display: flex; flex-direction: column; min-width: 0; padding: 12px; gap: 10px;">
+      <div style="flex: 1; position: relative; background: repeating-linear-gradient(45deg, #1a1a1e 0px, #1a1a1e 14px, #1e1e23 14px, #1e1e23 28px); border: 1px solid #2c2c31; border-radius: 4px; overflow: hidden; display: flex; align-items: center; justify-content: center;">
+        <div style="font-family: 'IBM Plex Mono', monospace; color: #55555e; font-size: 13px;">video frame · 576×1024 · squat set</div>
+        <svg viewBox="0 0 300 520" style="position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); height: 92%; opacity: 0.9;" preserveAspectRatio="xMidYMid meet">
+          <polyline points="{{ barPath }}" fill="none" stroke="#6ea3ec" stroke-width="2.5" stroke-linejoin="round" opacity="0.85"></polyline>
+          <circle cx="{{ barX }}" cy="{{ barY }}" r="8" fill="none" stroke="#4f8fe8" stroke-width="3"></circle>
+          <circle cx="{{ barX }}" cy="{{ barY }}" r="2.5" fill="#4f8fe8"></circle>
+        </svg>
+        <sc-if value="{{ clipActive }}" hint-placeholder-val="{{ false }}">
+          <div style="position: absolute; top: 10px; left: 10px; background: rgba(20,20,22,0.85); border: 1px solid #3a3a40; border-radius: 4px; padding: 5px 10px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #6ea3ec; display: flex; align-items: center; gap: 7px;"><span>▶</span><span>{{ clipLabel }}</span></div>
+        </sc-if>
+        <sc-if value="{{ isLive }}" hint-placeholder-val="{{ false }}">
+          <div style="position: absolute; top: 10px; right: 10px; background: rgba(20,20,22,0.85); border: 1px solid #3a3a40; border-radius: 4px; padding: 6px 12px; display: flex; flex-direction: column; gap: 2px; align-items: flex-end;">
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 20px; font-weight: 500; color: #3fbf77;">0.74 <span style="font-size: 12px; color: #9a9aa2;">{{ unit }}</span></div>
+            <div style="font-size: 11px; color: #9a9aa2; letter-spacing: 0.08em;">CONCENTRIC ▲</div>
+          </div>
+        </sc-if>
+      </div>
+
+      <!-- Scrub bar with rep segments -->
+      <div style="flex-shrink: 0;">
+        <div style="position: relative; height: 34px; background: #1d1d21; border: 1px solid #2c2c31; border-radius: 4px; overflow: hidden;">
+          <sc-for list="{{ rows }}" as="r" hint-placeholder-count="8">
+            <div onClick="{{ r.onSelect }}" title="Rep {{ r.n }}" style="position: absolute; top: 6px; bottom: 6px; left: {{ r.leftPct }}%; width: {{ r.widthPct }}%; background: {{ r.segBg }}; border: 1px solid {{ r.segBorder }}; border-radius: 3px; cursor: pointer;"></div>
+          </sc-for>
+          <div style="position: absolute; top: 0; bottom: 0; left: {{ playheadPct }}%; width: 2px; background: #e8e8ea;"></div>
+          <sc-if value="{{ clipActive }}" hint-placeholder-val="{{ false }}">
+            <div style="position: absolute; top: 0; bottom: 0; left: {{ inPct }}%; width: 2px; background: #6ea3ec;"></div>
+            <div style="position: absolute; top: 0; bottom: 0; left: {{ outPct }}%; width: 2px; background: #6ea3ec;"></div>
+          </sc-if>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+          <button style="background: #26262b; border: 1px solid #3a3a40; color: #e8e8ea; padding: 4px 10px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer;">« prev</button>
+          <button style="background: #26262b; border: 1px solid #3a3a40; color: #e8e8ea; padding: 4px 12px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer;">▶</button>
+          <button style="background: #26262b; border: 1px solid #3a3a40; color: #e8e8ea; padding: 4px 10px; border-radius: 4px; font-family: inherit; font-size: 12px; cursor: pointer;">next »</button>
+          <div style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #9a9aa2;">frame <span style="color: #e8e8ea;">{{ playhead }}</span> / 2110 · {{ playheadTime }}</div>
+          <div style="flex: 1;"></div>
+          <div style="font-size: 11.5px; color: #6a6a72;">click a segment or table row to jump to that rep</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right panel -->
+    <div style="width: 460px; flex-shrink: 0; border-left: 1px solid #2c2c31; background: #18181b; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px;">
+
+      <sc-if value="{{ isLive }}" hint-placeholder-val="{{ false }}">
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+            <div style="background: #1f1f24; border: 1px solid #2c2c31; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 4px;">
+              <div style="font-size: 11px; color: #9a9aa2; letter-spacing: 0.08em;">REPS</div>
+              <div style="font-size: 34px; font-weight: 700; font-family: 'IBM Plex Mono', monospace; line-height: 1;">5</div>
+              <div style="font-size: 11.5px; color: #6a6a72;">rep 6 in progress</div>
+            </div>
+            <div style="background: #1f1f24; border: 1px solid #2c2c31; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 4px;">
+              <div style="font-size: 11px; color: #9a9aa2; letter-spacing: 0.08em;">PHASE</div>
+              <div style="font-size: 20px; font-weight: 600; color: #3fbf77; display: flex; align-items: center; gap: 8px; line-height: 34px;"><span style="width: 9px; height: 9px; border-radius: 50%; background: #3fbf77; animation: pulseDot 1.2s infinite;"></span>Concentric ▲</div>
+              <div style="font-size: 11.5px; color: #6a6a72;">ecc → bottom → con</div>
+            </div>
+          </div>
+          <div style="background: #1f1f24; border: 1px solid #2c2c31; border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 8px;">
+            <div style="display: flex; justify-content: space-between; align-items: baseline;">
+              <div style="font-size: 11px; color: #9a9aa2; letter-spacing: 0.08em;">VELOCITY LOSS VS REP 1</div>
+              <div style="font-family: 'IBM Plex Mono', monospace; font-size: 15px; color: #d9a53f;">−11.0%</div>
+            </div>
+            <div style="position: relative; height: 8px; background: #26262b; border-radius: 4px; overflow: hidden;">
+              <div style="position: absolute; left: 0; top: 0; bottom: 0; width: 36.6%; background: linear-gradient(90deg, #3fbf77, #d9a53f); border-radius: 4px;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-size: 11px; color: #6a6a72; font-family: 'IBM Plex Mono', monospace;"><span>0%</span><span>stop at {{ threshold }}%</span><span>30%</span></div>
+          </div>
+          <div style="background: #1f1f24; border: 1px solid #2c2c31; border-radius: 6px; padding: 12px 14px;">
+            <div style="font-size: 11px; color: #9a9aa2; letter-spacing: 0.08em; margin-bottom: 8px;">COMPLETED REPS</div>
+            <div style="display: flex; flex-direction: column; gap: 5px; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px;">
+              <sc-for list="{{ liveRows }}" as="r" hint-placeholder-count="5">
+                <div style="display: flex; gap: 12px; color: #c8c8cc;"><span style="color: #6a6a72; width: 28px;">#{{ r.n }}</span><span style="width: 90px;">{{ r.meanStr }} {{ unit }}</span><span style="color: {{ r.lossColor }};">{{ r.lossStr }}</span></div>
+              </sc-for>
+            </div>
+          </div>
+          <div style="font-size: 11.5px; color: #6a6a72; font-family: 'IBM Plex Mono', monospace;">frames processed: 1148 · gaps: 0 · 30 fps</div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isResults }}" hint-placeholder-val="{{ true }}">
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+
+          <sc-if value="{{ stopFlag }}" hint-placeholder-val="{{ true }}">
+            <div style="background: rgba(224,82,82,0.12); border: 1px solid #e05252; border-radius: 6px; padding: 11px 14px; display: flex; align-items: center; gap: 10px;">
+              <span style="color: #e05252; font-size: 16px;">■</span>
+              <div>
+                <div style="font-weight: 600; color: #f0908e;">Stop set recommended</div>
+                <div style="font-size: 12px; color: #c8968f;">Velocity loss reached {{ maxLossStr }} — over your {{ threshold }}% threshold at rep {{ stopRep }}.</div>
+              </div>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ uncal }}" hint-placeholder-val="{{ false }}">
+            <div style="background: rgba(217,165,63,0.1); border: 1px solid #7a6330; border-radius: 6px; padding: 9px 14px; font-size: 12px; color: #d9b871;">Calibration not set — values shown in px/s. <a href="#">Calibrate</a> for m/s.</div>
+          </sc-if>
+
+          <!-- Headline -->
+          <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
+            <div style="background: #1f1f24; border: 1px solid #2c2c31; border-radius: 6px; padding: 12px 14px;">
+              <div style="font-size: 11px; color: #9a9aa2; letter-spacing: 0.08em;">REPS</div>
+              <div style="font-size: 26px; font-weight: 700; font-family: 'IBM Plex Mono', monospace;">8</div>
+            </div>
+            <div style="background: #1f1f24; border: 1px solid #2c2c31; border-radius: 6px; padding: 12px 14px;">
+              <div style="font-size: 11px; color: #9a9aa2; letter-spacing: 0.08em;">SET TIME</div>
+              <div style="font-size: 26px; font-weight: 700; font-family: 'IBM Plex Mono', monospace;">0:53</div>
+            </div>
+            <div style="background: #1f1f24; border: 1px solid #2c2c31; border-radius: 6px; padding: 12px 14px;">
+              <div style="font-size: 11px; color: #9a9aa2; letter-spacing: 0.08em;">VEL. LOSS</div>
+              <div style="font-size: 26px; font-weight: 700; font-family: 'IBM Plex Mono', monospace; color: #e05252;">{{ maxLossStr }}</div>
+            </div>
+          </div>
+
+          <!-- Rep table -->
+          <div style="background: #1f1f24; border: 1px solid #2c2c31; border-radius: 6px; overflow: hidden;">
+            <div style="display: grid; grid-template-columns: 36px 70px 82px 82px 64px 1fr 36px; padding: 8px 12px; font-size: 11px; color: #9a9aa2; letter-spacing: 0.06em; border-bottom: 1px solid #2c2c31; gap: 4px;">
+              <span>#</span><span>DEPTH</span><span>PEAK V</span><span>MEAN V</span><span>LOSS</span><span>TIME</span><span></span>
+            </div>
+            <sc-for list="{{ rows }}" as="r" hint-placeholder-count="8">
+              <div onClick="{{ r.onSelect }}" style="display: grid; grid-template-columns: 36px 70px 82px 82px 64px 1fr 36px; padding: 7px 12px; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; align-items: center; gap: 4px; cursor: pointer; background: {{ r.rowBg }}; border-left: 3px solid {{ r.lossColor }}; border-bottom: 1px solid #26262b;" style-hover="background: #26262b;">
+                <span style="color: #9a9aa2;">{{ r.n }}</span>
+                <span>{{ r.depthStr }}</span>
+                <span>{{ r.peakStr }}</span>
+                <span style="font-weight: 500;">{{ r.meanStr }}</span>
+                <span style="color: {{ r.lossColor }};">{{ r.lossStr }}</span>
+                <span style="color: #9a9aa2; font-size: 11.5px;">{{ r.range }}</span>
+                <button onClick="{{ r.onPlay }}" title="Play rep clip" style="background: #26262b; border: 1px solid #3a3a40; color: #6ea3ec; border-radius: 4px; padding: 2px 0; font-size: 11px; cursor: pointer; font-family: inherit;" style-hover="background: #2e2e34;">▶</button>
+              </div>
+            </sc-for>
+          </div>
+
+          <!-- Velocity-loss chart -->
+          <div style="background: #1f1f24; border: 1px solid #2c2c31; border-radius: 6px; padding: 14px;">
+            <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;">
+              <div style="font-size: 11px; color: #9a9aa2; letter-spacing: 0.08em;">MEAN CONCENTRIC VELOCITY BY REP</div>
+              <div style="font-size: 11px; color: #6a6a72;">dashed: 10 / 20 / 30% loss</div>
+            </div>
+            <svg viewBox="0 0 420 190" style="width: 100%; display: block;">
+              <line x1="34" y1="10" x2="34" y2="160" stroke="#333338" stroke-width="1"></line>
+              <line x1="34" y1="160" x2="410" y2="160" stroke="#333338" stroke-width="1"></line>
+              <line x1="34" y1="{{ th10y }}" x2="410" y2="{{ th10y }}" stroke="#3fbf77" stroke-width="1" stroke-dasharray="4 4" opacity="0.55"></line>
+              <line x1="34" y1="{{ th20y }}" x2="410" y2="{{ th20y }}" stroke="#d9a53f" stroke-width="1" stroke-dasharray="4 4" opacity="0.6"></line>
+              <line x1="34" y1="{{ th30y }}" x2="410" y2="{{ th30y }}" stroke="#e05252" stroke-width="1" stroke-dasharray="4 4" opacity="0.6"></line>
+              <text x="408" y="{{ th10ty }}" fill="#3fbf77" font-size="9" text-anchor="end" opacity="0.8">−10%</text>
+              <text x="408" y="{{ th20ty }}" fill="#d9a53f" font-size="9" text-anchor="end" opacity="0.8">−20%</text>
+              <text x="408" y="{{ th30ty }}" fill="#e05252" font-size="9" text-anchor="end" opacity="0.8">−30%</text>
+              <polyline points="{{ trendPoints }}" fill="none" stroke="#6ea3ec" stroke-width="1" stroke-dasharray="2 3" opacity="0.5"></polyline>
+              <polyline points="{{ chartPoints }}" fill="none" stroke="#c8c8cc" stroke-width="1.5"></polyline>
+              <sc-for list="{{ rows }}" as="r" hint-placeholder-count="8">
+                <circle onClick="{{ r.onSelect }}" cx="{{ r.cx }}" cy="{{ r.cy }}" r="{{ r.dotR }}" fill="{{ r.lossColor }}" stroke="#1f1f24" stroke-width="2" style="cursor: pointer;"></circle>
+              </sc-for>
+              <sc-for list="{{ rows }}" as="r" hint-placeholder-count="8">
+                <text x="{{ r.cx }}" y="176" fill="#6a6a72" font-size="10" text-anchor="middle" font-family="IBM Plex Mono">{{ r.n }}</text>
+              </sc-for>
+              <sc-for list="{{ yTicks }}" as="t" hint-placeholder-count="3">
+                <text x="28" y="{{ t.y }}" fill="#6a6a72" font-size="9" text-anchor="end" font-family="IBM Plex Mono">{{ t.label }}</text>
+              </sc-for>
+            </svg>
+          </div>
+
+          <!-- Config + exports -->
+          <div style="background: #1f1f24; border: 1px solid #2c2c31; border-radius: 6px; padding: 12px 14px; display: flex; align-items: center; justify-content: space-between;">
+            <div style="font-size: 12.5px; color: #c8c8cc;">Stop-set threshold</div>
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; background: #26262b; border: 1px solid #3a3a40; border-radius: 4px; padding: 4px 10px;">{{ threshold }} %</div>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button style="flex: 1; background: #26313f; border: 1px solid #3d5877; color: #9ec3ef; padding: 8px 10px; border-radius: 5px; font-family: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;" style-hover="background: #2c3a4c;">Export all rep clips</button>
+            <button style="flex: 1; background: #26262b; border: 1px solid #3a3a40; color: #e8e8ea; padding: 8px 10px; border-radius: 5px; font-family: inherit; font-size: 12.5px; cursor: pointer;" style-hover="background: #2e2e34;">Export overlay video</button>
+            <button style="flex: 1; background: #26262b; border: 1px solid #3a3a40; color: #e8e8ea; padding: 8px 10px; border-radius: 5px; font-family: inherit; font-size: 12.5px; cursor: pointer;" style-hover="background: #2e2e34;">Export CSV</button>
+          </div>
+          <div style="font-size: 11px; color: #55555e; font-family: 'IBM Plex Mono', monospace;">clips: video.rep01.mp4 … rep08.mp4 · ffmpeg stream copy, no re-encode</div>
+        </div>
+      </sc-if>
+
+    </div>
+  </div>
+
+  <!-- Status bar -->
+  <div style="display: flex; gap: 14px; padding: 5px 12px; background: #1d1d21; border-top: 1px solid #2c2c31; font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: #6a6a72; flex-shrink: 0; overflow: hidden; white-space: nowrap;">
+    <span>…/test_videos/squat_set_2026-07-05.mp4</span>
+    <span>frame {{ playhead }}/2110</span>
+    <span>mode: {{ modeLabel }}</span>
+    <span>seed: placed</span>
+    <span>calibration: {{ calLabel }}</span>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;stopThreshold&quot;: {&quot;editor&quot;: &quot;int&quot;, &quot;default&quot;: 20, &quot;min&quot;: 5, &quot;max&quot;: 40, &quot;unit&quot;: &quot;%&quot;, &quot;tsType&quot;: &quot;number&quot;, &quot;section&quot;: &quot;VBT&quot;}, &quot;calibrated&quot;: {&quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;VBT&quot;}}">
+class Component extends DCLogic {
+  state = { mode: 'results', selectedRep: 7, playhead: 1620, clip: false };
+
+  reps() {
+    return [
+      { n: 1, depth: 0.62, peak: 1.31, mean: 0.82, start: 214, end: 342 },
+      { n: 2, depth: 0.63, peak: 1.28, mean: 0.80, start: 395, end: 528 },
+      { n: 3, depth: 0.61, peak: 1.26, mean: 0.79, start: 580, end: 717 },
+      { n: 4, depth: 0.63, peak: 1.21, mean: 0.76, start: 770, end: 914 },
+      { n: 5, depth: 0.64, peak: 1.17, mean: 0.73, start: 968, end: 1119 },
+      { n: 6, depth: 0.62, peak: 1.12, mean: 0.70, start: 1174, end: 1334 },
+      { n: 7, depth: 0.64, peak: 1.05, mean: 0.66, start: 1390, end: 1562 },
+      { n: 8, depth: 0.65, peak: 0.97, mean: 0.61, start: 1620, end: 1811 }
+    ];
+  }
+
+  fmtTime(f) {
+    const s = f / 30, m = Math.floor(s / 60), r = s - m * 60;
+    return m + ':' + (r < 10 ? '0' : '') + r.toFixed(1);
+  }
+
+  renderVals() {
+    const cal = this.props.calibrated ?? true;
+    const threshold = this.props.stopThreshold ?? 20;
+    const pxScale = 640; // px per meter when uncalibrated
+    const unit = cal ? 'm/s' : 'px/s';
+    const reps = this.reps();
+    const v1 = reps[0].mean;
+    const total = 2110;
+    const { mode, selectedRep, playhead, clip } = this.state;
+    const isLive = mode === 'live';
+    const isResults = !isLive;
+
+    const fmtV = v => cal ? v.toFixed(2) : String(Math.round(v * pxScale));
+    const fmtD = d => cal ? d.toFixed(2) + ' m' : Math.round(d * pxScale) + ' px';
+
+    // chart geometry: viewBox 420x190, plot x 34..410, y 10..160, velocity 0.52..0.90
+    const vMin = 0.52, vMax = 0.90;
+    const xOf = i => 34 + 24 + i * ((410 - 34 - 48) / (reps.length - 1));
+    const yOf = v => 160 - (v - vMin) / (vMax - vMin) * 150;
+
+    const rows = reps.map((r, i) => {
+      const loss = (1 - r.mean / v1) * 100;
+      const lossColor = loss >= threshold ? '#e05252' : (loss >= threshold / 2 ? '#d9a53f' : '#3fbf77');
+      const sel = i === selectedRep;
+      return {
+        n: r.n,
+        depthStr: fmtD(r.depth),
+        peakStr: fmtV(r.peak),
+        meanStr: fmtV(r.mean),
+        lossStr: i === 0 ? '—' : '−' + loss.toFixed(1) + '%',
+        lossColor,
+        range: this.fmtTime(r.start) + '–' + this.fmtTime(r.end),
+        leftPct: (r.start / total * 100).toFixed(2),
+        widthPct: ((r.end - r.start) / total * 100).toFixed(2),
+        segBg: sel ? 'rgba(110,163,236,0.45)' : 'rgba(110,163,236,0.16)',
+        segBorder: sel ? '#6ea3ec' : '#3d4a5e',
+        rowBg: sel ? '#252a33' : 'transparent',
+        cx: xOf(i).toFixed(1),
+        cy: yOf(r.mean).toFixed(1),
+        dotR: sel ? 6 : 4.5,
+        onSelect: () => this.setState({ selectedRep: i, playhead: r.start, clip: false }),
+        onPlay: (e) => { if (e && e.stopPropagation) e.stopPropagation(); this.setState({ selectedRep: i, playhead: r.start, clip: true }); }
+      };
+    });
+
+    // linear trend fit
+    const n = reps.length;
+    const sx = reps.reduce((a, _, i) => a + i, 0), sy = reps.reduce((a, r) => a + r.mean, 0);
+    const sxy = reps.reduce((a, r, i) => a + i * r.mean, 0), sxx = reps.reduce((a, _, i) => a + i * i, 0);
+    const slope = (n * sxy - sx * sy) / (n * sxx - sx * sx), icpt = (sy - slope * sx) / n;
+    const trendPoints = [0, n - 1].map(i => xOf(i).toFixed(1) + ',' + yOf(icpt + slope * i).toFixed(1)).join(' ');
+    const chartPoints = reps.map((r, i) => xOf(i).toFixed(1) + ',' + yOf(r.mean).toFixed(1)).join(' ');
+
+    const th = t => yOf(v1 * (1 - t));
+    const maxLoss = (1 - reps[n - 1].mean / v1) * 100;
+    const stopIdx = reps.findIndex(r => (1 - r.mean / v1) * 100 >= threshold);
+
+    const sel = reps[selectedRep];
+    const clipActive = clip;
+
+    // bar path overlay (video coords ~300x520): rough vertical squat path
+    const barPath = '150,105 147,190 151,290 148,368 152,300 149,200 151,110 148,195 152,295 150,372 147,298 151,192 149,108';
+
+    const yTicks = [0.6, 0.7, 0.8].map(v => ({ y: (yOf(v) + 3).toFixed(1), label: cal ? v.toFixed(1) : Math.round(v * pxScale) }));
+
+    return {
+      isLive, isResults, unit, threshold,
+      goLive: () => this.setState({ mode: 'live' }),
+      goResults: () => this.setState({ mode: 'results' }),
+      liveBg: isLive ? '#3d5877' : 'transparent', liveFg: isLive ? '#e8f0fa' : '#9a9aa2',
+      liveDot: isLive ? '#3fbf77' : '#55555e',
+      resBg: isResults ? '#3d5877' : 'transparent', resFg: isResults ? '#e8f0fa' : '#9a9aa2',
+      hintText: isLive
+        ? 'Tracking… reps are counted as each concentric phase completes.'
+        : 'Set complete — 8 reps tracked. Click a rep to jump the playhead; ▶ plays that rep’s clip.',
+      rows, liveRows: rows.slice(0, 5),
+      chartPoints, trendPoints,
+      th10y: th(0.1).toFixed(1), th20y: th(0.2).toFixed(1), th30y: th(0.3).toFixed(1),
+      th10ty: (th(0.1) - 4).toFixed(1), th20ty: (th(0.2) - 4).toFixed(1), th30ty: (th(0.3) - 4).toFixed(1),
+      yTicks,
+      maxLossStr: '−' + maxLoss.toFixed(1) + '%',
+      stopFlag: stopIdx >= 0, stopRep: stopIdx >= 0 ? reps[stopIdx].n : '—',
+      uncal: !cal,
+      playhead, playheadTime: this.fmtTime(playhead),
+      playheadPct: (playhead / total * 100).toFixed(2),
+      inPct: (sel.start / total * 100).toFixed(2), outPct: (sel.end / total * 100).toFixed(2),
+      clipActive,
+      clipLabel: 'rep ' + String(sel.n).padStart(2, '0') + ' clip · ' + this.fmtTime(sel.start) + '–' + this.fmtTime(sel.end),
+      barX: 150, barY: isLive ? 250 : 108,
+      modeLabel: isLive ? 'tracking' : 'review',
+      calLabel: cal ? '1 m = 640 px' : 'none'
+    };
+  }
+}
+</script>
+</body>
+</html>
