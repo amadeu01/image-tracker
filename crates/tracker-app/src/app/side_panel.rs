@@ -25,6 +25,39 @@ const STEPS: [(u8, &str); 5] = [
     (5, "Review / Export"),
 ];
 
+/// 2-line how-to for each guide step (task 10.7's "expandable guide"),
+/// shown inside a `CollapsingHeader` under each numbered step. Written to
+/// answer the specific questions the 2026-07-15 user session raised (see
+/// PLAN.md 10.7's row): why calibrate at all, what pausing/stopping does,
+/// where exported files land.
+const STEP_HOWTO: [(u8, &str); 5] = [
+    (
+        1,
+        "Drag the scrub bar (or use ←/→, Shift+←/→ for ±10 frames) until \
+         the barbell is clearly visible in the frame.",
+    ),
+    (
+        2,
+        "Click \"Place Seed\" [S], then click the barbell in the video — \
+         ideally the plate hub/marker. The tracker follows from there.",
+    ),
+    (
+        3,
+        "Click \"Calibrate\" [C], then click one edge of a plate and the \
+         opposite edge; without this, results are in pixels/s, not m/s.",
+    ),
+    (
+        4,
+        "Click \"Track\" to run to the end of the video. Pause/Resume/Stop \
+         are available mid-run; Stop keeps whatever was tracked so far.",
+    ),
+    (
+        5,
+        "Reps, depth, and velocity appear below once tracking finishes. \
+         Overlay video + CSV/JSON exports are written next to your video.",
+    ),
+];
+
 pub fn show(ctx: &egui::Context, state: Option<&AppState>) {
     egui::SidePanel::right("side_panel")
         .default_width(PANEL_WIDTH)
@@ -63,7 +96,7 @@ fn empty_guide_section(ui: &mut egui::Ui) {
         "▶ 0. Open a video [Ctrl+O]",
     );
     for (id, label) in STEPS {
-        ui.label(format!("   {id}. {label}"));
+        guide_step_row(ui, id, label, false, false);
     }
 }
 
@@ -73,15 +106,35 @@ fn guide_section(ui: &mut egui::Ui, state: &AppState) {
     for (id, label) in STEPS {
         let done = id < current;
         let is_current = id == current;
-        let text = format!("{id}. {label}");
-        if is_current {
-            ui.colored_label(egui::Color32::from_rgb(90, 170, 255), format!("▶ {text}"));
-        } else if done {
-            ui.colored_label(egui::Color32::GRAY, format!("✓ {text}"));
-        } else {
-            ui.label(format!("   {text}"));
-        }
+        guide_step_row(ui, id, label, done, is_current);
     }
+}
+
+/// One expandable guide step (task 10.7): the numbered/colored summary line
+/// (unchanged from before 10.7) as a `CollapsingHeader`, with the
+/// corresponding `STEP_HOWTO` entry shown when expanded. Collapsed by
+/// default — the guide stays scannable at a glance; the how-to is there for
+/// whoever wants it, not forced on everyone.
+fn guide_step_row(ui: &mut egui::Ui, id: u8, label: &str, done: bool, is_current: bool) {
+    let text = format!("{id}. {label}");
+    let header_text = if is_current {
+        egui::RichText::new(format!("▶ {text}")).color(egui::Color32::from_rgb(90, 170, 255))
+    } else if done {
+        egui::RichText::new(format!("✓ {text}")).color(egui::Color32::GRAY)
+    } else {
+        egui::RichText::new(format!("   {text}"))
+    };
+    egui::CollapsingHeader::new(header_text)
+        .id_salt(("guide_step", id))
+        .default_open(false)
+        .show(ui, |ui| {
+            let howto = STEP_HOWTO
+                .iter()
+                .find(|(step_id, _)| *step_id == id)
+                .map(|(_, text)| *text)
+                .unwrap_or("");
+            ui.weak(howto);
+        });
 }
 
 fn status_section(ui: &mut egui::Ui, state: &AppState) {

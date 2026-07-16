@@ -84,6 +84,37 @@ impl WorkflowStep {
     }
 }
 
+/// The workflow's live phase (task 10.8), a finer-grained sibling of
+/// `WorkflowStep`: `WorkflowStep` says which guide step is current,
+/// `Phase` additionally carries the *progress within* the Track step (frame
+/// N/M) and distinguishes "still walking frames" from "run finished, now
+/// deriving velocity/reps/metrics from the path" — the two are visually
+/// identical in `WorkflowStep::Track` but the status bar/banner (10.7)
+/// should say something different for each.
+///
+/// `ComputingMetrics` is honest-but-brief by construction: `poll_tracking`
+/// builds `SessionResults` synchronously, in the same call that stores
+/// `bar_path`, so there's never actually an egui frame rendered with
+/// `bar_path.is_some() && results.is_none()` — `phase()` still derives
+/// `ComputingMetrics` from exactly that condition (rather than skipping it)
+/// so the concept is correct and future-proof if that computation ever
+/// becomes async/backgrounded, even though today a caller will never
+/// observe it mid-render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// No run has started (or the session was reset/discarded).
+    Idle,
+    /// A run is actively walking frames. `total` is the best-known frame
+    /// count (see `poll_tracking`'s note on `ffprobe` underestimating it);
+    /// `0` if unknown.
+    TrackingPath { frame: u64, total: u64 },
+    /// The run reached `Done`/`Error` and `SessionResults` is being
+    /// derived from the finished `BarPath` (velocity → reps → metrics).
+    ComputingMetrics,
+    /// Results are ready; the Review step's Results section is showing.
+    Review,
+}
+
 /// Gap/interpolation/reseed summary shown in the Results section's quality
 /// line (10.3). `gap_count` and `reseed_count` are currently the same
 /// number — every gap this run hit paused for a reseed (`TrackingRunState`
@@ -299,6 +330,76 @@ impl AppState {
             WorkflowStep::Calibrate
         } else {
             WorkflowStep::PlaceSeed
+        }
+    }
+
+    /// The live phase (task 10.8) — see `Phase`'s doc comment for how this
+    /// differs from `current_step`.
+    pub fn phase(&self) -> Phase {
+        if self.bar_path.is_some() && self.results.is_none() {
+            return Phase::ComputingMetrics;
+        }
+        if self.results.is_some() {
+            return Phase::Review;
+        }
+        if self.tracking.is_some() || self.tracking_run.running {
+            return Phase::TrackingPath {
+                frame: self.tracking_run.last_frame_index.unwrap_or(0),
+                total: self.metadata.frame_count.unwrap_or(0),
+            };
+        }
+        Phase::Idle
+    }
+
+    /// Instruction banner text for the mode strip between the toolbar and
+    /// the video (task 10.7): tells the user what clicking will currently
+    /// do and, for Calibrate, how many of the two points they've placed so
+    /// far. Pure function of `self` — no egui dependency — so it's directly
+    /// unit-testable; `mod.rs`'s banner strip just renders whatever this
+    /// returns with a mode-appropriate background color.
+    pub fn banner_text(&self) -> String {
+        // Phase takes priority over mode once a run exists: `mode` is
+        // whatever click-handler is currently armed (often stale — e.g.
+        // still `PlacingSeed` from before Track was clicked, or reset to
+        // `PlacingSeed` by a reseed-pause), but once tracking/results exist
+        // that's what the user actually needs to hear about.
+        match self.phase() {
+            Phase::TrackingPath { frame, total } => {
+                return if total > 0 {
+                    format!("Tracking bar path… frame {frame}/{total}")
+                } else {
+                    format!("Tracking bar path… frame {frame}")
+                };
+            }
+            Phase::ComputingMetrics => return "Computing metrics…".to_string(),
+            Phase::Review => {
+                return "Done — results in the panel. Exports written next to your video."
+                    .to_string();
+            }
+            Phase::Idle => {}
+        }
+        match self.mode {
+            Mode::PlacingSeed => {
+                "Click the barbell — ideally the plate hub / marker. The tracker will follow it."
+                    .to_string()
+            }
+            Mode::Calibrating { first_point, .. } => {
+                let placed = if first_point.is_some() { 1 } else { 0 };
+                format!(
+                    "Click one edge of a plate → then the opposite edge → set its real size \
+                     below (competition plate = {DEFAULT_CALIBRATION_LENGTH_METERS:.3} m). \
+                     {placed} of 2 points placed."
+                )
+            }
+            Mode::ViewOnly => {
+                if self.seed.is_some() {
+                    "Ready to track. Click Track when you're ready \
+                     (Calibrate first if you want m/s output)."
+                        .to_string()
+                } else {
+                    "Scrub to a frame where the bar is visible, then click Place Seed.".to_string()
+                }
+            }
         }
     }
 

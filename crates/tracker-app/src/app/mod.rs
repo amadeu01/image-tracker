@@ -14,6 +14,7 @@
 //! callers still just use `app::run`, `app::AppState`, etc. (re-exported
 //! below), so `main.rs` didn't need to change.
 
+mod banner;
 mod bottom_bar;
 mod side_panel;
 mod state;
@@ -21,7 +22,7 @@ mod thumbnail_panel;
 mod toolbar;
 mod video_panel;
 
-pub use state::{AppState, Mode, Seed, DEFAULT_CALIBRATION_LENGTH_METERS};
+pub use state::{AppState, Mode, Phase, Seed, DEFAULT_CALIBRATION_LENGTH_METERS};
 
 use std::path::PathBuf;
 
@@ -252,6 +253,7 @@ impl eframe::App for TrackerApp {
         handle_frame_step_shortcuts(ctx, self.state.as_mut());
 
         toolbar::show(ctx, self);
+        banner::show(ctx, self.state.as_ref());
         bottom_bar::show_status_bar(ctx, self.state.as_ref());
         bottom_bar::show_scrub_bar(ctx, self.state.as_mut());
         // Thumbnail strip after the scrub bar so it stacks above it
