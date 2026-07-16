@@ -410,6 +410,14 @@ pub struct AppState {
     /// button stay visible until a new benchmark is started or the session
     /// resets.
     pub benchmark_rows: Option<Vec<crate::compare::BenchmarkRow>>,
+    /// Every file the auto-export job has written this session (task 12.6),
+    /// in write order. Fed by `poll_export`'s `ExportMessage::Written`
+    /// (the paths already flowed there, just as transient events before —
+    /// this is the same data, kept around instead of scrolling off the
+    /// events ring buffer). Cleared whenever a fresh run starts
+    /// (`start_export`) or the session resets (`start_new_session`), so it
+    /// never shows a stale file from a previous run/video.
+    pub exported_files: Vec<PathBuf>,
 }
 
 impl AppState {
@@ -437,6 +445,7 @@ impl AppState {
             benchmark: None,
             benchmark_progress: None,
             benchmark_rows: None,
+            exported_files: Vec::new(),
         }
     }
 
@@ -1072,6 +1081,7 @@ impl AppState {
             metrics: results.metrics.clone(),
             reps: results.reps.clone(),
         };
+        self.exported_files.clear();
         self.push_event(EventLevel::Info, "auto-export started".to_string());
         self.export = Some(export_job::spawn_export(job));
     }
@@ -1095,6 +1105,7 @@ impl AppState {
             match msg {
                 ExportMessage::Written(path) => {
                     self.push_event(EventLevel::Info, format!("exported: {}", path.display()));
+                    self.exported_files.push(path);
                 }
                 ExportMessage::Error(e) => {
                     self.push_event(EventLevel::Error, format!("export failed: {e}"));
@@ -1275,6 +1286,7 @@ impl AppState {
         self.mode = Mode::ViewOnly;
         self.status.clear();
         self.events.clear();
+        self.exported_files.clear();
         tracing::info!("new session started");
         self.push_event(EventLevel::Info, "new session started".to_string());
     }

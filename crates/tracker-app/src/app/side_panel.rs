@@ -589,6 +589,66 @@ fn results_section(ui: &mut egui::Ui, state: &AppState) {
             ),
         );
     });
+
+    files_section(ui, state);
+}
+
+/// "Files" list (task 12.6): every export written this session, kept
+/// visible in the Results section rather than only flashing through the
+/// events feed once — the user question this answers is literally "how do
+/// I know from the UI the JSON/CSV was generated?" (PLAN.md 12.6). Each row
+/// shows the filename (full path on hover), a copy-path button, and an
+/// "open folder" button; a folder-open failure surfaces as an event rather
+/// than panicking (`open_containing_folder`'s doc comment).
+fn files_section(ui: &mut egui::Ui, state: &AppState) {
+    if state.exported_files.is_empty() {
+        return;
+    }
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("Files").strong());
+    for path in &state.exported_files {
+        ui.horizontal(|ui| {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            ui.label(&name).on_hover_text(path.display().to_string());
+            if ui
+                .small_button("Copy path")
+                .on_hover_text("copy the full path to the clipboard")
+                .clicked()
+            {
+                ui.output_mut(|o| o.copied_text = path.display().to_string());
+            }
+            if ui
+                .small_button("Open folder")
+                .on_hover_text("open the containing folder in the system file manager")
+                .clicked()
+            {
+                open_containing_folder(path);
+            }
+        });
+    }
+}
+
+/// Opens the OS file manager on `path`'s parent directory, best-effort:
+/// spawn failures (no file manager registered, sandboxed/headless
+/// environment, etc.) are logged rather than propagated — a discoverability
+/// nicety must never be able to crash the app or block the UI thread (hence
+/// `spawn`, not `status`/`output`, so this never waits on the child).
+fn open_containing_folder(path: &std::path::Path) {
+    let dir = path.parent().unwrap_or(path);
+
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(dir).spawn();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("explorer").arg(dir).spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let result = std::process::Command::new("xdg-open").arg(dir).spawn();
+
+    if let Err(e) = result {
+        tracing::warn!(dir = %dir.display(), error = %e, "failed to open containing folder");
+    }
 }
 
 fn events_section(ui: &mut egui::Ui, state: &AppState) {
@@ -597,10 +657,11 @@ fn events_section(ui: &mut egui::Ui, state: &AppState) {
         ui.weak("(none yet)");
         return;
     }
+    let dark_mode = ui.visuals().dark_mode;
     for event in state.events.iter().rev() {
         let color = match event.level {
-            EventLevel::Error => egui::Color32::from_rgb(230, 70, 70),
-            EventLevel::Warn => egui::Color32::from_rgb(230, 200, 60),
+            EventLevel::Error => palette::status_color(dark_mode, StatusKind::Error),
+            EventLevel::Warn => palette::status_color(dark_mode, StatusKind::Warn),
             EventLevel::Info => ui.visuals().text_color(),
         };
         ui.horizontal(|ui| {
