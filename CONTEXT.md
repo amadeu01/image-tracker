@@ -25,6 +25,12 @@ The mapping from image pixels to real-world meters, derived from one user-marked
 ### Gap
 A run of frames where the Marker could not be detected (occlusion, blur, out of frame). Short gaps are coasted over and interpolated in the Bar Path but flagged; metrics exclude or flag interpolated samples. A gap longer than the coast limit pauses tracking and asks the user to re-place the Seed.
 
+### Preprocessor
+A noise-reduction filter (e.g. Gaussian blur, median) applied to image regions before matching. Must be applied identically to the Seed's reference patch and to every candidate region — reference and candidates must live in the same filtered space for scores to be comparable.
+
+### Tracking Strategy
+The full recipe used to process one video: which Tracker, which Preprocessor chain, and the tuning thresholds. Strategies are swappable per video, and can be compared on a short segment to pick what fits a particular clip.
+
 ### Rep
 One repetition of the lift, segmented from the Bar Path by vertical velocity sign: an eccentric phase (descent) followed by a concentric phase (ascent). Per-rep metrics include depth, peak concentric velocity, and mean concentric velocity.
 
