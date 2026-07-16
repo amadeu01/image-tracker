@@ -103,7 +103,60 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         if let Some((a, b)) = app.state.last_calibration_segment {
             draw_calibration_segment(ui.painter(), image_rect, tex_size, a, b);
         }
+
+        // Bar path polyline (task 10.3): drawn once a run's finished
+        // (Review step). Tracked segments green, interpolated (coasted
+        // over a gap) orange, so the honest/fabricated split from
+        // CONTEXT.md's "Gap" term is visible on the path itself, not just
+        // in the Results section's quality line.
+        if let Some(results) = &app.state.results {
+            draw_bar_path(
+                ui.painter(),
+                image_rect,
+                tex_size,
+                results.bar_path.points(),
+            );
+            if let Some(point) = results.bar_path.position_at(app.state.current_frame) {
+                draw_crosshair(
+                    ui.painter(),
+                    image_rect,
+                    tex_size,
+                    point.position,
+                    egui::Color32::WHITE,
+                );
+            }
+        }
     });
+}
+
+/// Draws the Bar Path as a polyline: consecutive points are joined with a
+/// green segment if both are `Source::Tracked`, orange if either endpoint
+/// is `Source::Interpolated` (a coasted-over gap). Painter overlay only —
+/// never mutates frame pixels.
+fn draw_bar_path(
+    painter: &egui::Painter,
+    image_rect: egui::Rect,
+    image_native_size: egui::Vec2,
+    points: &[tracker_core::PathPoint],
+) {
+    let tracked = egui::Color32::from_rgb(60, 200, 90);
+    let interpolated = egui::Color32::from_rgb(255, 165, 0);
+    for pair in points.windows(2) {
+        let (Some(a), Some(b)) = (
+            image_px_to_screen(image_rect, image_native_size, pair[0].position),
+            image_px_to_screen(image_rect, image_native_size, pair[1].position),
+        ) else {
+            continue;
+        };
+        let color = if pair[0].source == tracker_core::Source::Interpolated
+            || pair[1].source == tracker_core::Source::Interpolated
+        {
+            interpolated
+        } else {
+            tracked
+        };
+        painter.line_segment([a, b], egui::Stroke::new(2.0_f32, color));
+    }
 }
 
 /// Draw a crosshair marker at an image-pixel position (the Seed, red; the

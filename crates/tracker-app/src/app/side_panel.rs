@@ -36,6 +36,12 @@ pub fn show(ctx: &egui::Context, state: &AppState) {
                 ui.separator();
                 ui.add_space(8.0);
                 status_section(ui, state);
+                if state.results.is_some() {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    results_section(ui, state);
+                }
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(8.0);
@@ -151,6 +157,88 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
             &format!("({:.1}, {:.1})", pos.x, pos.y),
         );
     }
+}
+
+/// Results section (task 10.3), shown only once a run has finished
+/// (`state.results.is_some()`, the Review step). Headline rep count, a
+/// per-rep depth/peak/mean table, a quality line (gaps/interpolated%
+/// /reseeds), and — when `velocity_series` failed (10.9's GUI seam) — a
+/// warning in place of the table rather than a silent empty one.
+fn results_section(ui: &mut egui::Ui, state: &AppState) {
+    let Some(results) = &state.results else {
+        return;
+    };
+    ui.heading("Results");
+
+    match &results.velocity {
+        Err(e) => {
+            ui.colored_label(
+                egui::Color32::from_rgb(230, 200, 60),
+                format!("velocity unavailable: {e}"),
+            );
+        }
+        Ok(_) => {
+            ui.label(
+                egui::RichText::new(format!("Reps: {}", results.reps.len()))
+                    .heading()
+                    .strong(),
+            );
+
+            let unit = match results.unit {
+                Some(tracker_core::VelocityUnit::MetersPerSecond) => "m/s",
+                Some(tracker_core::VelocityUnit::PixelsPerSecond) | None => "px/s",
+            };
+            let depth_unit = match results.unit {
+                Some(tracker_core::VelocityUnit::MetersPerSecond) => "m",
+                _ => "px",
+            };
+
+            if !results.metrics.is_empty() {
+                egui::Grid::new("results_reps_grid")
+                    .num_columns(4)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("#");
+                        ui.strong(format!("depth ({depth_unit})"));
+                        ui.strong(format!("peak ({unit})"));
+                        ui.strong(format!("mean ({unit})"));
+                        ui.end_row();
+                        for (i, m) in results.metrics.iter().enumerate() {
+                            ui.label(i.to_string());
+                            ui.label(format!("{:.2}", m.depth));
+                            ui.label(format!("{:.2}", m.peak_concentric_speed));
+                            ui.label(format!("{:.2}", m.mean_concentric_velocity));
+                            ui.end_row();
+                        }
+                    });
+            } else {
+                ui.weak("(no reps detected)");
+            }
+        }
+    }
+
+    ui.add_space(6.0);
+    let q = &results.quality;
+    ui.label(egui::RichText::new("Quality").strong());
+    kv_row(ui, "gaps", &q.gap_count.to_string());
+    kv_row(ui, "reseeds", &q.reseed_count.to_string());
+    let interp_color = if q.interpolated_percent() > 20.0 {
+        egui::Color32::from_rgb(230, 200, 60)
+    } else {
+        ui.visuals().text_color()
+    };
+    ui.horizontal(|ui| {
+        ui.weak("interpolated:");
+        ui.colored_label(
+            interp_color,
+            format!(
+                "{}/{} ({:.1}%)",
+                q.interpolated_points,
+                q.total_points,
+                q.interpolated_percent()
+            ),
+        );
+    });
 }
 
 fn events_section(ui: &mut egui::Ui, state: &AppState) {

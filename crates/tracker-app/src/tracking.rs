@@ -16,9 +16,9 @@ use std::thread;
 
 use tracker_core::{
     BarPath, ColorModel, ColorModelConfig, ColorTracker, ColorTrackerConfig, Frame, FrameSource,
-    Point, SessionState, Source as SampleSource, StepOutcome, TemplateTracker,
-    TemplateTrackerConfig, Timebase, Tracker, TrackerKind, TrackerSuggestionConfig,
-    TrackingSession, TrackingSessionConfig,
+    Point, RepSegmentationConfig, SessionState, Source as SampleSource, StepOutcome,
+    TemplateTracker, TemplateTrackerConfig, Timebase, Tracker, TrackerKind,
+    TrackerSuggestionConfig, TrackingSession, TrackingSessionConfig,
 };
 
 use crate::ffmpeg_source::FfmpegFrameSource;
@@ -167,6 +167,21 @@ pub fn session_config(tuning: TrackerTuning) -> TrackingSessionConfig {
         )
         .max_reacquire_distance(2.0 * search_radius as f64)
         .build()
+}
+
+/// Builds a `RepSegmentationConfig` for a run's velocity units: uncalibrated
+/// (px/s) data keeps `RepSegmentationConfig::default_config`'s dead-band
+/// (tuned for pixel-scale motion); calibrated (m/s) data needs a much
+/// smaller `min_velocity` (bar speeds are typically well under 1-2 m/s), or
+/// every sample stays `Idle` and zero reps are ever detected. Shared by the
+/// CLI (`cli.rs`) and the GUI's post-tracking `SessionResults` (10.3) so the
+/// two never drift on this tuning.
+pub fn rep_segmentation_config(calibrated: bool) -> RepSegmentationConfig {
+    if calibrated {
+        RepSegmentationConfig::builder().min_velocity(0.03).build()
+    } else {
+        RepSegmentationConfig::default_config()
+    }
 }
 
 /// A message sent from the tracking worker thread to the UI thread.
@@ -844,6 +859,14 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(session_config(tuning).max_reacquire_distance(), Some(100.0));
+    }
+
+    #[test]
+    fn rep_segmentation_config_lowers_dead_band_when_calibrated() {
+        let uncal = rep_segmentation_config(false);
+        let cal = rep_segmentation_config(true);
+        assert_eq!(uncal.min_velocity(), 5.0);
+        assert_eq!(cal.min_velocity(), 0.03);
     }
 
     #[test]

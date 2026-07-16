@@ -87,9 +87,12 @@ impl eframe::App for TrackerApp {
         if self.state.poll_tracking() {
             ctx.request_repaint();
         }
-        // While a run is active, keep repainting so progress keeps flowing
-        // even if nothing else prompts a redraw.
-        if self.state.tracking.is_some() {
+        if self.state.poll_export() {
+            ctx.request_repaint();
+        }
+        // While a run/export is active, keep repainting so progress keeps
+        // flowing even if nothing else prompts a redraw.
+        if self.state.tracking.is_some() || self.state.export.is_some() {
             ctx.request_repaint();
         }
         self.ensure_texture(ctx);

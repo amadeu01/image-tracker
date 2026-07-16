@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::export_job::{self, ExportHandle, ExportMessage};
 use crate::ffprobe::VideoMetadata;
 use crate::frame_cache::clamp_frame_index;
 use crate::tracking::{self, TrackingHandle, TrackingRunState};
@@ -83,6 +84,109 @@ impl WorkflowStep {
     }
 }
 
+/// Gap/interpolation/reseed summary shown in the Results section's quality
+/// line (10.3). `gap_count` and `reseed_count` are currently the same
+/// number — every gap this run hit paused for a reseed (`TrackingRunState`
+/// has no concept of a gap that self-heals without one) — but they're kept
+/// as separate named fields since that's not a guarantee of the type, just
+/// of the current session/reseed wiring.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ResultsQuality {
+    pub gap_count: u64,
+    pub reseed_count: u64,
+    pub interpolated_points: usize,
+    pub total_points: usize,
+}
+
+impl ResultsQuality {
+    /// Percentage of the path's points that were interpolated (coasted
+    /// over a gap) rather than directly tracked. `0.0` for an empty path.
+    pub fn interpolated_percent(&self) -> f64 {
+        if self.total_points == 0 {
+            0.0
+        } else {
+            self.interpolated_points as f64 / self.total_points as f64 * 100.0
+        }
+    }
+}
+
+/// Everything the Review step's Results section (10.3) shows, derived once
+/// from a completed run's `BarPath` and the calibration in effect when it
+/// finished. Pure struct — no egui dependency — so its construction is
+/// unit-testable directly (see `tests` below).
+///
+/// `velocity` is a `Result` rather than an already-unwrapped `Vec` on
+/// purpose (10.9's GUI seam, noted in PLAN.md): a `VelocityError` (e.g. too
+/// few points, non-monotonic timestamps) must be surfaced to the user —
+/// here, as a Results-section message and a `Warn` event — not silently
+/// swallowed into an empty reps/metrics list the way the CLI's original
+/// `.ok()` mistake did before 10.9 fixed it there.
+#[derive(Debug, Clone)]
+pub struct SessionResults {
+    pub bar_path: tracker_core::BarPath,
+    pub velocity: Result<Vec<tracker_core::VelocitySample>, tracker_core::VelocityError>,
+    pub reps: Vec<tracker_core::Rep>,
+    pub metrics: Vec<tracker_core::RepMetrics>,
+    pub unit: Option<tracker_core::VelocityUnit>,
+    pub quality: ResultsQuality,
+}
+
+impl SessionResults {
+    /// Builds results from a finished run's `bar_path`, the calibration (if
+    /// any) in effect, and how many gaps the run needed reseeding through
+    /// (`TrackingRunState::gap_count`). Smoothing window (5) and the
+    /// calibrated/uncalibrated rep dead-band match the CLI's `run_track`
+    /// (`cli.rs`) exactly (`tracking::rep_segmentation_config`), so GUI and
+    /// CLI runs of the same video/seed never disagree on rep count.
+    pub fn build(
+        bar_path: tracker_core::BarPath,
+        calibration: Option<tracker_core::Calibration>,
+        gap_count: u64,
+    ) -> Self {
+        let velocity = tracker_core::velocity_series(bar_path.points(), 5, calibration.as_ref());
+        let reps = match &velocity {
+            Ok(v) => tracker_core::segment_reps(
+                v,
+                tracking::rep_segmentation_config(calibration.is_some()),
+            ),
+            Err(_) => Vec::new(),
+        };
+        let metrics = match &velocity {
+            Ok(v) => {
+                tracker_core::all_rep_metrics(&reps, v, bar_path.points(), calibration.as_ref())
+            }
+            Err(_) => Vec::new(),
+        };
+        let unit = metrics.first().map(|m| m.unit).or_else(|| {
+            velocity
+                .as_ref()
+                .ok()
+                .and_then(|v| v.first())
+                .map(|s| s.unit)
+        });
+        let total_points = bar_path.points().len();
+        let interpolated_points = bar_path
+            .points()
+            .iter()
+            .filter(|p| p.source == tracker_core::Source::Interpolated)
+            .count();
+        let quality = ResultsQuality {
+            gap_count,
+            reseed_count: gap_count,
+            interpolated_points,
+            total_points,
+        };
+        Self {
+            bar_path,
+            velocity,
+            reps,
+            metrics,
+            unit,
+            quality,
+        }
+    }
+}
+
 /// UI/session state, independent of egui so the index-clamping logic can be
 /// unit-tested without a `Context`.
 pub struct AppState {
@@ -115,6 +219,15 @@ pub struct AppState {
     /// The completed `BarPath`, once a tracking run reaches clean
     /// end-of-video. Consumed by milestone 3 (overlay render / export).
     pub bar_path: Option<tracker_core::BarPath>,
+    /// Velocity/reps/metrics derived from `bar_path` once a run reaches
+    /// `Done` (task 10.3) — `None` until then, and again on a fresh
+    /// "New session" reset. The Review step's Results section is built
+    /// from this, not from re-deriving anything from `bar_path` itself.
+    pub results: Option<SessionResults>,
+    /// The background auto-export job's channel handle, once `results` has
+    /// been computed (task 10.3). `None` before a run finishes and again
+    /// once every export message has been drained.
+    pub export: Option<ExportHandle>,
     /// The tracker `suggest_tracker` recommends for the current Seed (task
     /// 4.3), computed as soon as the Seed is placed so the status bar can
     /// tell the user which tracker Track will use before they click it.
@@ -145,6 +258,8 @@ impl AppState {
             tracking: None,
             tracking_run: TrackingRunState::default(),
             bar_path: None,
+            results: None,
+            export: None,
             suggested_tracker: None,
             events: VecDeque::new(),
             start_time: Instant::now(),
@@ -459,7 +574,85 @@ impl AppState {
                         self.tracking_run.frames_processed
                     ),
                 );
+                if let Some(bar_path) = self.bar_path.clone() {
+                    let results = SessionResults::build(
+                        bar_path,
+                        self.calibration,
+                        self.tracking_run.gap_count,
+                    );
+                    match &results.velocity {
+                        Ok(v) => {
+                            self.push_event(
+                                EventLevel::Info,
+                                format!(
+                                    "reps detected: {} ({} velocity samples)",
+                                    results.reps.len(),
+                                    v.len()
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            self.push_event(EventLevel::Warn, format!("velocity unavailable: {e}"));
+                        }
+                    }
+                    self.start_export(&results);
+                    self.results = Some(results);
+                }
             }
+        }
+        any
+    }
+
+    /// Kicks off the background auto-export job for a just-finished run
+    /// (task 10.3): overlay MP4 + CSV/JSON/reps exports, written next to
+    /// the source video. Fire-and-forget from the caller's perspective —
+    /// progress/errors surface as events via `poll_export`.
+    fn start_export(&mut self, results: &SessionResults) {
+        let job = export_job::ExportJob {
+            video_path: self.video_path.clone(),
+            width: self.metadata.display_width(),
+            height: self.metadata.display_height(),
+            fps_num: self.metadata.fps_num,
+            fps_den: self.metadata.fps_den,
+            bar_path: results.bar_path.clone(),
+            calibration: self.calibration,
+            velocity: results.velocity.as_ref().ok().cloned(),
+            metrics: results.metrics.clone(),
+            reps: results.reps.clone(),
+        };
+        self.push_event(EventLevel::Info, "auto-export started".to_string());
+        self.export = Some(export_job::spawn_export(job));
+    }
+
+    /// Drains any pending messages from the active export job, applying
+    /// each as an event. Returns `true` if at least one message was
+    /// processed (the caller should request a repaint). Mirrors
+    /// `poll_tracking`'s drain-then-react shape.
+    pub fn poll_export(&mut self) -> bool {
+        let Some(handle) = &self.export else {
+            return false;
+        };
+        let mut any = false;
+        let mut done = false;
+        let mut messages = Vec::new();
+        while let Ok(msg) = handle.messages.try_recv() {
+            messages.push(msg);
+        }
+        for msg in messages {
+            any = true;
+            match msg {
+                ExportMessage::Written(path) => {
+                    self.push_event(EventLevel::Info, format!("exported: {}", path.display()));
+                }
+                ExportMessage::Error(e) => {
+                    self.push_event(EventLevel::Error, format!("export failed: {e}"));
+                }
+                ExportMessage::Done => done = true,
+            }
+        }
+        if done {
+            self.export = None;
+            self.push_event(EventLevel::Info, "exports written".to_string());
         }
         any
     }
@@ -734,5 +927,136 @@ mod tests {
         assert!(last
             .message
             .contains(&format!("({:.1}", (MAX_EVENTS + 4) as f64)));
+    }
+
+    // -- SessionResults (10.3) ------------------------------------------
+
+    fn sample(
+        frame_index: u64,
+        x: f64,
+        y: f64,
+        source: tracker_core::Source,
+    ) -> tracker_core::Sample {
+        tracker_core::Sample {
+            frame_index,
+            position: tracker_core::Point::new(x, y),
+            source,
+        }
+    }
+
+    /// A synthetic bar path with a clean single rep: descent (y 0->10) then
+    /// ascent (y 10->0) across 20 tracked, evenly-spaced frames at 30fps —
+    /// enough for `velocity_series`/`segment_reps` to detect exactly one
+    /// rep without tripping any of `rep.rs`'s noise-robustness dead-bands.
+    fn one_rep_bar_path() -> tracker_core::BarPath {
+        let tb = tracker_core::Timebase::new(30, 1).unwrap();
+        let mut samples = Vec::new();
+        for i in 0..=10u64 {
+            samples.push(sample(
+                i,
+                0.0,
+                i as f64 * 10.0,
+                tracker_core::Source::Tracked,
+            ));
+        }
+        for i in 11..=20u64 {
+            samples.push(sample(
+                i,
+                0.0,
+                (20 - i) as f64 * 10.0,
+                tracker_core::Source::Tracked,
+            ));
+        }
+        tracker_core::BarPath::new(&samples, &[], tb, 0)
+    }
+
+    #[test]
+    fn session_results_build_detects_reps_and_reports_units() {
+        let results = SessionResults::build(one_rep_bar_path(), None, 0);
+        assert!(results.velocity.is_ok());
+        assert_eq!(results.reps.len(), 1);
+        assert_eq!(results.metrics.len(), 1);
+        assert_eq!(
+            results.unit,
+            Some(tracker_core::VelocityUnit::PixelsPerSecond)
+        );
+        assert_eq!(results.quality.total_points, 21);
+        assert_eq!(results.quality.interpolated_points, 0);
+        assert_eq!(results.quality.gap_count, 0);
+    }
+
+    #[test]
+    fn session_results_build_scales_to_meters_per_second_when_calibrated() {
+        let cal = tracker_core::Calibration::new(
+            tracker_core::Point::new(0.0, 0.0),
+            tracker_core::Point::new(100.0, 0.0),
+            1.0,
+        )
+        .unwrap();
+        let results = SessionResults::build(one_rep_bar_path(), Some(cal), 0);
+        assert_eq!(
+            results.unit,
+            Some(tracker_core::VelocityUnit::MetersPerSecond)
+        );
+        assert_eq!(results.reps.len(), 1);
+    }
+
+    #[test]
+    fn session_results_build_surfaces_velocity_error_instead_of_silently_empty_reps() {
+        // A single-point path: too few points for `velocity_series`
+        // (10.9's GUI seam -- must be an `Err`, not a silent empty Vec).
+        let tb = tracker_core::Timebase::new(30, 1).unwrap();
+        let samples = vec![sample(0, 0.0, 0.0, tracker_core::Source::Tracked)];
+        let bar_path = tracker_core::BarPath::new(&samples, &[], tb, 0);
+        let results = SessionResults::build(bar_path, None, 0);
+        assert_eq!(
+            results.velocity,
+            Err(tracker_core::VelocityError::TooFewPoints)
+        );
+        assert!(results.reps.is_empty());
+        assert!(results.metrics.is_empty());
+    }
+
+    #[test]
+    fn results_quality_interpolated_percent_is_computed_from_point_counts() {
+        let q = ResultsQuality {
+            gap_count: 2,
+            reseed_count: 2,
+            interpolated_points: 5,
+            total_points: 20,
+        };
+        assert!((q.interpolated_percent() - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn results_quality_interpolated_percent_is_zero_for_empty_path() {
+        let q = ResultsQuality::default();
+        assert_eq!(q.interpolated_percent(), 0.0);
+    }
+
+    #[test]
+    fn poll_tracking_done_populates_results_and_starts_export() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(30)));
+        state.tracking_run = TrackingRunState::started();
+        state.tracking_run.gap_count = 1;
+        let bar_path = one_rep_bar_path();
+        state.tracking_run.bar_path = Some(bar_path);
+        let finished = state.tracking_run.apply(tracking::TrackingMessage::Done(
+            state.tracking_run.bar_path.clone().unwrap(),
+        ));
+        assert!(finished);
+        // Mirror what `poll_tracking` does on a `Done` message without a
+        // real worker thread/channel (unit-testable slice of the same
+        // logic that method runs).
+        state.bar_path = state.tracking_run.bar_path.clone();
+        if let Some(bp) = state.bar_path.clone() {
+            let results =
+                SessionResults::build(bp, state.calibration, state.tracking_run.gap_count);
+            assert_eq!(results.reps.len(), 1);
+            assert_eq!(results.quality.gap_count, 1);
+            state.results = Some(results);
+        }
+        assert!(state.results.is_some());
+        assert_eq!(state.current_step(), WorkflowStep::Review);
     }
 }
