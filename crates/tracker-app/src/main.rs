@@ -1,8 +1,10 @@
 //! tracker-app entry point.
 //!
 //! No subcommand (or an unrecognized first argument that isn't a
-//! subcommand): opens the egui app shell (2.3) on the given video path, as
-//! before.
+//! subcommand): opens the egui app shell (2.3) on the given video path, if
+//! one was given. With no video path either (task 10.5), opens the GUI in
+//! the empty state — "Open video…" (button, Ctrl+O, or a launcher double-
+//! click with no arg at all) loads a video from inside the running app.
 //!
 //! `track` subcommand (task 3.4): headless CLI mode — runs the same
 //! tracking pipeline the GUI drives, without a window, then writes overlay
@@ -71,23 +73,25 @@ fn main() {
         return;
     }
 
-    if args.is_empty() {
-        eprintln!("usage: tracker-app <video-path>");
-        eprintln!("       tracker-app track <video> --seed-frame N --seed X,Y --out <dir>");
-        eprintln!("       tracker-app advise <video> [--top-n N]");
-        std::process::exit(2);
-    }
-    let video_path = PathBuf::from(args.remove(0));
-
-    let metadata = match ffprobe::probe(&video_path) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("failed to probe {}: {e}", video_path.display());
-            std::process::exit(1);
-        }
+    // No CLI arg (task 10.5): open the GUI in the empty state ("Open a
+    // video to begin") rather than refusing to start. Previously this was
+    // a hard usage error — the app was unreachable from a plain launcher
+    // click, which is exactly why it showed up as "unknown" there.
+    let video = if args.is_empty() {
+        None
+    } else {
+        let video_path = PathBuf::from(args.remove(0));
+        let metadata = match ffprobe::probe(&video_path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("failed to probe {}: {e}", video_path.display());
+                std::process::exit(1);
+            }
+        };
+        Some((video_path, metadata))
     };
 
-    if let Err(e) = app::run(video_path, metadata) {
+    if let Err(e) = app::run(video) {
         eprintln!("app error: {e}");
         std::process::exit(1);
     }

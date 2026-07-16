@@ -11,6 +11,10 @@ use crate::screen_map::screen_to_image_px;
 
 pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
     egui::CentralPanel::default().show(ctx, |ui| {
+        let (Some(state), Some(cache)) = (&mut app.state, &mut app.cache) else {
+            empty_state_prompt(ui, app.open_error.as_deref());
+            return;
+        };
         let Some(texture) = &app.texture else {
             ui.label("decoding first frame...");
             return;
@@ -25,37 +29,37 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
             ui.add(egui::Image::new((texture.id(), tex_size * scale)).sense(egui::Sense::click()));
         let image_rect = response.rect;
 
-        let calibrating = matches!(app.state.mode, Mode::Calibrating { .. });
+        let calibrating = matches!(state.mode, Mode::Calibrating { .. });
 
         if response.clicked() {
             if let Some(click_pos) = response.interact_pointer_pos() {
                 if let Some(image_px) = screen_to_image_px(
                     click_pos,
                     image_rect,
-                    app.state.metadata.display_width(),
-                    app.state.metadata.display_height(),
+                    state.metadata.display_width(),
+                    state.metadata.display_height(),
                 ) {
-                    if app.state.mode == Mode::PlacingSeed {
-                        app.state.place_seed(image_px);
-                        if let Some(seed) = app.state.seed {
-                            if let Ok(frame) = app.cache.get(seed.frame_index) {
+                    if state.mode == Mode::PlacingSeed {
+                        state.place_seed(image_px);
+                        if let Some(seed) = state.seed {
+                            if let Ok(frame) = cache.get(seed.frame_index) {
                                 let kind = tracker_core::suggest_tracker(
                                     &frame,
                                     seed.position,
                                     tracker_core::TrackerSuggestionConfig::default(),
                                 );
-                                app.state.note_seed_suggestion(kind);
+                                state.note_seed_suggestion(kind);
                             }
                         }
                     } else if calibrating {
-                        app.state.place_calibration_point(image_px);
+                        state.place_calibration_point(image_px);
                     }
                 }
             }
         }
 
-        if let Some(seed) = app.state.seed {
-            if seed.frame_index == app.state.current_frame {
+        if let Some(seed) = state.seed {
+            if seed.frame_index == state.current_frame {
                 draw_crosshair(
                     ui.painter(),
                     image_rect,
@@ -79,11 +83,11 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         // and render gray, honestly showing "lost" rather than a confident
         // green lock.
         if let (Some(idx), Some(pos)) = (
-            app.state.tracking_run.last_frame_index,
-            app.state.tracking_run.last_tracked_position,
+            state.tracking_run.last_frame_index,
+            state.tracking_run.last_tracked_position,
         ) {
-            if idx == app.state.current_frame {
-                let color = if app.state.tracking_run.is_searching() {
+            if idx == state.current_frame {
+                let color = if state.tracking_run.is_searching() {
                     egui::Color32::from_rgb(150, 150, 150)
                 } else {
                     egui::Color32::from_rgb(60, 255, 120)
@@ -95,12 +99,12 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         if let Mode::Calibrating {
             first_point: Some(first),
             ..
-        } = app.state.mode
+        } = state.mode
         {
             draw_calibration_pending_point(ui.painter(), image_rect, tex_size, first);
         }
 
-        if let Some((a, b)) = app.state.last_calibration_segment {
+        if let Some((a, b)) = state.last_calibration_segment {
             draw_calibration_segment(ui.painter(), image_rect, tex_size, a, b);
         }
 
@@ -109,14 +113,14 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         // over a gap) orange, so the honest/fabricated split from
         // CONTEXT.md's "Gap" term is visible on the path itself, not just
         // in the Results section's quality line.
-        if let Some(results) = &app.state.results {
+        if let Some(results) = &state.results {
             draw_bar_path(
                 ui.painter(),
                 image_rect,
                 tex_size,
                 results.bar_path.points(),
             );
-            if let Some(point) = results.bar_path.position_at(app.state.current_frame) {
+            if let Some(point) = results.bar_path.position_at(state.current_frame) {
                 draw_crosshair(
                     ui.painter(),
                     image_rect,
@@ -194,6 +198,22 @@ fn draw_crosshair(
         stroke,
     );
     painter.circle_stroke(screen, radius * 0.6, stroke);
+}
+
+/// Central-panel content when no video is loaded (10.5): a friendly prompt
+/// instead of a blank window, plus an inline "Open video…" button so the
+/// toolbar button isn't the only way in. Shows the last "Open video" error
+/// (if any), so a failed probe doesn't silently strand the user.
+fn empty_state_prompt(ui: &mut egui::Ui, open_error: Option<&str>) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(ui.available_height() / 3.0);
+        ui.heading("Open a video to begin");
+        ui.label("Ctrl+O, or the \"Open video…\" button above");
+        if let Some(err) = open_error {
+            ui.add_space(8.0);
+            ui.colored_label(egui::Color32::RED, err);
+        }
+    });
 }
 
 /// Convert an image-pixel point to a screen point within the currently

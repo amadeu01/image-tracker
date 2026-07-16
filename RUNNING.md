@@ -45,6 +45,14 @@ Opens the egui window on the given video, ready for seed placement,
 calibration, and tracking (see the manual test script below for the
 walkthrough).
 
+The video path is optional (task 10.5): `cargo run -p tracker-app` with no
+arguments opens straight to an empty-state window ("Open a video to begin").
+Use the **Open video…** toolbar button, the **Ctrl+O** shortcut, or the
+`video-path` argument to load one — all three go through the same code path,
+so opening a second video mid-session resets the workspace (seed,
+calibration, tracking run) exactly the way a fresh launch on that video
+would.
+
 ### Headless CLI (`track` subcommand)
 
 Runs the same tracking pipeline the GUI drives, without a window, and writes
@@ -158,6 +166,28 @@ it automatically. After that:
 tracker-app path/to/video.mp4
 tracker-app track <video> --seed-frame N --seed X,Y --out <dir>
 ```
+
+### Desktop integration (Linux)
+
+`cargo install`/a downloaded binary puts `tracker-app` on your `PATH`, but
+Linux desktop launchers (GNOME, KDE, etc.) don't know about it until you
+register a `.desktop` file — without one the app shows up as "unknown" with
+no icon if it's ever launched from outside a terminal. From a source
+checkout:
+
+```bash
+mkdir -p ~/.local/share/applications ~/.local/share/icons/hicolor/128x128/apps
+cp assets/image-tracker.desktop ~/.local/share/applications/
+cp assets/icons/image-tracker.png ~/.local/share/icons/hicolor/128x128/apps/
+update-desktop-database ~/.local/share/applications 2>/dev/null || true
+gtk-update-icon-cache ~/.local/share/icons/hicolor 2>/dev/null || true
+```
+
+After that, "Image Tracker" shows up in your application launcher with its
+icon, and (on file managers/portals that respect `MimeType=`) as an "Open
+With" option for video files. `Exec=tracker-app %f` passes the picked file
+straight through as the CLI video-path argument; launching with no file
+still works — it opens the empty-state window described above.
 
 ## Give it to others
 

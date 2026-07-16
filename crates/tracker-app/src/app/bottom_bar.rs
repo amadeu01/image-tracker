@@ -6,8 +6,12 @@ use eframe::egui;
 
 use super::state::AppState;
 
-pub fn show_status_bar(ctx: &egui::Context, state: &AppState) {
+pub fn show_status_bar(ctx: &egui::Context, state: Option<&AppState>) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        let Some(state) = state else {
+            ui.label("no video open — Ctrl+O or \"Open video…\"");
+            return;
+        };
         ui.horizontal(|ui| {
             ui.label(format!(
                 "{}  |  frame {}/{}  |  {}",
@@ -41,8 +45,11 @@ pub fn show_status_bar(ctx: &egui::Context, state: &AppState) {
     });
 }
 
-pub fn show_scrub_bar(ctx: &egui::Context, state: &mut AppState) {
+pub fn show_scrub_bar(ctx: &egui::Context, state: Option<&mut AppState>) {
     egui::TopBottomPanel::bottom("scrub_bar").show(ctx, |ui| {
+        let Some(state) = state else {
+            return;
+        };
         ui.horizontal(|ui| {
             if ui.button("<< prev").clicked() {
                 state.prev_frame();

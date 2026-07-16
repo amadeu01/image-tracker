@@ -362,6 +362,25 @@ impl AppState {
         );
     }
 
+    /// Records that a new video was just opened (task 10.5 — "Open video…"
+    /// and the Ctrl+O shortcut both funnel here via `TrackerApp::open_video`
+    /// after a fresh `AppState` is constructed for it), so the Events
+    /// section shows what just happened rather than the user having to
+    /// infer it from the file name in the status bar changing.
+    pub fn note_video_opened(&mut self, path: &std::path::Path) {
+        tracing::info!(video = %path.display(), "video opened");
+        self.push_event(EventLevel::Info, format!("opened {}", path.display()));
+    }
+
+    /// Records an arbitrary error as an `AppEvent` (task 10.5's "Open
+    /// video" failure path; general-purpose enough for other adapters that
+    /// want the same on-screen breadcrumb `push_event` gives internally).
+    pub fn note_error(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        tracing::error!("{message}");
+        self.push_event(EventLevel::Error, message);
+    }
+
     /// Records the tracker `suggest_tracker` recommends for the just-placed
     /// Seed (task 4.3), logging the decision. Called by `TrackerApp` right
     /// after `place_seed`, once it has the corresponding frame's pixels
@@ -1438,6 +1457,50 @@ mod tests {
         // active immediately, no extra click needed.
         assert!(state.tracking.is_some());
         assert!(state.tracking_run.running);
+    }
+
+    // -- Task 10.5: open video from UI --------------------------------------
+
+    #[test]
+    fn note_video_opened_pushes_an_info_event_naming_the_file() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.note_video_opened(std::path::Path::new("/tmp/new-video.mp4"));
+        let event = state.events.back().unwrap();
+        assert_eq!(event.level, EventLevel::Info);
+        assert!(event.message.contains("opened"));
+        assert!(event.message.contains("new-video.mp4"));
+    }
+
+    #[test]
+    fn note_error_pushes_an_error_event() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.note_error("failed to open foo.mp4: not a video file");
+        let event = state.events.back().unwrap();
+        assert_eq!(event.level, EventLevel::Error);
+        assert!(event.message.contains("failed to open foo.mp4"));
+    }
+
+    /// `TrackerApp::open_video` (in `mod.rs`, needs a real `ffprobe`/decoder
+    /// so it isn't unit-tested here) rebuilds `AppState` from scratch via
+    /// `AppState::new` on every successful open, including a *second* video
+    /// mid-session. This pins the part of that reset that's `AppState`'s to
+    /// guarantee: a brand-new `AppState` for a different video carries none
+    /// of the previous session's seed/calibration/results/events over.
+    #[test]
+    fn a_fresh_app_state_for_a_newly_opened_video_carries_no_prior_session_state() {
+        let mut previous = state_in_review();
+        previous.note_video_opened(std::path::Path::new("first.mp4"));
+        assert!(previous.seed.is_some());
+        assert!(previous.results.is_some());
+
+        let reopened = AppState::new(PathBuf::from("second.mp4"), meta(Some(20)));
+        assert_eq!(reopened.video_path, PathBuf::from("second.mp4"));
+        assert!(reopened.seed.is_none());
+        assert!(reopened.calibration.is_none());
+        assert!(reopened.results.is_none());
+        assert!(reopened.bar_path.is_none());
+        assert!(reopened.events.is_empty());
+        assert_eq!(reopened.current_step(), WorkflowStep::PlaceSeed);
     }
 
     #[test]

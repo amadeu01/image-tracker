@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Image Tracker
+Comment=Track a barbell (or any object) through a video and get bar-path, velocity, and rep metrics
+Exec=tracker-app %f
+Icon=image-tracker
+Terminal=false
+Categories=AudioVideo;Sports;
+MimeType=video/mp4;video/quicktime;video/x-matroska;video/x-msvideo;video/webm;
+StartupWMClass=image-tracker

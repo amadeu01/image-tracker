@@ -13,3 +13,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
 directories = "5"
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

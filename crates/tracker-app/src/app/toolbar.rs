@@ -4,11 +4,30 @@
 
 use eframe::egui;
 
-use super::state::{AppState, Mode};
+use super::state::Mode;
+use super::TrackerApp;
 
-pub fn show(ctx: &egui::Context, state: &mut AppState) {
+pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
+            // Always available (10.5): opening a video works from an empty
+            // window and any time afterward (loads a fresh session on the
+            // new file).
+            if ui.button("Open video…").clicked() {
+                app.prompt_open_video();
+            }
+            let ctrl_o = ui.ctx().input(|i| {
+                i.key_pressed(egui::Key::O) && (i.modifiers.command || i.modifiers.ctrl)
+            });
+            if ctrl_o {
+                app.prompt_open_video();
+            }
+            ui.separator();
+
+            let Some(state) = app.state.as_mut() else {
+                return;
+            };
+
             let label = match state.mode {
                 Mode::ViewOnly => "Place Seed",
                 Mode::PlacingSeed => "Placing Seed... (click frame)",

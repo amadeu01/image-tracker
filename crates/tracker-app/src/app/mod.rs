@@ -30,21 +30,63 @@ use crate::ffprobe::VideoMetadata;
 use crate::frame_cache::FrameCache;
 use crate::seek_source::SeekingFrameDecoder;
 
+/// Video extensions offered in the "Open video…" file dialog (10.5). Not
+/// exhaustive (ffmpeg reads far more), just the common ones a user is likely
+/// to have on disk.
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "mkv", "avi", "webm"];
+
 /// The eframe `App`. Thin by design: state transitions live on `AppState`
 /// (tested in `state.rs`); this struct wires that state to egui widgets and
 /// to the seek-based frame cache (see `frame_cache.rs` for why: a scrub bar
 /// needs random access but full-video caching is too much memory).
+///
+/// `state`/`cache` are `None` in the empty state (10.5): no video loaded yet,
+/// either because the app was started with no CLI arg or because an "Open
+/// video" attempt hasn't succeeded yet. Every other field lives inside
+/// `AppState` once a video *is* loaded, so there's a single source of truth
+/// for "is a video open" — `state.is_some()`.
 pub struct TrackerApp {
-    pub state: AppState,
-    cache: FrameCache<SeekingFrameDecoder>,
+    pub state: Option<AppState>,
+    cache: Option<FrameCache<SeekingFrameDecoder>>,
     texture: Option<egui::TextureHandle>,
     /// Which frame `texture` currently shows, so we don't re-upload every
     /// frame when nothing changed.
     texture_frame: Option<u64>,
+    /// Message from the most recent failed "Open video" attempt, shown in
+    /// the empty-state central panel (which has no `AppState.status` to
+    /// write to). Cleared as soon as an open succeeds.
+    pub open_error: Option<String>,
 }
 
 impl TrackerApp {
+    /// Starts with a video already loaded (CLI-arg path, unchanged from
+    /// before 10.5).
     pub fn new(video_path: PathBuf, metadata: VideoMetadata) -> Self {
+        let mut app = Self::empty();
+        app.load_video(video_path, metadata);
+        app
+    }
+
+    /// Starts with no video loaded (10.5's empty state): `tracker-app` with
+    /// no CLI arg opens straight to the "Open a video to begin" prompt
+    /// instead of refusing to start.
+    pub fn empty() -> Self {
+        Self {
+            state: None,
+            cache: None,
+            texture: None,
+            texture_frame: None,
+            open_error: None,
+        }
+    }
+
+    /// Rebuilds every video-dependent piece of state (`AppState`, the seek
+    /// decoder/frame cache, the current texture) for a newly opened video.
+    /// Used by both constructors above and by `open_video` (10.5) — opening
+    /// a *second* video mid-session goes through exactly the same reset a
+    /// fresh launch would, so there's no stale seed/calibration/tracking
+    /// state left over from the previous video.
+    fn load_video(&mut self, video_path: PathBuf, metadata: VideoMetadata) {
         let decoder = SeekingFrameDecoder::new(
             video_path.clone(),
             metadata.display_width(),
@@ -52,31 +94,76 @@ impl TrackerApp {
             metadata.fps_num,
             metadata.fps_den,
         );
-        Self {
-            state: AppState::new(video_path, metadata),
-            cache: FrameCache::new(decoder, 16),
-            texture: None,
-            texture_frame: None,
+        self.state = Some(AppState::new(video_path, metadata));
+        self.cache = Some(FrameCache::new(decoder, 16));
+        self.texture = None;
+        self.texture_frame = None;
+    }
+
+    /// Opens the "Open video…" native file dialog (`rfd`), filtered to
+    /// common video extensions, and loads whatever the user picks. No-op if
+    /// the dialog is cancelled. Errors (e.g. `ffprobe` failing on the
+    /// chosen file) are surfaced via `open_error`/an `AppState` event
+    /// rather than left to crash the app — it stays exactly as usable as it
+    /// was before the attempt.
+    pub fn prompt_open_video(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Open video")
+            .add_filter("Video", VIDEO_EXTENSIONS)
+            .pick_file()
+        else {
+            return; // dialog cancelled
+        };
+        self.open_video(path);
+    }
+
+    /// Probes `video_path` and, on success, loads it (replacing any
+    /// previously loaded video and its session state). On failure, leaves
+    /// the current state untouched and records the error for display.
+    fn open_video(&mut self, video_path: PathBuf) {
+        match crate::ffprobe::probe(&video_path) {
+            Ok(metadata) => {
+                tracing::info!(video = %video_path.display(), "opening video");
+                self.load_video(video_path.clone(), metadata);
+                self.open_error = None;
+                if let Some(state) = &mut self.state {
+                    state.note_video_opened(&video_path);
+                }
+            }
+            Err(e) => {
+                let message = format!("failed to open {}: {e}", video_path.display());
+                tracing::error!(video = %video_path.display(), error = %e, "failed to probe video");
+                if let Some(state) = &mut self.state {
+                    state.status = message.clone();
+                    state.note_error(message.clone());
+                }
+                self.open_error = Some(message);
+            }
         }
     }
 
     fn ensure_texture(&mut self, ctx: &egui::Context) {
-        if self.texture_frame == Some(self.state.current_frame) {
+        let Some(state) = &mut self.state else {
+            return;
+        };
+        let Some(cache) = &mut self.cache else {
+            return;
+        };
+        if self.texture_frame == Some(state.current_frame) {
             return; // already showing the right frame
         }
-        match self.cache.get(self.state.current_frame) {
+        match cache.get(state.current_frame) {
             Ok(frame) => {
                 let size = [frame.width() as usize, frame.height() as usize];
                 let image = egui::ColorImage::from_rgb(size, frame.rgb());
                 let handle = ctx.load_texture("current-frame", image, egui::TextureOptions::LINEAR);
                 self.texture = Some(handle);
-                self.texture_frame = Some(self.state.current_frame);
-                self.state.status.clear();
+                self.texture_frame = Some(state.current_frame);
+                state.status.clear();
             }
             Err(e) => {
-                tracing::error!(frame = self.state.current_frame, error = %e, "failed to decode frame");
-                self.state.status =
-                    format!("failed to decode frame {}: {e}", self.state.current_frame);
+                tracing::error!(frame = state.current_frame, error = %e, "failed to decode frame");
+                state.status = format!("failed to decode frame {}: {e}", state.current_frame);
             }
         }
     }
@@ -84,38 +171,78 @@ impl TrackerApp {
 
 impl eframe::App for TrackerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.state.poll_tracking() {
-            ctx.request_repaint();
-        }
-        if self.state.poll_export() {
-            ctx.request_repaint();
-        }
-        // While a run/export is active, keep repainting so progress keeps
-        // flowing even if nothing else prompts a redraw.
-        if self.state.tracking.is_some() || self.state.export.is_some() {
-            ctx.request_repaint();
+        if let Some(state) = &mut self.state {
+            if state.poll_tracking() {
+                ctx.request_repaint();
+            }
+            if state.poll_export() {
+                ctx.request_repaint();
+            }
+            // While a run/export is active, keep repainting so progress
+            // keeps flowing even if nothing else prompts a redraw.
+            if state.tracking.is_some() || state.export.is_some() {
+                ctx.request_repaint();
+            }
         }
         self.ensure_texture(ctx);
 
-        toolbar::show(ctx, &mut self.state);
-        bottom_bar::show_status_bar(ctx, &self.state);
-        bottom_bar::show_scrub_bar(ctx, &mut self.state);
+        toolbar::show(ctx, self);
+        bottom_bar::show_status_bar(ctx, self.state.as_ref());
+        bottom_bar::show_scrub_bar(ctx, self.state.as_mut());
         // Side panel before the central panel so it claims its space first
         // (egui lays out panels in call order); the video then fills
         // whatever's left instead of an empty area to its right.
-        side_panel::show(ctx, &self.state);
+        side_panel::show(ctx, self.state.as_ref());
         video_panel::show(self, ctx);
     }
 }
 
 /// Runs the app: creates the native window and hands control to eframe's
 /// event loop. Not called from unit tests (no display in CI); `main.rs`
-/// invokes this after CLI parsing + ffprobe succeed.
-pub fn run(video_path: PathBuf, metadata: VideoMetadata) -> eframe::Result<()> {
-    let options = eframe::NativeOptions::default();
+/// invokes this after CLI parsing (and, when a video path was given,
+/// `ffprobe`) succeed. `video` is `None` for the no-arg empty-state launch
+/// (10.5).
+pub fn run(video: Option<(PathBuf, VideoMetadata)>) -> eframe::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_app_id("image-tracker")
+            .with_icon(std::sync::Arc::new(app_icon())),
+        ..Default::default()
+    };
     eframe::run_native(
-        "image-tracker",
+        "Image Tracker",
         options,
-        Box::new(move |_cc| Ok(Box::new(TrackerApp::new(video_path, metadata)))),
+        Box::new(move |_cc| {
+            Ok(Box::new(match video {
+                Some((path, metadata)) => TrackerApp::new(path, metadata),
+                None => TrackerApp::empty(),
+            }))
+        }),
     )
+}
+
+/// Decodes the embedded app icon PNG (10.5) for the window/taskbar. Decode
+/// failure (shouldn't happen — the PNG is generated at build/asset time and
+/// checked in) falls back to a blank 1x1 icon rather than panicking.
+fn app_icon() -> egui::IconData {
+    const ICON_BYTES: &[u8] = include_bytes!("../../../../assets/icons/image-tracker.png");
+    match image::load_from_memory(ICON_BYTES) {
+        Ok(img) => {
+            let img = img.into_rgba8();
+            let (width, height) = img.dimensions();
+            egui::IconData {
+                rgba: img.into_raw(),
+                width,
+                height,
+            }
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to decode embedded app icon");
+            egui::IconData {
+                rgba: vec![0, 0, 0, 0],
+                width: 1,
+                height: 1,
+            }
+        }
+    }
 }

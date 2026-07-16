@@ -25,12 +25,16 @@ const STEPS: [(u8, &str); 5] = [
     (5, "Review / Export"),
 ];
 
-pub fn show(ctx: &egui::Context, state: &AppState) {
+pub fn show(ctx: &egui::Context, state: Option<&AppState>) {
     egui::SidePanel::right("side_panel")
         .default_width(PANEL_WIDTH)
         .resizable(true)
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                let Some(state) = state else {
+                    empty_guide_section(ui);
+                    return;
+                };
                 guide_section(ui, state);
                 ui.add_space(8.0);
                 ui.separator();
@@ -48,6 +52,19 @@ pub fn show(ctx: &egui::Context, state: &AppState) {
                 events_section(ui, state);
             });
         });
+}
+
+/// Guide shown before any video is loaded (10.5): step 0, distinct from the
+/// numbered `STEPS` (which all assume a video is already open).
+fn empty_guide_section(ui: &mut egui::Ui) {
+    ui.heading("Guide");
+    ui.colored_label(
+        egui::Color32::from_rgb(90, 170, 255),
+        "▶ 0. Open a video [Ctrl+O]",
+    );
+    for (id, label) in STEPS {
+        ui.label(format!("   {id}. {label}"));
+    }
 }
 
 fn guide_section(ui: &mut egui::Ui, state: &AppState) {
