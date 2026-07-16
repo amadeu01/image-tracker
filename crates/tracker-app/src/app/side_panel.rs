@@ -18,7 +18,10 @@ use super::state::{AppState, EventLevel};
 use super::theme;
 use crate::tracking::TrackerSelection;
 
-const PANEL_WIDTH: f32 = 260.0;
+/// Widened from 260 in task 13.3: the design's 7-column rep table
+/// (#/DEPTH/PEAK/MEAN/LOSS/TIME/▶) needs ~300px of monospace columns to
+/// render without overlap; the panel stays user-resizable.
+const PANEL_WIDTH: f32 = 320.0;
 
 /// Section-header typography (task 13.1): the design specifies uppercase,
 /// small (~11px), letter-spaced labels rather than egui's default
@@ -559,10 +562,11 @@ fn advanced_tuning_row_f64(
 /// quality line (gaps/interpolated%/reseeds), and — when `velocity_series`
 /// failed (10.9's GUI seam) — a warning in place of the table rather than a
 /// silent empty one.
-fn results_section(ui: &mut egui::Ui, state: &AppState) {
+fn results_section(ui: &mut egui::Ui, state: &mut AppState) {
     let Some(results) = &state.results else {
         return;
     };
+    let velocity_ok = results.velocity.is_ok();
     section_label(ui, "Results");
 
     match &results.velocity {
@@ -656,62 +660,22 @@ fn results_section(ui: &mut egui::Ui, state: &AppState) {
                         );
                     });
             }
-
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new(format!("Reps: {}", results.reps.len()))
-                    .heading()
-                    .strong(),
-            );
-
-            let unit = match results.unit {
-                Some(tracker_core::VelocityUnit::MetersPerSecond) => "m/s",
-                Some(tracker_core::VelocityUnit::PixelsPerSecond) | None => "px/s",
-            };
-            let depth_unit = match results.unit {
-                Some(tracker_core::VelocityUnit::MetersPerSecond) => "m",
-                _ => "px",
-            };
-
-            if !results.metrics.is_empty() {
-                egui::Grid::new("results_reps_grid")
-                    .num_columns(5)
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.strong("#");
-                        ui.strong(format!("depth ({depth_unit})"));
-                        ui.strong(format!("peak ({unit})"));
-                        ui.strong(format!("mean ({unit})"));
-                        ui.strong("loss");
-                        ui.end_row();
-                        for (i, m) in results.metrics.iter().enumerate() {
-                            ui.label(i.to_string());
-                            ui.label(format!("{:.2}", m.depth));
-                            ui.label(format!("{:.2}", m.peak_concentric_speed));
-                            ui.label(format!("{:.2}", m.mean_concentric_velocity));
-                            match results.loss_percent.get(i).copied().flatten() {
-                                Some(loss) => {
-                                    let severity = palette::loss_severity(loss, threshold);
-                                    ui.colored_label(
-                                        palette::loss_severity_color(dark_mode, severity),
-                                        format!("-{loss:.1}%"),
-                                    );
-                                }
-                                None => {
-                                    ui.weak("—");
-                                }
-                            }
-                            ui.end_row();
-                        }
-                    });
-            } else {
-                ui.weak("(no reps detected)");
-            }
         }
     }
 
+    if velocity_ok {
+        ui.add_space(6.0);
+        rep_table(ui, state);
+    }
+
     ui.add_space(6.0);
-    let q = &results.quality;
+    // Re-borrowed (`ResultsQuality` is `Copy`) rather than reusing the
+    // `results` binding from above: `rep_table` needed `&mut state`.
+    let q = state
+        .results
+        .as_ref()
+        .map(|r| r.quality)
+        .unwrap_or_default();
     ui.label(egui::RichText::new("Quality").strong());
     kv_row(ui, "gaps", &q.gap_count.to_string());
     kv_row(ui, "reseeds", &q.reseed_count.to_string());
@@ -734,6 +698,205 @@ fn results_section(ui: &mut egui::Ui, state: &AppState) {
     });
 
     files_section(ui, state);
+}
+
+/// Rep-table row height (design mock: ~28px rows; slightly tighter here).
+const REP_ROW_HEIGHT: f32 = 22.0;
+/// Left x-offset of each text column (#, DEPTH, PEAK V, MEAN V, LOSS, TIME)
+/// inside a row, in px — the design mock's fixed grid columns, compressed to
+/// fit the panel. The ▶ button is right-aligned separately.
+const REP_COL_X: [f32; 6] = [8.0, 26.0, 64.0, 102.0, 140.0, 178.0];
+/// ▶ button width, right-aligned in each row.
+const REP_PLAY_WIDTH: f32 = 24.0;
+
+/// What a click inside the rep table asked for, resolved after the render
+/// loop (the rows borrow `state.results` immutably while drawing).
+enum RepTableAction {
+    /// Row click: select + jump (the mock's `onSelect`).
+    Select(usize),
+    /// ▶ click: toggle the rep's clip loop (the mock's `onPlay`, which
+    /// `stopPropagation`s — here the button response is checked *before*
+    /// the row response so ▶ never also triggers row-select-and-clear-clip).
+    Play(usize),
+}
+
+/// The Results rep table (task 13.3, replacing 10.3's bare grid): one
+/// clickable row per rep with #(1-based)/DEPTH/PEAK V/MEAN V/LOSS/TIME/▶
+/// columns per the design mock. egui's `Grid` can't do row backgrounds or
+/// clicks, so each row is an allocated `Sense::click` rect with a painted
+/// 3px loss-colored left border and monospace text at fixed x-offsets (the
+/// design notes' egui mapping). Ends with the "Export all rep clips" button.
+fn rep_table(ui: &mut egui::Ui, state: &mut AppState) {
+    struct Row {
+        depth: String,
+        peak: String,
+        mean: String,
+        loss: Option<f64>,
+        range: String,
+        clip_armed: bool,
+        selected: bool,
+    }
+
+    let rows: Vec<Row> = {
+        let Some(results) = &state.results else {
+            return;
+        };
+        if results.metrics.is_empty() {
+            ui.weak("(no reps detected)");
+            return;
+        }
+        // Uncalibrated (px) values render as whole pixels, calibrated
+        // (m, m/s) with 2 decimals — the mock's `fmtV`/`fmtD`.
+        let calibrated = matches!(
+            results.unit,
+            Some(tracker_core::VelocityUnit::MetersPerSecond)
+        );
+        let fmt = |v: f64| {
+            if calibrated {
+                format!("{v:.2}")
+            } else {
+                format!("{}", v.round() as i64)
+            }
+        };
+        let (num, den) = (state.metadata.fps_num, state.metadata.fps_den);
+        results
+            .metrics
+            .iter()
+            .enumerate()
+            .map(|(i, m)| Row {
+                depth: fmt(m.depth),
+                peak: fmt(m.peak_concentric_speed),
+                mean: fmt(m.mean_concentric_velocity),
+                loss: results.loss_percent.get(i).copied().flatten(),
+                range: results
+                    .rep_frame_bounds(i)
+                    .map(|(s, e)| {
+                        format!(
+                            "{}–{}",
+                            super::state::format_clip_time(s, num, den),
+                            super::state::format_clip_time(e, num, den)
+                        )
+                    })
+                    .unwrap_or_else(|| "—".to_string()),
+                clip_armed: state.rep_clip == Some(i),
+                selected: state.selected_rep == Some(i),
+            })
+            .collect()
+    };
+
+    let dark_mode = ui.visuals().dark_mode;
+    let chrome = palette::chrome_palette(dark_mode);
+    let threshold = state.settings.stop_threshold_pct;
+    let font = egui::FontId::monospace(10.0);
+    let weak_color = ui.visuals().weak_text_color();
+    let text_color = ui.visuals().text_color();
+
+    // Header row: uppercase weak labels at the same fixed offsets.
+    let (header_rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 16.0), egui::Sense::hover());
+    let header_painter = ui.painter_at(header_rect);
+    for (label, x) in ["#", "DEPTH", "PEAK V", "MEAN V", "LOSS", "TIME"]
+        .iter()
+        .zip(REP_COL_X)
+    {
+        header_painter.text(
+            egui::pos2(header_rect.left() + x, header_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::monospace(9.0),
+            weak_color,
+        );
+    }
+
+    let mut action: Option<RepTableAction> = None;
+    for (i, row) in rows.iter().enumerate() {
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), REP_ROW_HEIGHT),
+            egui::Sense::click(),
+        );
+        if !ui.is_rect_visible(rect) {
+            continue;
+        }
+        let painter = ui.painter_at(rect);
+        if row.selected {
+            painter.rect_filled(rect, 0.0, chrome.accent.gamma_multiply(0.18));
+        } else if response.hovered() {
+            painter.rect_filled(rect, 0.0, weak_color.gamma_multiply(0.10));
+        }
+        // 3px left border in the loss-severity color (rep 1's missing loss
+        // counts as 0% → green, matching the mock's `lossColor` for rep 1).
+        let severity = palette::loss_severity(row.loss.unwrap_or(0.0), threshold);
+        let loss_color = palette::loss_severity_color(dark_mode, severity);
+        painter.rect_filled(
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + 3.0, rect.bottom())),
+            0.0,
+            loss_color,
+        );
+        let cy = rect.center().y;
+        let col = |x: f32, text: &str, color: egui::Color32| {
+            painter.text(
+                egui::pos2(rect.left() + x, cy),
+                egui::Align2::LEFT_CENTER,
+                text,
+                font.clone(),
+                color,
+            );
+        };
+        col(REP_COL_X[0], &(i + 1).to_string(), weak_color);
+        col(REP_COL_X[1], &row.depth, text_color);
+        col(REP_COL_X[2], &row.peak, text_color);
+        col(REP_COL_X[3], &row.mean, text_color);
+        match row.loss {
+            Some(loss) => col(REP_COL_X[4], &format!("-{:.1}%", loss.max(0.0)), loss_color),
+            None => col(REP_COL_X[4], "—", weak_color),
+        }
+        col(REP_COL_X[5], &row.range, weak_color);
+
+        // ▶ (or ■ while looping) button, right-aligned; its response is
+        // checked before the row's so a ▶ click never also row-selects.
+        let button_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - REP_PLAY_WIDTH - 4.0, rect.top() + 2.0),
+            egui::vec2(REP_PLAY_WIDTH, REP_ROW_HEIGHT - 4.0),
+        );
+        let glyph = if row.clip_armed { "■" } else { "▶" };
+        let play = ui
+            .put(
+                button_rect,
+                egui::Button::new(egui::RichText::new(glyph).size(10.0)).small(),
+            )
+            .on_hover_text(if row.clip_armed {
+                "stop the rep clip loop"
+            } else {
+                "play this rep as a loop"
+            });
+        if play.clicked() {
+            action = Some(RepTableAction::Play(i));
+        } else if response.clicked() {
+            action = Some(RepTableAction::Select(i));
+        } else if response.hovered() {
+            response.on_hover_text(format!("Rep {}: click to jump", i + 1));
+        }
+    }
+    match action {
+        Some(RepTableAction::Play(i)) => state.toggle_rep_clip(i),
+        Some(RepTableAction::Select(i)) => state.select_rep(i),
+        None => {}
+    }
+
+    ui.add_space(6.0);
+    if ui
+        .add_enabled(
+            state.can_export_rep_clips(),
+            egui::Button::new("Export all rep clips"),
+        )
+        .on_hover_text(
+            "write one <video>.repNN.mp4 per rep next to the video \
+             (ffmpeg stream copy, in the background)",
+        )
+        .clicked()
+    {
+        state.start_rep_clip_export();
+    }
 }
 
 /// One of the Results header's three headline cards (REPS / SET TIME /

@@ -302,6 +302,17 @@ impl eframe::App for TrackerApp {
             if state.tracking.is_some() || state.export.is_some() || state.benchmark.is_some() {
                 ctx.request_repaint();
             }
+            // Rep clip loop (task 13.3): while a ▶'d clip is armed, step
+            // the playhead one frame per UI frame and schedule the next
+            // repaint one video-frame-duration out, so the loop cycles at
+            // roughly video fps through the existing seek decoder
+            // (`ensure_texture` below picks up the new `current_frame`).
+            if state.advance_rep_clip() {
+                let (num, den) = (state.metadata.fps_num.max(1), state.metadata.fps_den.max(1));
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    den as f64 / num as f64,
+                ));
+            }
         }
         if self.poll_thumbnails(ctx) {
             ctx.request_repaint();

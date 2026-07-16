@@ -550,6 +550,95 @@ impl AppState {
         self.set_frame(bounds.0 as i64);
     }
 
+    /// Arms/disarms rep `index`'s clip loop (the rep table's ▶ button, task
+    /// 13.3 — the design's `onPlay`): arming also selects the rep and jumps
+    /// the playhead to its start (mirroring the mock's `setState`); clicking
+    /// ▶ on the already-armed rep toggles the loop off, leaving the
+    /// selection and playhead where they are. No-op when `index` doesn't
+    /// resolve to a rep in the current `results` (same stale-click guard as
+    /// `select_rep`).
+    pub fn toggle_rep_clip(&mut self, index: usize) {
+        if self.rep_clip == Some(index) {
+            self.rep_clip = None;
+            return;
+        }
+        let Some(bounds) = self
+            .results
+            .as_ref()
+            .and_then(|r| r.rep_frame_bounds(index))
+        else {
+            return;
+        };
+        self.selected_rep = Some(index);
+        self.rep_clip = Some(index);
+        self.set_frame(bounds.0 as i64);
+    }
+
+    /// Advances the playhead one frame within the armed rep clip's bounds,
+    /// wrapping `end → start` (task 13.3's in-app loop: playhead cycling via
+    /// the existing seek decoder, a deliberate v1 deviation from true
+    /// decoded playback per the design notes). Returns `true` when a clip
+    /// is armed and the frame moved — the caller (`TrackerApp::update`)
+    /// schedules the next repaint one video-frame-duration later, so the
+    /// loop runs at roughly video fps. `false` (no-op) when no clip is
+    /// armed or its bounds can't be resolved.
+    pub fn advance_rep_clip(&mut self) -> bool {
+        let Some(bounds) = self
+            .rep_clip
+            .and_then(|i| self.results.as_ref()?.rep_frame_bounds(i))
+        else {
+            return false;
+        };
+        let next = clip_loop_next_frame(self.current_frame, bounds.0, bounds.1);
+        self.set_frame(next as i64);
+        true
+    }
+
+    /// Whether "Export all rep clips" (task 13.3) is currently available:
+    /// results with at least one rep, and no export job (auto-export or a
+    /// previous clip export) still running — both share `self.export`, so
+    /// one at a time.
+    pub fn can_export_rep_clips(&self) -> bool {
+        self.export.is_none()
+            && self
+                .results
+                .as_ref()
+                .is_some_and(|r| !r.reps.is_empty() && r.velocity.is_ok())
+    }
+
+    /// Spawns the background per-rep clip export (`<stem>.repNN.mp4` via
+    /// ffmpeg stream copy, task 13.3). Reuses the auto-export message
+    /// channel/polling (`poll_export`), so per-file done/failed surface as
+    /// the same events and `exported_files` rows the other exports get —
+    /// without clearing the files the auto-export already wrote. No-op if
+    /// `can_export_rep_clips` is false.
+    pub fn start_rep_clip_export(&mut self) {
+        if !self.can_export_rep_clips() {
+            return;
+        }
+        let Some(results) = &self.results else {
+            return;
+        };
+        let bounds: Vec<(u64, u64)> = (0..results.reps.len())
+            .filter_map(|i| results.rep_frame_bounds(i))
+            .collect();
+        if bounds.is_empty() {
+            return;
+        }
+        let clip_count = bounds.len();
+        tracing::info!(clips = clip_count, "rep clip export started");
+        self.push_event(
+            EventLevel::Info,
+            format!("rep clip export started ({clip_count} clips)"),
+        );
+        self.export = Some(export_job::spawn_rep_clip_export(export_job::RepClipJob {
+            video_path: self.video_path.clone(),
+            fps_num: self.metadata.fps_num,
+            fps_den: self.metadata.fps_den,
+            bounds,
+        }));
+    }
+
     /// Sets the Live/Results pill selection (task 13.1's toolbar toggle).
     pub fn set_display_mode(&mut self, mode: DisplayMode) {
         self.display_mode = mode;
@@ -1436,6 +1525,37 @@ impl AppState {
     }
 }
 
+/// Next playhead frame while a rep clip is looping (task 13.3): step forward
+/// one frame; from the clip's end (or anywhere outside its bounds — e.g. the
+/// user scrubbed away mid-loop) wrap back to `start`. Pure, so the loop's
+/// wraparound is unit-testable without egui.
+pub fn clip_loop_next_frame(current: u64, start: u64, end: u64) -> u64 {
+    if current < start || current >= end {
+        start
+    } else {
+        current + 1
+    }
+}
+
+/// `M:SS.s` timestamp of `frame` under the `fps_num/fps_den` timebase (the
+/// rep table's TIME column, task 13.3 — the mock's `fmtTime`: minutes,
+/// zero-padded seconds with one decimal). Degenerate timebases render as
+/// `0:00.0` rather than dividing by zero.
+pub fn format_clip_time(frame: u64, fps_num: u64, fps_den: u64) -> String {
+    let seconds = if fps_num == 0 || fps_den == 0 {
+        0.0
+    } else {
+        frame as f64 * fps_den as f64 / fps_num as f64
+    };
+    let minutes = (seconds / 60.0).floor();
+    let rest = seconds - minutes * 60.0;
+    format!(
+        "{}:{}{rest:.1}",
+        minutes as u64,
+        if rest < 10.0 { "0" } else { "" }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1839,6 +1959,82 @@ mod tests {
         state.retrack();
         assert_eq!(state.selected_rep, None);
         assert_eq!(state.rep_clip, None);
+    }
+
+    #[test]
+    fn toggle_rep_clip_arms_selects_and_jumps_then_disarms_on_second_click() {
+        let mut state = state_in_review();
+        state.set_frame(20);
+        state.toggle_rep_clip(0);
+        assert_eq!(state.rep_clip, Some(0));
+        assert_eq!(state.selected_rep, Some(0));
+        let (start, _) = state.results.as_ref().unwrap().rep_frame_bounds(0).unwrap();
+        assert_eq!(state.current_frame, start);
+
+        state.set_frame(start as i64 + 2);
+        state.toggle_rep_clip(0);
+        assert_eq!(state.rep_clip, None, "second ▶ click stops the loop");
+        assert_eq!(state.selected_rep, Some(0), "selection stays");
+        assert_eq!(state.current_frame, start + 2, "playhead stays put");
+    }
+
+    #[test]
+    fn toggle_rep_clip_ignores_out_of_range_index_and_missing_results() {
+        let mut state = state_in_review();
+        state.toggle_rep_clip(5); // only one rep exists
+        assert_eq!(state.rep_clip, None);
+
+        let mut fresh = AppState::new(PathBuf::from("v.mp4"), meta(Some(100)));
+        fresh.toggle_rep_clip(0);
+        assert_eq!(fresh.rep_clip, None);
+    }
+
+    #[test]
+    fn clip_loop_next_frame_steps_and_wraps_at_the_end() {
+        assert_eq!(clip_loop_next_frame(5, 5, 10), 6);
+        assert_eq!(clip_loop_next_frame(9, 5, 10), 10);
+        assert_eq!(clip_loop_next_frame(10, 5, 10), 5, "end wraps to start");
+        assert_eq!(clip_loop_next_frame(2, 5, 10), 5, "before start snaps in");
+        assert_eq!(clip_loop_next_frame(50, 5, 10), 5, "past end snaps in");
+    }
+
+    #[test]
+    fn advance_rep_clip_cycles_the_playhead_only_while_a_clip_is_armed() {
+        let mut state = state_in_review();
+        assert!(!state.advance_rep_clip(), "no clip armed");
+
+        state.toggle_rep_clip(0);
+        let (start, end) = state.results.as_ref().unwrap().rep_frame_bounds(0).unwrap();
+        assert_eq!(state.current_frame, start);
+        assert!(state.advance_rep_clip());
+        assert_eq!(state.current_frame, start + 1);
+        state.set_frame(end as i64);
+        assert!(state.advance_rep_clip());
+        assert_eq!(state.current_frame, start, "wraps end -> start");
+    }
+
+    #[test]
+    fn format_clip_time_matches_the_mock_m_ss_s_format() {
+        assert_eq!(format_clip_time(0, 30, 1), "0:00.0");
+        assert_eq!(format_clip_time(190, 30, 1), "0:06.3");
+        assert_eq!(format_clip_time(1854, 30, 1), "1:01.8");
+        assert_eq!(format_clip_time(600, 600, 19), "0:19.0");
+        assert_eq!(format_clip_time(100, 0, 1), "0:00.0", "degenerate fps");
+    }
+
+    #[test]
+    fn rep_clip_export_gate_requires_reps_and_no_active_export() {
+        let mut state = state_in_review();
+        assert!(state.can_export_rep_clips());
+        state.start_rep_clip_export();
+        assert!(state.export.is_some(), "clip export job spawned");
+        assert!(
+            !state.can_export_rep_clips(),
+            "one export at a time (shared handle)"
+        );
+
+        let fresh = AppState::new(PathBuf::from("v.mp4"), meta(Some(100)));
+        assert!(!fresh.can_export_rep_clips(), "no results yet");
     }
 
     #[test]
