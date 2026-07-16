@@ -213,17 +213,32 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
             break;
         }
         if needs_reseed {
-            reseed_events += 1;
-            let (Some(idx), Some(pos)) = (run_state.last_frame_index, run_state.last_position)
+            // 10.9: resume at the *current* paused frame
+            // (`last_frame_index`, now sourced from
+            // `TrackingSession::frame_index()` rather than the last
+            // recorded sample) using the last *tracked* (not
+            // coasted/interpolated) position -- `last_tracked_position`
+            // (10.2) -- rather than `last_position`, which during a gap is
+            // wherever the linear interpolation toward coasted-garbage last
+            // landed (e.g. the rack, y=12). Reseeding onto interpolated
+            // garbage was silently producing a worse-than-nothing new seed;
+            // reseeding at a stale frame index was worse still: it fed the
+            // same already-recorded frame back into `reseed` on every
+            // iteration, which (before the `TrackingSession::reseed`
+            // monotonic-samples fix) minted duplicate/regressing samples
+            // and effectively never advanced past that frame.
+            let (Some(idx), Some(pos)) =
+                (run_state.last_frame_index, run_state.last_tracked_position)
             else {
-                break; // shouldn't happen: Progress always sets both
+                break; // shouldn't happen: Progress always sets both once tracking has started
             };
+            reseed_events += 1;
             tracing::warn!(
                 video_frame_index = idx,
                 x = pos.x,
                 y = pos.y,
                 reseed_events,
-                "headless auto-resume: reseeding from last known position"
+                "headless auto-resume: reseeding from last *tracked* position"
             );
             handle.resume(idx, pos);
         }
@@ -262,8 +277,28 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
 
     // Velocity/rep metrics (task 5.2-5.4): best-effort -- a bar path too
     // short to differentiate (e.g. a single point) just yields no
-    // velocity/reps rather than failing the whole run.
-    let velocity = velocity_series(bar_path.points(), 5, cal.as_ref()).ok();
+    // velocity/reps rather than failing the whole run. But a failure here
+    // must never be *silent* (10.9): before this fix, `.ok()` swallowed
+    // `VelocityError` outright, so a reseed-produced duplicate/regressing
+    // frame index (see `TrackingSession::reseed`) tripped
+    // `NonMonotonicTime` and the run finished "successfully" with a
+    // header-only reps.csv and no indication anything had gone wrong.
+    let velocity = match velocity_series(bar_path.points(), 5, cal.as_ref()) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            eprintln!(
+                "warning: could not compute velocity/reps for {}: {e} \
+                 (positions are still exported; velocity columns and reps.csv will be empty)",
+                args.video_path.display()
+            );
+            tracing::error!(
+                error = %e,
+                points = bar_path.points().len(),
+                "velocity_series failed; exporting positions only, no velocity/reps"
+            );
+            None
+        }
+    };
     // `RepSegmentationConfig`'s default `min_velocity` (5.0) is tuned for
     // uncalibrated px/s data; m/s bar speeds are typically well under 1-2
     // m/s, so with a `Calibration` the dead-band must be overridden much
@@ -351,7 +386,11 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
         );
     }
     if metrics.is_empty() {
-        println!("(no reps detected)");
+        if velocity.is_none() {
+            println!("(no reps: velocity could not be computed -- see warning above)");
+        } else {
+            println!("(no reps detected)");
+        }
     }
     println!(
         "reps -> {} / {}",

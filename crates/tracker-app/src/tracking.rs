@@ -593,7 +593,19 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
             Some(frame) => {
                 session.step(&frame);
                 if let Some(last) = session.samples().last() {
-                    let video_frame_index = seed_frame_index + last.frame_index;
+                    // Report progress at the session's *current* frame
+                    // (`frame_index()`, which advances on every step,
+                    // Found/Miss/pause alike), not the last sample's frame
+                    // index. While a gap is open the last sample can be
+                    // many frames stale (samples are only pushed for
+                    // Found/reseed frames and, retroactively, once a gap
+                    // closes) -- reporting the stale index here was 10.9's
+                    // root cause: the CLI's headless auto-resume trusted
+                    // this value as "the frame to reseed at", which kept
+                    // handing back the same already-recorded frame index
+                    // forever instead of advancing to where the session had
+                    // actually paused.
+                    let video_frame_index = seed_frame_index + session.frame_index();
                     tracing::trace!(
                         video_frame_index,
                         x = last.position.x,
@@ -611,8 +623,7 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
                 }
                 if session.state() == SessionState::NeedsReseed {
                     tracing::warn!(
-                        video_frame_index = seed_frame_index
-                            + session.samples().last().map(|s| s.frame_index).unwrap_or(0),
+                        video_frame_index = seed_frame_index + session.frame_index(),
                         "tracking needs reseed: object lost, waiting for a new seed"
                     );
                     match reseed_rx.recv() {

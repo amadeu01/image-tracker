@@ -192,6 +192,22 @@ impl<T: Tracker> TrackingSession<T> {
         self.state
     }
 
+    /// The current frame index the session has processed up to. Unlike
+    /// `samples().last().frame_index`, this advances on *every* `step` call
+    /// (Found, Miss, or the pause that trips `NeedsReseed`) — samples are
+    /// only pushed for `Found`/reseed frames and, retroactively, for a gap's
+    /// interpolated frames once it closes. Callers that need to know "what
+    /// frame are we actually at" (e.g. to report pause progress or to
+    /// resume at the right place) must use this, not the last sample: while
+    /// a gap is open but not yet closed or paused, the last sample can be
+    /// many frames stale (10.9 root cause — the CLI's headless auto-resume
+    /// was reseeding at the stale last-*sample* frame index instead of this
+    /// one, which regressed `self.frame_index` backwards and produced the
+    /// same reseed frame repeatedly forever).
+    pub fn frame_index(&self) -> u64 {
+        self.frame_index
+    }
+
     pub fn samples(&self) -> &[Sample] {
         &self.samples
     }
@@ -311,22 +327,54 @@ impl<T: Tracker> TrackingSession<T> {
     /// `point` on `frame_index`. If a gap was pending (trailing,
     /// unresolved), it is replaced with one closed at `frame_index - 1`.
     /// Records a `Tracked` sample for the reseed point itself.
+    ///
+    /// ## Monotonic-samples guarantee (10.9)
+    /// `samples()` must stay strictly increasing by `frame_index` — a
+    /// `BarPath`/`velocity_series` built from it derives timestamps
+    /// straight from `frame_index`, and a duplicate or regressing index
+    /// produces a non-positive `dt`, which `velocity_series` rejects
+    /// wholesale (`VelocityError::NonMonotonicTime`), silently zeroing out
+    /// velocity and rep detection for the *entire* run.
+    ///
+    /// Semantics chosen: reseeding at `frame_index` where a sample already
+    /// exists at or after that index (i.e. `frame_index <=` the last
+    /// recorded sample's) *replaces* the last recorded sample in place,
+    /// rather than appending a new (duplicate-or-regressing) one. This
+    /// happens in practice when a caller re-reseeds using a stale frame
+    /// index (e.g. re-deriving "current frame" from the last *sample*
+    /// instead of `Self::frame_index`, as the CLI's headless auto-resume
+    /// did before this fix) — treating it as "the seed I already placed is
+    /// still the best guess for this frame" is more honest than crashing or
+    /// silently corrupting the series, and it self-heals: the very next
+    /// `step` resumes strictly forward from the (now-corrected) last
+    /// sample.
     pub fn reseed(&mut self, frame_index: u64, point: Point) {
+        let last_recorded = self.samples.last().map(|s| s.frame_index);
+        let effective_frame_index = match last_recorded {
+            Some(last) if frame_index <= last => last,
+            _ => frame_index,
+        };
+        let replacing = last_recorded.is_some_and(|last| frame_index <= last);
+
         // Replace the trailing (unresolved) gap recorded when we paused,
-        // if any, with one closed right before the reseed frame.
+        // if any, with one closed right before the (effective) reseed
+        // frame.
         if self.state == SessionState::NeedsReseed {
             if let Some(last) = self.gaps.last_mut() {
-                last.end = frame_index.saturating_sub(1);
+                last.end = effective_frame_index.saturating_sub(1);
             }
         }
 
         self.state = SessionState::Tracking;
         self.last_pos = point;
-        self.frame_index = frame_index;
+        self.frame_index = effective_frame_index;
         self.open_gap_start = None;
         self.miss_count = 0;
+        if replacing {
+            self.samples.pop();
+        }
         self.samples.push(Sample {
-            frame_index,
+            frame_index: effective_frame_index,
             position: point,
             source: Source::Tracked,
         });
@@ -467,6 +515,75 @@ mod tests {
         assert_eq!(session.state(), SessionState::Tracking);
         assert_eq!(session.samples().last().unwrap().frame_index, 6);
         assert_eq!(session.samples().last().unwrap().source, Source::Tracked);
+    }
+
+    // -- 10.9: reseed must never duplicate/regress a sample frame index ---
+
+    #[test]
+    fn reseeding_the_same_frame_twice_keeps_samples_strictly_increasing() {
+        let mut session = make_session(1);
+        session.step(&blank_frame(W, H)); // frame 1: miss
+        session.step(&blank_frame(W, H)); // frame 2: miss > limit(1) -> pause
+        assert_eq!(session.state(), SessionState::NeedsReseed);
+
+        session.reseed(5, Point::new(30.0, 20.0));
+        assert_eq!(session.state(), SessionState::Tracking);
+        assert_eq!(session.samples().last().unwrap().frame_index, 5);
+
+        // Reseeding again at the *same* frame index (e.g. a caller retrying
+        // with a stale "current frame" reading) must not duplicate frame 5
+        // -- it replaces the sample already recorded there instead.
+        session.reseed(5, Point::new(31.0, 21.0));
+        assert_eq!(session.state(), SessionState::Tracking);
+        let samples = session.samples();
+        assert_eq!(samples.last().unwrap().frame_index, 5);
+        assert_eq!(samples.last().unwrap().position, Point::new(31.0, 21.0));
+        // Samples strictly increasing: no duplicate frame_index anywhere.
+        for w in samples.windows(2) {
+            assert!(
+                w[1].frame_index > w[0].frame_index,
+                "samples must be strictly increasing by frame_index: {:?} -> {:?}",
+                w[0],
+                w[1]
+            );
+        }
+
+        // Reseeding at an even earlier (regressing) frame index behaves the
+        // same way: clamps to the last recorded index rather than going
+        // backwards.
+        session.reseed(2, Point::new(1.0, 1.0));
+        let samples = session.samples();
+        assert_eq!(samples.last().unwrap().frame_index, 5);
+        assert_eq!(samples.last().unwrap().position, Point::new(1.0, 1.0));
+        for w in samples.windows(2) {
+            assert!(w[1].frame_index > w[0].frame_index);
+        }
+
+        // A genuinely later reseed still records a new sample as normal.
+        session.reseed(7, Point::new(2.0, 2.0));
+        let samples = session.samples();
+        assert_eq!(samples.last().unwrap().frame_index, 7);
+        assert_eq!(samples.len(), samples.len()); // sanity
+        for w in samples.windows(2) {
+            assert!(w[1].frame_index > w[0].frame_index);
+        }
+    }
+
+    #[test]
+    fn frame_index_advances_on_every_step_even_without_a_new_sample() {
+        // While a gap is open (Miss streak that hasn't yet closed or
+        // paused), no new sample is pushed per frame -- but frame_index()
+        // must still track the actual current frame, since callers that
+        // need "what frame are we at" (progress reporting, resume) rely on
+        // it rather than the stale last sample (10.9).
+        let mut session = make_session(5); // generous coast limit: stays Tracking
+        assert_eq!(session.frame_index(), 0);
+        session.step(&blank_frame(W, H)); // frame 1: miss, no new sample
+        assert_eq!(session.frame_index(), 1);
+        assert_eq!(session.samples().last().unwrap().frame_index, 0);
+        session.step(&blank_frame(W, H)); // frame 2: miss, no new sample
+        assert_eq!(session.frame_index(), 2);
+        assert_eq!(session.samples().last().unwrap().frame_index, 0);
     }
 
     #[test]
