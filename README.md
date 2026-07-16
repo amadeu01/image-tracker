@@ -69,6 +69,10 @@ crates/
 └── tracker-app    # adapters — ffmpeg subprocess IO, egui UI, overlay, export
 ```
 
+The reasoning behind the pipeline — decode/grayscale/matching/gap/smoothing/velocity/rep
+stages, why ZNCC and dual-template tracking, noise sources and filter theory — is
+written up in [docs/theory.md](docs/theory.md).
+
 Domain language lives in [CONTEXT.md](CONTEXT.md); architectural decisions in [docs/adr/](docs/adr/).
 
 ## Contributing
