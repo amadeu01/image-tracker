@@ -24,7 +24,7 @@ mod thumbnail_panel;
 mod toolbar;
 mod video_panel;
 
-pub use state::{AppState, Mode, Phase, Seed, DEFAULT_CALIBRATION_LENGTH_METERS};
+pub use state::{AppState, DisplayMode, Mode, Phase, Seed, DEFAULT_CALIBRATION_LENGTH_METERS};
 
 use std::path::PathBuf;
 

@@ -149,6 +149,46 @@ pub fn loss_severity_color(dark_mode: bool, severity: LossSeverity) -> Color32 {
     }
 }
 
+/// Chrome colors for the shell restyle (task 13.1): app background, panel
+/// fill, hairline borders, and the single accent blue used for the
+/// Live/Results toggle's pulsing dot and section-label emphasis. Distinct
+/// from `StatusKind`/`LossSeverity` (those color *values*/severity, this
+/// colors structural chrome), but same "translate, don't copy" rule from
+/// the design notes: dark-mode uses the mock's exact hex
+/// (`#141416`/`#1f1f24`/`#2c2c31`/`#6ea3ec`); light-mode is a fresh pick
+/// tuned for contrast against a near-white panel rather than a lightened
+/// version of the dark hex (the same reasoning `loss_severity_color`
+/// documents above).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChromePalette {
+    pub app_bg: Color32,
+    pub panel_bg: Color32,
+    pub border: Color32,
+    pub accent: Color32,
+}
+
+/// Returns the shell chrome palette for `dark_mode`. See `ChromePalette`.
+pub fn chrome_palette(dark_mode: bool) -> ChromePalette {
+    if dark_mode {
+        ChromePalette {
+            app_bg: Color32::from_rgb(0x14, 0x14, 0x16),
+            panel_bg: Color32::from_rgb(0x1f, 0x1f, 0x24),
+            border: Color32::from_rgb(0x2c, 0x2c, 0x31),
+            accent: Color32::from_rgb(0x6e, 0xa3, 0xec),
+        }
+    } else {
+        ChromePalette {
+            app_bg: Color32::from_rgb(0xf5, 0xf5, 0xf7),
+            panel_bg: Color32::from_rgb(0xff, 0xff, 0xff),
+            border: Color32::from_rgb(0xd8, 0xd8, 0xdc),
+            // Darker than the design's dark-mode accent so text/dots drawn
+            // in it stay >=3:1 against a near-white panel (the dark hex
+            // 0x6ea3ec fails that against white).
+            accent: Color32::from_rgb(0x2f, 0x6f, 0xd1),
+        }
+    }
+}
+
 /// Relative luminance (WCAG-style, sRGB-approximated) used only by the
 /// tests below to assert a text/background pair is actually readable,
 /// rather than eyeballing hex triples.
@@ -289,6 +329,49 @@ mod tests {
                 contrast_ratio(light, LIGHT_PANEL_BG) >= 3.0,
                 "{severity:?} light color {light:?} too low contrast on light panel"
             );
+        }
+    }
+
+    #[test]
+    fn chrome_palette_differs_between_dark_and_light_mode() {
+        let dark = chrome_palette(true);
+        let light = chrome_palette(false);
+        assert_ne!(dark.app_bg, light.app_bg);
+        assert_ne!(dark.panel_bg, light.panel_bg);
+        assert_ne!(dark.border, light.border);
+        assert_ne!(dark.accent, light.accent);
+    }
+
+    #[test]
+    fn chrome_palette_dark_hex_matches_the_design_mock() {
+        let dark = chrome_palette(true);
+        assert_eq!(dark.app_bg, Color32::from_rgb(0x14, 0x14, 0x16));
+        assert_eq!(dark.panel_bg, Color32::from_rgb(0x1f, 0x1f, 0x24));
+        assert_eq!(dark.border, Color32::from_rgb(0x2c, 0x2c, 0x31));
+        assert_eq!(dark.accent, Color32::from_rgb(0x6e, 0xa3, 0xec));
+    }
+
+    #[test]
+    fn chrome_palette_accent_is_readable_against_its_own_panel_background() {
+        // 3:1 (WCAG "large text"/UI-component bar) rather than 4.5:1: the
+        // accent is used for bold small labels and a status dot, not body
+        // copy.
+        for dark_mode in [true, false] {
+            let p = chrome_palette(dark_mode);
+            assert!(
+                contrast_ratio(p.accent, p.panel_bg) >= 3.0,
+                "dark_mode={dark_mode} accent {:?} too low contrast on panel {:?}",
+                p.accent,
+                p.panel_bg
+            );
+        }
+    }
+
+    #[test]
+    fn chrome_palette_panel_and_border_are_distinguishable() {
+        for dark_mode in [true, false] {
+            let p = chrome_palette(dark_mode);
+            assert_ne!(p.panel_bg, p.border);
         }
     }
 

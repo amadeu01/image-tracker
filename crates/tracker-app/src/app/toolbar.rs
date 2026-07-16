@@ -4,12 +4,23 @@
 
 use eframe::egui;
 
-use super::state::Mode;
+use super::palette;
+use super::state::{DisplayMode, Mode};
 use super::TrackerApp;
 
 pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
+            // Live/Results pill toggle (task 13.1, design's toolbar-right
+            // element): right-aligned within the same row as every other
+            // toolbar control, via a nested right-to-left layout — the
+            // standard egui pattern for "one group pinned to the far edge
+            // of a horizontal row while the rest flows left-to-right".
+            if let Some(state) = app.state.as_mut() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    display_mode_pill(ui, state);
+                });
+            }
             // Theme toggle (task 12.4): always available, independent of
             // whether a video is loaded. Reflects the *effective* theme
             // (`ctx.style().visuals.dark_mode`), which follows the system
@@ -204,4 +215,42 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
             }
         });
     });
+}
+
+/// Draws the Live/Results pill toggle (task 13.1): two selectable labels
+/// side by side, with a small dot next to "Live" that pulses (sine-wave
+/// alpha) while `Live` is selected — the design's "recording" affordance.
+/// Pure UI selection; task 13.6 owns building out the dedicated Live panel
+/// content this switches to.
+fn display_mode_pill(ui: &mut egui::Ui, state: &mut super::state::AppState) {
+    let dark_mode = ui.visuals().dark_mode;
+    let accent = palette::chrome_palette(dark_mode).accent;
+
+    if ui
+        .selectable_label(state.display_mode == DisplayMode::Results, "Results")
+        .on_hover_text("show the finished set's rep table, chart, and headline cards")
+        .clicked()
+    {
+        state.set_display_mode(DisplayMode::Results);
+    }
+    let live_selected = state.display_mode == DisplayMode::Live;
+    if ui
+        .selectable_label(live_selected, "Live")
+        .on_hover_text("show the in-progress run: live rep count and phase")
+        .clicked()
+    {
+        state.set_display_mode(DisplayMode::Live);
+    }
+    if live_selected {
+        // Pulsing dot: alpha oscillates with wall-clock time via egui's
+        // per-frame `input().time`, and `request_repaint` keeps frames
+        // flowing so the pulse actually animates instead of freezing at
+        // whatever alpha the last user-triggered repaint happened to catch.
+        let t = ui.input(|i| i.time);
+        let alpha = (0.5 + 0.5 * (t * 3.0).sin()) as f32;
+        let dot_color = accent.gamma_multiply(0.4 + 0.6 * alpha);
+        let (rect, _response) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+        ui.painter().circle_filled(rect.center(), 4.0, dot_color);
+        ui.ctx().request_repaint();
+    }
 }

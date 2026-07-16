@@ -20,6 +20,27 @@ use crate::tracking::TrackerSelection;
 
 const PANEL_WIDTH: f32 = 260.0;
 
+/// Section-header typography (task 13.1): the design specifies uppercase,
+/// small (~11px), letter-spaced labels rather than egui's default
+/// `heading()` (large, proportionally-weighted). egui has no letter-spacing
+/// primitive, so the ~11px tracking is approximated by joining the
+/// uppercased characters with a thin space (U+2009) — close enough to the
+/// design's "spaced out capitals" look without needing custom font shaping
+/// (the design notes explicitly say default fonts are fine for now). Color
+/// is the existing muted `StatusKind::Neutral` (not the new chrome accent)
+/// so labels read as quiet section dividers, not clickable/emphasized text.
+fn section_label(ui: &mut egui::Ui, text: &str) {
+    let spaced = text
+        .to_uppercase()
+        .chars()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join("\u{2009}");
+    let color = palette::status_color(ui.visuals().dark_mode, StatusKind::Neutral);
+    ui.label(egui::RichText::new(spaced).size(11.0).color(color).strong());
+    ui.add_space(2.0);
+}
+
 const STEPS: [(u8, &str); 5] = [
     (1, "Scrub to bar visible"),
     (2, "Place seed [S]"),
@@ -97,7 +118,7 @@ pub fn show(ctx: &egui::Context, state: Option<&mut AppState>) {
 /// Guide shown before any video is loaded (10.5): step 0, distinct from the
 /// numbered `STEPS` (which all assume a video is already open).
 fn empty_guide_section(ui: &mut egui::Ui) {
-    ui.heading("Guide");
+    section_label(ui, "Guide");
     ui.colored_label(
         palette::status_color(ui.visuals().dark_mode, StatusKind::Info),
         "▶ 0. Open a video [Ctrl+O]",
@@ -108,7 +129,7 @@ fn empty_guide_section(ui: &mut egui::Ui) {
 }
 
 fn guide_section(ui: &mut egui::Ui, state: &AppState) {
-    ui.heading("Guide");
+    section_label(ui, "Guide");
     let current = state.current_step().ordinal();
     for (id, label) in STEPS {
         let done = id < current;
@@ -148,7 +169,7 @@ fn guide_step_row(ui: &mut egui::Ui, id: u8, label: &str, done: bool, is_current
 }
 
 fn status_section(ui: &mut egui::Ui, state: &AppState) {
-    ui.heading("Status");
+    section_label(ui, "Status");
 
     ui.label(egui::RichText::new("Video").strong());
     let name = state
@@ -542,7 +563,7 @@ fn results_section(ui: &mut egui::Ui, state: &AppState) {
     let Some(results) = &state.results else {
         return;
     };
-    ui.heading("Results");
+    section_label(ui, "Results");
 
     match &results.velocity {
         Err(e) => {
@@ -806,7 +827,7 @@ fn open_containing_folder(path: &std::path::Path) {
 }
 
 fn events_section(ui: &mut egui::Ui, state: &AppState) {
-    ui.heading("Events");
+    section_label(ui, "Events");
     if state.events.is_empty() {
         ui.weak("(none yet)");
         return;

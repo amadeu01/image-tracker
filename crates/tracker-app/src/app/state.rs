@@ -32,6 +32,20 @@ pub enum Mode {
 /// 450mm bumper plate diameter.
 pub const DEFAULT_CALIBRATION_LENGTH_METERS: f64 = 0.450;
 
+/// Which of the design's two side-panel layouts the toolbar's Live/Results
+/// pill (task 13.1) currently selects. Distinct from `Mode` (which governs
+/// frame click-handling); this only decides which section of the side
+/// panel is emphasized. Task 13.1 is shell-only — it wires the toggle and
+/// this field, but doesn't build the dedicated Live panel described in the
+/// design notes (task 13.6); `Live` reuses whatever partial live UI already
+/// exists (the live rep counter in the Status section) rather than a new
+/// dedicated layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayMode {
+    Live,
+    Results,
+}
+
 /// A user-placed Seed: image-pixel position plus the frame it was placed on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Seed {
@@ -451,6 +465,13 @@ pub struct AppState {
     /// (`start_export`) or the session resets (`start_new_session`), so it
     /// never shows a stale file from a previous run/video.
     pub exported_files: Vec<PathBuf>,
+    /// The toolbar's Live/Results pill selection (task 13.1). Defaults to
+    /// `Results` — a freshly opened video has no live run active yet, and
+    /// `Results` is also where the "no results yet" empty state already
+    /// lives, so there's nothing to switch away from until tracking starts.
+    /// `start_tracking` flips it to `Live`; nothing currently flips it back
+    /// automatically (left for 13.6, which owns the dedicated Live panel).
+    pub display_mode: DisplayMode,
 }
 
 impl AppState {
@@ -479,7 +500,13 @@ impl AppState {
             benchmark_progress: None,
             benchmark_rows: None,
             exported_files: Vec::new(),
+            display_mode: DisplayMode::Results,
         }
+    }
+
+    /// Sets the Live/Results pill selection (task 13.1's toolbar toggle).
+    pub fn set_display_mode(&mut self, mode: DisplayMode) {
+        self.display_mode = mode;
     }
 
     /// Appends an event to the ring buffer, evicting the oldest if it's now
@@ -842,6 +869,9 @@ impl AppState {
         self.tracking_run = TrackingRunState::started();
         self.bar_path = None;
         self.live_reps = None;
+        // A fresh run has no results to show yet — flip the pill to Live
+        // (task 13.1) so the toolbar reflects what's actually happening.
+        self.display_mode = DisplayMode::Live;
     }
 
     /// Drains any pending messages from the active tracking worker,
@@ -951,6 +981,10 @@ impl AppState {
                     }
                     self.start_export(&results);
                     self.results = Some(results);
+                    // Results just became available — flip the pill back
+                    // (task 13.1) so the toolbar reflects the state a
+                    // finished run naturally lands in.
+                    self.display_mode = DisplayMode::Results;
                 }
             }
         }

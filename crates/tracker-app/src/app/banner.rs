@@ -17,15 +17,25 @@ pub fn show(ctx: &egui::Context, state: Option<&AppState>) {
     };
     let dark_mode = ctx.style().visuals.dark_mode;
     let (bg, text) = palette::banner_colors(dark_mode, banner_kind(state));
+    let border = palette::chrome_palette(dark_mode).border;
     egui::TopBottomPanel::top("mode_banner")
         .frame(
             egui::Frame::default()
                 .fill(bg)
-                .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
+                .inner_margin(egui::Margin::symmetric(10.0, 5.0))
+                .stroke(egui::Stroke::new(1.0, border)),
         )
         .show_separator_line(false)
         .show(ctx, |ui| {
-            ui.colored_label(text, state.banner_text());
+            // Design's hint bar is a single contextual sentence, terser
+            // than the rest of the chrome — same text/color logic as
+            // before this restyle, just a smaller point size so it reads
+            // as a hint strip rather than another heading-weight line.
+            ui.label(
+                egui::RichText::new(state.banner_text())
+                    .color(text)
+                    .size(12.5),
+            );
         });
 }
 

@@ -4,45 +4,69 @@
 
 use eframe::egui;
 
+use super::palette;
 use super::state::AppState;
 
+/// Design's status bar (task 13.1) is "a monospace one-liner: file · frame ·
+/// mode · seed · calibration" — `state.status_line()` already assembles the
+/// mode/seed/calibration clause (see `state.rs`), so this restyle is font +
+/// chrome only: every label goes through `egui::TextStyle::Monospace`
+/// (numbers/paths line up instead of proportional-font jitter) and the
+/// panel picks up the design's hairline top border via `chrome_palette`.
 pub fn show_status_bar(ctx: &egui::Context, state: Option<&AppState>) {
-    egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-        let Some(state) = state else {
-            ui.label("no video open — Ctrl+O or \"Open video…\"");
-            return;
-        };
-        ui.horizontal(|ui| {
-            ui.label(format!(
-                "{}  |  frame {}/{}  |  {}",
-                state.video_path.display(),
-                state.current_frame,
-                state.metadata.frame_count.unwrap_or(0).saturating_sub(1),
-                state.status_line(),
-            ));
-            let tracking_active = state.tracking.is_some()
-                || state.tracking_run.error.is_some()
-                || state.bar_path.is_some();
-            if tracking_active {
-                ui.separator();
-                let is_error = state.tracking_run.error.is_some();
-                let is_paused = state.tracking_run.session_state
-                    == Some(tracker_core::SessionState::NeedsReseed);
-                let color = if is_error {
-                    egui::Color32::RED
-                } else if is_paused {
-                    egui::Color32::YELLOW
-                } else {
-                    egui::Color32::LIGHT_GREEN
-                };
-                ui.colored_label(color, state.tracking_run.status_line());
-            }
-            if !state.status.is_empty() {
-                ui.separator();
-                ui.colored_label(egui::Color32::RED, &state.status);
-            }
+    let dark_mode = ctx.style().visuals.dark_mode;
+    let border = palette::chrome_palette(dark_mode).border;
+    egui::TopBottomPanel::bottom("status_bar")
+        .frame(egui::Frame::side_top_panel(&ctx.style()).stroke(egui::Stroke::new(1.0, border)))
+        .show(ctx, |ui| {
+            let Some(state) = state else {
+                ui.label(
+                    egui::RichText::new("no video open — Ctrl+O or \"Open video…\"").monospace(),
+                );
+                return;
+            };
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  ·  frame {}/{}  ·  {}",
+                        state.video_path.display(),
+                        state.current_frame,
+                        state.metadata.frame_count.unwrap_or(0).saturating_sub(1),
+                        state.status_line(),
+                    ))
+                    .monospace(),
+                );
+                let tracking_active = state.tracking.is_some()
+                    || state.tracking_run.error.is_some()
+                    || state.bar_path.is_some();
+                if tracking_active {
+                    ui.separator();
+                    let is_error = state.tracking_run.error.is_some();
+                    let is_paused = state.tracking_run.session_state
+                        == Some(tracker_core::SessionState::NeedsReseed);
+                    let color = if is_error {
+                        egui::Color32::RED
+                    } else if is_paused {
+                        egui::Color32::YELLOW
+                    } else {
+                        egui::Color32::LIGHT_GREEN
+                    };
+                    ui.label(
+                        egui::RichText::new(state.tracking_run.status_line())
+                            .monospace()
+                            .color(color),
+                    );
+                }
+                if !state.status.is_empty() {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(&state.status)
+                            .monospace()
+                            .color(egui::Color32::RED),
+                    );
+                }
+            });
         });
-    });
 }
 
 pub fn show_scrub_bar(ctx: &egui::Context, state: Option<&mut AppState>) {
