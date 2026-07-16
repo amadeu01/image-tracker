@@ -11,16 +11,6 @@ use super::TrackerApp;
 pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
-            // Live/Results pill toggle (task 13.1, design's toolbar-right
-            // element): right-aligned within the same row as every other
-            // toolbar control, via a nested right-to-left layout — the
-            // standard egui pattern for "one group pinned to the far edge
-            // of a horizontal row while the rest flows left-to-right".
-            if let Some(state) = app.state.as_mut() {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    display_mode_pill(ui, state);
-                });
-            }
             // Theme toggle (task 12.4): always available, independent of
             // whether a video is loaded. Reflects the *effective* theme
             // (`ctx.style().visuals.dark_mode`), which follows the system
@@ -213,6 +203,17 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                     state.start_new_session();
                 }
             }
+
+            // Live/Results pill toggle (task 13.1, design's toolbar-right
+            // element). Must be the LAST child of the row: a nested
+            // right-to-left layout claims all remaining row width, so
+            // drawing it first starves every later widget of space and
+            // makes the whole left toolbar vanish (found by fable-5 visual
+            // review of f897584 — clippy/tests/smoke all passed with the
+            // bug present).
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                display_mode_pill(ui, state);
+            });
         });
     });
 }
