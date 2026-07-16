@@ -3385,7 +3385,7 @@ dependencies = [
 
 [[package]]
 name = "tracker-app"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "directories",
  "eframe",
@@ -3402,7 +3402,7 @@ dependencies = [
 
 [[package]]
 name = "tracker-core"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "ttf-parser"
