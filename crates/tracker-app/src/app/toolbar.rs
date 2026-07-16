@@ -78,11 +78,57 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 if ui.add_enabled(ready, egui::Button::new("Resume")).clicked() {
                     state.resume_tracking();
                 }
+            } else if state.tracking.is_some() {
+                // Task 10.4: session lifecycle controls, shown while a run
+                // is active (running or user-paused) instead of the Track
+                // button — mirrors the reseed-pause branch above, which
+                // swaps Track for its own Resume.
+                if state.paused {
+                    if ui.button("Resume").clicked() {
+                        state.unpause_tracking();
+                    }
+                } else if ui
+                    .add_enabled(state.can_pause_tracking(), egui::Button::new("Pause"))
+                    .clicked()
+                {
+                    state.pause_tracking();
+                }
+                if ui
+                    .add_enabled(state.can_stop_tracking(), egui::Button::new("Stop"))
+                    .clicked()
+                {
+                    state.stop_tracking();
+                }
+                if ui
+                    .add_enabled(state.can_discard_tracking(), egui::Button::new("Discard"))
+                    .clicked()
+                {
+                    state.discard_tracking();
+                }
             } else if ui
                 .add_enabled(state.can_start_tracking(), egui::Button::new("Track"))
                 .clicked()
             {
                 state.start_tracking();
+            }
+
+            if state.can_start_new_session() || state.can_retrack() {
+                ui.separator();
+                if ui
+                    .add_enabled(state.can_retrack(), egui::Button::new("Re-track"))
+                    .clicked()
+                {
+                    state.retrack();
+                }
+                if ui
+                    .add_enabled(
+                        state.can_start_new_session(),
+                        egui::Button::new("New session"),
+                    )
+                    .clicked()
+                {
+                    state.start_new_session();
+                }
             }
         });
     });

@@ -225,6 +225,25 @@ pub struct ReseedCommand {
     pub position: Point,
 }
 
+/// A lifecycle command sent from the UI to a running/paused worker thread
+/// (task 10.4). Checked in `run_tracking_loop` before every frame read, so
+/// the worker never blocks on a decode/`Tracker::step` call it's about to be
+/// told to abandon.
+///
+/// `Pause` blocks the loop on this same channel (via `recv`, not
+/// `try_recv`) until `Resume` or `Stop` arrives — the pause is real frame
+/// consumption stopping, not a GUI-side overlay on top of a worker that
+/// keeps decoding underneath. `Stop` ends the run at the *next* checkpoint
+/// with whatever samples the session has accumulated so far — the same
+/// `Done`-with-partial-results path clean decode EOF already takes, so
+/// there's no separate "stopped" message variant to add.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlCommand {
+    Pause,
+    Resume,
+    Stop,
+}
+
 /// Pure UI-facing state accumulated from a run's `TrackingMessage`s. Kept
 /// separate from the thread/channel plumbing (`TrackingHandle` below) so
 /// it's unit-testable without spawning anything.
@@ -347,6 +366,7 @@ impl TrackingRunState {
 pub struct TrackingHandle {
     pub messages: Receiver<TrackingMessage>,
     reseed_tx: Sender<ReseedCommand>,
+    control_tx: Sender<ControlCommand>,
 }
 
 impl TrackingHandle {
@@ -359,6 +379,22 @@ impl TrackingHandle {
             video_frame_index,
             position,
         });
+    }
+
+    /// Task 10.4: pause the worker (stops frame consumption at the next
+    /// checkpoint) / resume a paused worker / stop the run early, keeping
+    /// whatever samples have been collected so far. Silently dropped if the
+    /// worker has already exited, same rationale as `resume`.
+    pub fn pause(&self) {
+        let _ = self.control_tx.send(ControlCommand::Pause);
+    }
+
+    pub fn unpause(&self) {
+        let _ = self.control_tx.send(ControlCommand::Resume);
+    }
+
+    pub fn stop(&self) {
+        let _ = self.control_tx.send(ControlCommand::Stop);
     }
 }
 
@@ -405,14 +441,16 @@ pub struct TrackingJob {
 pub fn spawn_tracking(job: TrackingJob) -> TrackingHandle {
     let (tx, rx) = mpsc::channel::<TrackingMessage>();
     let (reseed_tx, reseed_rx) = mpsc::channel::<ReseedCommand>();
+    let (control_tx, control_rx) = mpsc::channel::<ControlCommand>();
 
     thread::spawn(move || {
-        run_tracking_worker(job, &tx, &reseed_rx);
+        run_tracking_worker(job, &tx, &reseed_rx, &control_rx);
     });
 
     TrackingHandle {
         messages: rx,
         reseed_tx,
+        control_tx,
     }
 }
 
@@ -429,6 +467,7 @@ fn run_tracking_worker(
     job: TrackingJob,
     tx: &Sender<TrackingMessage>,
     reseed_rx: &Receiver<ReseedCommand>,
+    control_rx: &Receiver<ControlCommand>,
 ) {
     let TrackingJob {
         video_path,
@@ -530,7 +569,14 @@ fn run_tracking_worker(
         state: SessionState::Tracking,
     });
 
-    if let Err(e) = run_tracking_loop(&mut source, &mut session, seed_frame_index, tx, reseed_rx) {
+    if let Err(e) = run_tracking_loop(
+        &mut source,
+        &mut session,
+        seed_frame_index,
+        tx,
+        reseed_rx,
+        control_rx,
+    ) {
         tracing::error!(error = %e, "decode error during tracking run");
         let _ = tx.send(TrackingMessage::Error(e.to_string()));
         return;
@@ -602,8 +648,42 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
     seed_frame_index: u64,
     tx: &Sender<TrackingMessage>,
     reseed_rx: &Receiver<ReseedCommand>,
+    control_rx: &Receiver<ControlCommand>,
 ) -> Result<(), S::Error> {
     loop {
+        // Task 10.4: check for a Pause/Stop before touching the next frame,
+        // so Stop/Discard never has to wait on a decode or `Tracker::step`
+        // call it's about to be told to abandon. `Pause` blocks right here
+        // on `recv` (real frame-consumption stop, not a GUI-side overlay)
+        // until `Resume`/`Stop` arrives or the UI drops its handle (control
+        // channel closes), which is treated the same as `Stop`.
+        match control_rx.try_recv() {
+            Ok(ControlCommand::Stop) => {
+                tracing::info!("tracking stopped by user; ending with samples collected so far");
+                return Ok(());
+            }
+            Ok(ControlCommand::Pause) => {
+                tracing::info!("tracking paused by user");
+                loop {
+                    match control_rx.recv() {
+                        Ok(ControlCommand::Resume) => {
+                            tracing::info!("tracking resumed by user");
+                            break;
+                        }
+                        Ok(ControlCommand::Stop) => {
+                            tracing::info!(
+                                "tracking stopped by user while paused; ending with samples collected so far"
+                            );
+                            return Ok(());
+                        }
+                        Ok(ControlCommand::Pause) => continue,
+                        Err(_) => return Ok(()),
+                    }
+                }
+            }
+            Ok(ControlCommand::Resume) | Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {}
+        }
         match source.next_frame()? {
             Some(frame) => {
                 session.step(&frame);
@@ -1039,9 +1119,16 @@ mod tests {
         );
         let (tx, rx) = mpsc::channel::<TrackingMessage>();
         let (_reseed_tx, reseed_rx) = mpsc::channel::<ReseedCommand>();
+        let (_control_tx, control_rx) = mpsc::channel::<ControlCommand>();
 
-        let result =
-            run_tracking_loop(&mut source, &mut session, seed_frame_index, &tx, &reseed_rx);
+        let result = run_tracking_loop(
+            &mut source,
+            &mut session,
+            seed_frame_index,
+            &tx,
+            &reseed_rx,
+            &control_rx,
+        );
         assert!(result.is_ok());
 
         let messages: Vec<_> = rx.try_iter().collect();
@@ -1100,13 +1187,20 @@ mod tests {
         );
         let (tx, rx) = mpsc::channel::<TrackingMessage>();
         let (reseed_tx, reseed_rx) = mpsc::channel::<ReseedCommand>();
+        let (_control_tx, control_rx) = mpsc::channel::<ControlCommand>();
         // Simulate the UI/CLI dropping its handle while paused: the worker
         // is about to block on `reseed_rx.recv()`, so close the sender from
         // another thread once it does.
         drop(reseed_tx);
 
-        let result =
-            run_tracking_loop(&mut source, &mut session, seed_frame_index, &tx, &reseed_rx);
+        let result = run_tracking_loop(
+            &mut source,
+            &mut session,
+            seed_frame_index,
+            &tx,
+            &reseed_rx,
+            &control_rx,
+        );
 
         assert!(
             result.is_ok(),
@@ -1157,6 +1251,7 @@ mod tests {
         let mut session = TrackingSession::new(tracker, 0, Point::new(1.0, 1.0), session_config);
         let (tx, rx) = mpsc::channel::<TrackingMessage>();
         let (reseed_tx, reseed_rx) = mpsc::channel::<ReseedCommand>();
+        let (_control_tx, control_rx) = mpsc::channel::<ControlCommand>();
 
         // Resume it from a background thread right away so the worker's
         // blocking `recv()` unblocks with a real command instead of a
@@ -1170,8 +1265,14 @@ mod tests {
             });
         });
 
-        let result =
-            run_tracking_loop(&mut source, &mut session, seed_frame_index, &tx, &reseed_rx);
+        let result = run_tracking_loop(
+            &mut source,
+            &mut session,
+            seed_frame_index,
+            &tx,
+            &reseed_rx,
+            &control_rx,
+        );
         resumer.join().unwrap();
 
         assert!(result.is_ok());
@@ -1190,5 +1291,148 @@ mod tests {
             max_reported < frame_count as u64,
             "reported frame {max_reported} exceeds the {frame_count} frames actually fed"
         );
+    }
+
+    // -- Task 10.4: Pause/Resume/Stop -------------------------------------
+
+    /// `Stop` ends the run at the next checkpoint (before the next frame
+    /// read) with whatever samples the session collected so far, without
+    /// reading the rest of the source — the "Stop = finish now with partial
+    /// results" behavior the toolbar's Stop button relies on.
+    #[test]
+    fn stop_command_ends_the_run_early_with_partial_results() {
+        let (width, height) = (2u32, 2u32);
+        let frame_count = 20u8;
+        let mut source = frame_source_with(width, height, frame_count);
+        let tracker = ScriptedTracker {
+            miss_range: None,
+            frames_seen: 0,
+            position: Point::new(1.0, 1.0),
+        };
+        let seed_frame_index = 0u64;
+        let mut session = TrackingSession::new(
+            tracker,
+            0,
+            Point::new(1.0, 1.0),
+            session_config(TrackerTuning::default()),
+        );
+        let (tx, rx) = mpsc::channel::<TrackingMessage>();
+        let (_reseed_tx, reseed_rx) = mpsc::channel::<ReseedCommand>();
+        let (control_tx, control_rx) = mpsc::channel::<ControlCommand>();
+        control_tx.send(ControlCommand::Stop).unwrap();
+
+        let result = run_tracking_loop(
+            &mut source,
+            &mut session,
+            seed_frame_index,
+            &tx,
+            &reseed_rx,
+            &control_rx,
+        );
+
+        assert!(result.is_ok());
+        // Stop was seen before any frame was read: no Progress messages at
+        // all, and the source still has every frame unread.
+        assert_eq!(rx.try_iter().count(), 0);
+        assert!(source.next_frame().unwrap().is_some());
+    }
+
+    /// `Pause` genuinely stops frame consumption (blocks on `recv`, not a
+    /// GUI-side hold on top of a worker that keeps decoding): frames sent
+    /// after `Pause` but before `Resume` must never be reflected in
+    /// `frames_processed`-style progress until `Resume` arrives.
+    #[test]
+    fn pause_blocks_until_resume_then_continues_processing() {
+        let (width, height) = (2u32, 2u32);
+        let frame_count = 3u8;
+        let mut source = frame_source_with(width, height, frame_count);
+        let tracker = ScriptedTracker {
+            miss_range: None,
+            frames_seen: 0,
+            position: Point::new(1.0, 1.0),
+        };
+        let seed_frame_index = 0u64;
+        let mut session = TrackingSession::new(
+            tracker,
+            0,
+            Point::new(1.0, 1.0),
+            session_config(TrackerTuning::default()),
+        );
+        let (tx, rx) = mpsc::channel::<TrackingMessage>();
+        let (_reseed_tx, reseed_rx) = mpsc::channel::<ReseedCommand>();
+        let (control_tx, control_rx) = mpsc::channel::<ControlCommand>();
+        control_tx.send(ControlCommand::Pause).unwrap();
+
+        // Resume from a background thread after a short delay, proving the
+        // loop was genuinely blocked on `recv` in the meantime (a bug that
+        // let it fall through and keep decoding would make this test flaky
+        // in the other direction — passing even when the block is broken —
+        // so the resumer thread is what makes this an assertion of a wait,
+        // not a coincidence).
+        let resumer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            control_tx.send(ControlCommand::Resume).unwrap();
+        });
+
+        let result = run_tracking_loop(
+            &mut source,
+            &mut session,
+            seed_frame_index,
+            &tx,
+            &reseed_rx,
+            &control_rx,
+        );
+        resumer.join().unwrap();
+
+        assert!(result.is_ok());
+        // Ran to clean EOF once resumed: every frame was processed.
+        let messages: Vec<_> = rx.try_iter().collect();
+        let progress_count = messages
+            .iter()
+            .filter(|m| matches!(m, TrackingMessage::Progress { .. }))
+            .count();
+        assert_eq!(progress_count, frame_count as usize);
+    }
+
+    /// `Stop` received while blocked in `Pause` also ends the run cleanly
+    /// (not just `Resume`), so Discard-during-pause doesn't hang.
+    #[test]
+    fn stop_while_paused_ends_the_run_cleanly() {
+        let (width, height) = (2u32, 2u32);
+        let frame_count = 5u8;
+        let mut source = frame_source_with(width, height, frame_count);
+        let tracker = ScriptedTracker {
+            miss_range: None,
+            frames_seen: 0,
+            position: Point::new(1.0, 1.0),
+        };
+        let seed_frame_index = 0u64;
+        let mut session = TrackingSession::new(
+            tracker,
+            0,
+            Point::new(1.0, 1.0),
+            session_config(TrackerTuning::default()),
+        );
+        let (tx, rx) = mpsc::channel::<TrackingMessage>();
+        let (_reseed_tx, reseed_rx) = mpsc::channel::<ReseedCommand>();
+        let (control_tx, control_rx) = mpsc::channel::<ControlCommand>();
+        control_tx.send(ControlCommand::Pause).unwrap();
+        let resumer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            control_tx.send(ControlCommand::Stop).unwrap();
+        });
+
+        let result = run_tracking_loop(
+            &mut source,
+            &mut session,
+            seed_frame_index,
+            &tx,
+            &reseed_rx,
+            &control_rx,
+        );
+        resumer.join().unwrap();
+
+        assert!(result.is_ok());
+        assert_eq!(rx.try_iter().count(), 0, "no frames should have been read");
     }
 }

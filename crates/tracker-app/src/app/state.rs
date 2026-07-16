@@ -216,6 +216,12 @@ pub struct AppState {
     /// crosshair and status bar while `tracking` is active, and still holds
     /// the last-known state (including any error) after it finishes.
     pub tracking_run: TrackingRunState,
+    /// Whether the user has paused the active run (task 10.4) — distinct
+    /// from `tracking_run.session_state == NeedsReseed`, which is the
+    /// tracker itself pausing because it lost the object. `false` outside
+    /// an active run and reset whenever a run starts/finishes/is
+    /// discarded.
+    pub paused: bool,
     /// The completed `BarPath`, once a tracking run reaches clean
     /// end-of-video. Consumed by milestone 3 (overlay render / export).
     pub bar_path: Option<tracker_core::BarPath>,
@@ -257,6 +263,7 @@ impl AppState {
             status: String::new(),
             tracking: None,
             tracking_run: TrackingRunState::default(),
+            paused: false,
             bar_path: None,
             results: None,
             export: None,
@@ -671,6 +678,182 @@ impl AppState {
             format!("resumed tracking @ frame {}", seed.frame_index),
         );
     }
+
+    // -- Task 10.4: session lifecycle controls -----------------------------
+    //
+    // User pain this fixes: "had to kill the app to run tracking twice".
+    // Four run-time controls (Pause/Resume, Stop, Discard) plus two
+    // Review-step controls (New session, Re-track). All go through the
+    // worker's `ControlCommand` channel (`tracking.rs`) rather than being a
+    // GUI-side illusion on top of a worker that keeps decoding underneath —
+    // Pause genuinely blocks the worker's frame consumption, and Stop/
+    // Discard tell it to stop at the next checkpoint (promptly: checked
+    // before every frame read) rather than waiting for it to run to
+    // completion. Every action is gated by a `can_*` predicate the toolbar
+    // uses to enable/disable its buttons, and emits both a `tracing`
+    // breadcrumb and an `AppEvent`.
+
+    /// Whether Pause is currently available: an active run that isn't
+    /// already paused (either by the user or by the tracker's own
+    /// object-lost `NeedsReseed` state, which already halts consumption on
+    /// its own and has its own Resume button in the toolbar).
+    pub fn can_pause_tracking(&self) -> bool {
+        self.tracking.is_some()
+            && !self.paused
+            && self.tracking_run.session_state != Some(tracker_core::SessionState::NeedsReseed)
+    }
+
+    /// Pauses the active run: the worker stops consuming frames until
+    /// `unpause_tracking` is called. No-op if `can_pause_tracking` is false.
+    pub fn pause_tracking(&mut self) {
+        if !self.can_pause_tracking() {
+            return;
+        }
+        if let Some(handle) = &self.tracking {
+            handle.pause();
+        }
+        self.paused = true;
+        tracing::info!("tracking paused (user)");
+        self.push_event(EventLevel::Info, "tracking paused".to_string());
+    }
+
+    /// Whether Resume (from a user Pause, not a reseed) is currently
+    /// available.
+    pub fn can_unpause_tracking(&self) -> bool {
+        self.tracking.is_some() && self.paused
+    }
+
+    /// Resumes a user-paused run. No-op if `can_unpause_tracking` is false.
+    pub fn unpause_tracking(&mut self) {
+        if !self.can_unpause_tracking() {
+            return;
+        }
+        if let Some(handle) = &self.tracking {
+            handle.unpause();
+        }
+        self.paused = false;
+        tracing::info!("tracking resumed (user)");
+        self.push_event(EventLevel::Info, "tracking resumed".to_string());
+    }
+
+    /// Whether Stop is currently available: any active (running or paused)
+    /// run.
+    pub fn can_stop_tracking(&self) -> bool {
+        self.tracking.is_some()
+    }
+
+    /// Tells the worker to finish now, keeping whatever samples it has
+    /// collected so far: the worker still sends a normal `Done`, so
+    /// `poll_tracking` builds `SessionResults`/kicks off auto-export exactly
+    /// as it would for a run that reached clean end-of-video — the run just
+    /// lands in Review early, with partial results. No-op if
+    /// `can_stop_tracking` is false.
+    pub fn stop_tracking(&mut self) {
+        if !self.can_stop_tracking() {
+            return;
+        }
+        if let Some(handle) = &self.tracking {
+            handle.stop();
+        }
+        self.paused = false;
+        tracing::info!("tracking stop requested (user)");
+        self.push_event(
+            EventLevel::Info,
+            "stop requested: finishing with results so far".to_string(),
+        );
+    }
+
+    /// Whether Discard is currently available: same gate as Stop (any
+    /// active run).
+    pub fn can_discard_tracking(&self) -> bool {
+        self.tracking.is_some()
+    }
+
+    /// Aborts the active run and throws away anything it collected: unlike
+    /// `stop_tracking`, this never lands in Review — the worker is told to
+    /// stop (same `ControlCommand::Stop`, so it still terminates promptly
+    /// and its `FfmpegFrameSource` still gets dropped/killed) but its
+    /// eventual `Done`/`Error` message is simply never read, since
+    /// `self.tracking` is cleared here rather than left for `poll_tracking`
+    /// to drain. Returns the app to seed placement with the Seed intact —
+    /// the user re-tracks from the same seed rather than re-placing it. No-op
+    /// if `can_discard_tracking` is false.
+    pub fn discard_tracking(&mut self) {
+        if !self.can_discard_tracking() {
+            return;
+        }
+        if let Some(handle) = &self.tracking {
+            handle.stop();
+        }
+        self.tracking = None;
+        self.tracking_run = TrackingRunState::default();
+        self.bar_path = None;
+        self.results = None;
+        self.export = None;
+        self.paused = false;
+        self.mode = Mode::PlacingSeed;
+        tracing::info!("tracking discarded (user)");
+        self.push_event(EventLevel::Warn, "tracking discarded".to_string());
+    }
+
+    /// Whether the Review-step controls (New session / Re-track) are
+    /// available: only once a run has finished (`WorkflowStep::Review`).
+    fn in_review(&self) -> bool {
+        self.current_step() == WorkflowStep::Review
+    }
+
+    /// Whether "New session" is currently available.
+    pub fn can_start_new_session(&self) -> bool {
+        self.in_review()
+    }
+
+    /// Resets everything (Seed, Calibration, results, events) and returns to
+    /// step 1, keeping the same video loaded — the "New session" button. No
+    /// app restart, unlike before this task. No-op if `can_start_new_session`
+    /// is false.
+    pub fn start_new_session(&mut self) {
+        if !self.can_start_new_session() {
+            return;
+        }
+        self.seed = None;
+        self.calibration = None;
+        self.last_calibration_segment = None;
+        self.suggested_tracker = None;
+        self.tracking = None;
+        self.tracking_run = TrackingRunState::default();
+        self.paused = false;
+        self.bar_path = None;
+        self.results = None;
+        self.export = None;
+        self.mode = Mode::ViewOnly;
+        self.status.clear();
+        self.events.clear();
+        tracing::info!("new session started");
+        self.push_event(EventLevel::Info, "new session started".to_string());
+    }
+
+    /// Whether "Re-track" is currently available: Review step, and (since
+    /// it starts a fresh run immediately) a Seed to start from.
+    pub fn can_retrack(&self) -> bool {
+        self.in_review() && self.seed.is_some()
+    }
+
+    /// Keeps the Seed and Calibration, clears the previous run's results,
+    /// and immediately starts a new tracking run — the "Re-track" button.
+    /// No-op if `can_retrack` is false.
+    pub fn retrack(&mut self) {
+        if !self.can_retrack() {
+            return;
+        }
+        self.bar_path = None;
+        self.results = None;
+        self.export = None;
+        self.tracking_run = TrackingRunState::default();
+        self.paused = false;
+        tracing::info!("re-track started");
+        self.push_event(EventLevel::Info, "re-track started".to_string());
+        self.start_tracking();
+    }
 }
 
 #[cfg(test)]
@@ -1058,5 +1241,210 @@ mod tests {
         }
         assert!(state.results.is_some());
         assert_eq!(state.current_step(), WorkflowStep::Review);
+    }
+
+    // -- Task 10.4: session lifecycle controls ------------------------------
+
+    /// A `TrackingHandle` for gating/reset tests: `TrackingHandle`'s fields
+    /// are private outside `tracking.rs`, so the only way to get one here is
+    /// `spawn_tracking` itself. The job points at a nonexistent path — the
+    /// worker thread fails fast (`FfmpegFrameSource::spawn` errors) and
+    /// sends a `TrackingMessage::Error`, which is fine: these tests only
+    /// exercise `AppState`'s synchronous reducer logic (gating predicates,
+    /// field resets) around `Some(handle)`/`None`, never the message
+    /// contents.
+    fn dummy_tracking_handle() -> TrackingHandle {
+        tracking::spawn_tracking(tracking::TrackingJob {
+            video_path: PathBuf::from("/definitely/does/not/exist-10-4.mp4"),
+            width: 4,
+            height: 4,
+            fps_num: 30,
+            fps_den: 1,
+            seed_frame_index: 0,
+            seed_position: tracker_core::Point::new(0.0, 0.0),
+            tracker_config: tracking::default_tracker_config(),
+            session_config: tracking::default_session_config(),
+            tracker_selection: tracking::TrackerSelection::Auto,
+            color_tracker_config: tracking::default_color_tracker_config(),
+        })
+    }
+
+    fn state_with_active_run() -> AppState {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.toggle_placing_seed();
+        state.set_frame(3);
+        state.place_seed(tracker_core::Point::new(5.0, 5.0));
+        state.tracking = Some(dummy_tracking_handle());
+        state.tracking_run = TrackingRunState::started();
+        state
+    }
+
+    #[test]
+    fn pause_tracking_sets_paused_flag_and_is_gated_on_an_active_unpaused_run() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        assert!(!state.can_pause_tracking());
+        state.pause_tracking();
+        assert!(!state.paused, "no active run: pause must be a no-op");
+
+        let mut state = state_with_active_run();
+        assert!(state.can_pause_tracking());
+        state.pause_tracking();
+        assert!(state.paused);
+        assert!(!state.can_pause_tracking(), "already paused");
+        assert!(state.can_unpause_tracking());
+    }
+
+    #[test]
+    fn pause_is_unavailable_while_the_tracker_itself_is_paused_for_reseed() {
+        let mut state = state_with_active_run();
+        state.tracking_run.session_state = Some(tracker_core::SessionState::NeedsReseed);
+        assert!(
+            !state.can_pause_tracking(),
+            "NeedsReseed already halts consumption; the reseed flow owns Resume, not Pause"
+        );
+    }
+
+    #[test]
+    fn unpause_tracking_clears_paused_flag() {
+        let mut state = state_with_active_run();
+        state.pause_tracking();
+        assert!(state.paused);
+        state.unpause_tracking();
+        assert!(!state.paused);
+        assert!(!state.can_unpause_tracking());
+    }
+
+    #[test]
+    fn stop_tracking_is_gated_on_an_active_run_and_pushes_an_event() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        assert!(!state.can_stop_tracking());
+        state.stop_tracking();
+        assert!(
+            state.events.is_empty(),
+            "no active run: stop must be a no-op"
+        );
+
+        let mut state = state_with_active_run();
+        assert!(state.can_stop_tracking());
+        state.stop_tracking();
+        let event = state.events.back().unwrap();
+        assert!(event.message.contains("stop requested"));
+        // Stop is a request to the worker, not an immediate teardown: the
+        // handle/tracking_run stay in place until the worker's `Done`
+        // arrives via `poll_tracking`, same as a clean-EOF finish.
+        assert!(state.tracking.is_some());
+    }
+
+    #[test]
+    fn discard_tracking_tears_down_the_run_but_keeps_the_seed_and_returns_to_placing_seed() {
+        let mut state = state_with_active_run();
+        state.calibration = tracker_core::Calibration::new(
+            tracker_core::Point::new(0.0, 0.0),
+            tracker_core::Point::new(100.0, 0.0),
+            1.0,
+        )
+        .ok();
+        let seed_before = state.seed;
+
+        assert!(state.can_discard_tracking());
+        state.discard_tracking();
+
+        assert!(state.tracking.is_none());
+        assert!(!state.tracking_run.running);
+        assert!(state.bar_path.is_none());
+        assert!(state.results.is_none());
+        assert!(!state.paused);
+        assert_eq!(state.mode, Mode::PlacingSeed);
+        // The whole point: seed survives so the user re-tracks without
+        // re-placing it.
+        assert_eq!(state.seed, seed_before);
+        assert!(state.seed.is_some());
+        // Calibration is untouched by Discard too.
+        assert!(state.calibration.is_some());
+        let event = state.events.back().unwrap();
+        assert_eq!(event.level, EventLevel::Warn);
+        assert!(event.message.contains("discarded"));
+    }
+
+    #[test]
+    fn discard_tracking_is_a_noop_without_an_active_run() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        assert!(!state.can_discard_tracking());
+        state.discard_tracking();
+        assert!(state.events.is_empty());
+    }
+
+    fn state_in_review() -> AppState {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(30)));
+        state.toggle_placing_seed();
+        state.place_seed(tracker_core::Point::new(1.0, 1.0));
+        state.calibration = tracker_core::Calibration::new(
+            tracker_core::Point::new(0.0, 0.0),
+            tracker_core::Point::new(100.0, 0.0),
+            1.0,
+        )
+        .ok();
+        let bar_path = one_rep_bar_path();
+        state.bar_path = Some(bar_path.clone());
+        state.results = Some(SessionResults::build(bar_path, state.calibration, 0));
+        assert_eq!(state.current_step(), WorkflowStep::Review);
+        state
+    }
+
+    #[test]
+    fn new_session_resets_seed_calibration_results_and_events_and_returns_to_step_one() {
+        let mut state = state_in_review();
+        assert!(state.can_start_new_session());
+        state.start_new_session();
+
+        assert!(state.seed.is_none());
+        assert!(state.calibration.is_none());
+        assert!(state.last_calibration_segment.is_none());
+        assert!(state.bar_path.is_none());
+        assert!(state.results.is_none());
+        assert!(state.tracking.is_none());
+        assert_eq!(state.mode, Mode::ViewOnly);
+        assert_eq!(state.current_step(), WorkflowStep::PlaceSeed);
+        // Same video: `video_path`/`metadata` untouched (no app restart).
+        assert_eq!(state.video_path, PathBuf::from("x.mp4"));
+        // Events were cleared, but the "new session started" event itself
+        // was pushed after clearing, so exactly one remains.
+        assert_eq!(state.events.len(), 1);
+        assert!(state.events.back().unwrap().message.contains("new session"));
+    }
+
+    #[test]
+    fn new_session_is_unavailable_outside_review() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        assert!(!state.can_start_new_session());
+        state.start_new_session();
+        assert!(state.events.is_empty());
+    }
+
+    #[test]
+    fn retrack_preserves_seed_and_calibration_clears_results_and_starts_tracking_immediately() {
+        let mut state = state_in_review();
+        let seed_before = state.seed;
+        let cal_before = state.calibration;
+        assert!(state.can_retrack());
+
+        state.retrack();
+
+        assert_eq!(state.seed, seed_before);
+        assert_eq!(state.calibration, cal_before);
+        assert!(state.bar_path.is_none());
+        assert!(state.results.is_none());
+        // `start_tracking` was called as part of retrack: a new run is
+        // active immediately, no extra click needed.
+        assert!(state.tracking.is_some());
+        assert!(state.tracking_run.running);
+    }
+
+    #[test]
+    fn retrack_is_unavailable_without_a_seed_or_outside_review() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        assert!(!state.can_retrack());
+        state.retrack();
+        assert!(state.tracking.is_none());
     }
 }
