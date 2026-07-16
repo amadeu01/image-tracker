@@ -85,9 +85,11 @@ fn output_paths(video_path: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathB
 fn write_file(tx: &Sender<ExportMessage>, path: &Path, contents: &str) {
     match std::fs::write(path, contents) {
         Ok(()) => {
+            tracing::info!(path = %path.display(), "export file done");
             let _ = tx.send(ExportMessage::Written(path.to_path_buf()));
         }
         Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "export file failed");
             let _ = tx.send(ExportMessage::Error(format!(
                 "failed to write {}: {e}",
                 path.display()
@@ -113,6 +115,8 @@ fn run_export(job: ExportJob, tx: &Sender<ExportMessage>) {
     let (csv_path, json_path, reps_csv_path, reps_json_path, overlay_path) =
         output_paths(&video_path);
 
+    tracing::info!(video = %video_path.display(), "export job started");
+
     write_file(
         tx,
         &csv_path,
@@ -137,9 +141,11 @@ fn run_export(job: ExportJob, tx: &Sender<ExportMessage>) {
         &reps,
     ) {
         Ok(()) => {
+            tracing::info!(path = %overlay_path.display(), "export file done");
             let _ = tx.send(ExportMessage::Written(overlay_path));
         }
         Err(e) => {
+            tracing::warn!(path = %overlay_path.display(), error = %e, "export file failed");
             let _ = tx.send(ExportMessage::Error(format!(
                 "failed to write {}: {e}",
                 overlay_path.display()
@@ -147,6 +153,7 @@ fn run_export(job: ExportJob, tx: &Sender<ExportMessage>) {
         }
     }
 
+    tracing::info!(video = %video_path.display(), "export job done");
     let _ = tx.send(ExportMessage::Done);
 }
 

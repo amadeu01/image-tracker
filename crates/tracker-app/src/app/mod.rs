@@ -169,13 +169,16 @@ impl TrackerApp {
     /// rather than left to crash the app — it stays exactly as usable as it
     /// was before the attempt.
     pub fn prompt_open_video(&mut self) {
+        tracing::info!("file dialog opened");
         let Some(path) = rfd::FileDialog::new()
             .set_title("Open video")
             .add_filter("Video", VIDEO_EXTENSIONS)
             .pick_file()
         else {
+            tracing::info!("file dialog cancelled");
             return; // dialog cancelled
         };
+        tracing::info!(path = %path.display(), "file dialog picked path");
         self.open_video(path);
     }
 
@@ -186,10 +189,11 @@ impl TrackerApp {
         match crate::ffprobe::probe(&video_path) {
             Ok(metadata) => {
                 tracing::info!(video = %video_path.display(), "opening video");
+                let metadata_for_event = metadata;
                 self.load_video(video_path.clone(), metadata);
                 self.open_error = None;
                 if let Some(state) = &mut self.state {
-                    state.note_video_opened(&video_path);
+                    state.note_video_opened(&video_path, &metadata_for_event);
                 }
             }
             Err(e) => {

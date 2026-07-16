@@ -649,6 +649,14 @@ pub fn run_compare(args: CompareArgs) -> Result<(), CompareError> {
     let base_tuning = TrackerTuning::default();
     let coast_limit = tracking::DEFAULT_COAST_LIMIT;
 
+    tracing::info!(
+        video = %args.video_path.display(),
+        seed_frame = args.seed_frame,
+        frames = args.frames,
+        strategy_count = strategy_matrix().len(),
+        "compare benchmark started"
+    );
+
     let rows = run_benchmark(
         &args.video_path,
         metadata.display_width(),
@@ -658,6 +666,14 @@ pub fn run_compare(args: CompareArgs) -> Result<(), CompareError> {
         args.frames,
         coast_limit,
         &base_tuning,
+    );
+
+    let winner_label = recommend(&rows.iter().map(|r| r.metrics).collect::<Vec<_>>())
+        .map(|i| rows[i].strategy.label());
+    tracing::info!(
+        strategy_count = rows.len(),
+        winner = winner_label.as_deref(),
+        "compare benchmark done"
     );
 
     println!(

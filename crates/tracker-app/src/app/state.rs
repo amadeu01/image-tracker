@@ -604,9 +604,34 @@ impl AppState {
     /// after a fresh `AppState` is constructed for it), so the Events
     /// section shows what just happened rather than the user having to
     /// infer it from the file name in the status bar changing.
-    pub fn note_video_opened(&mut self, path: &std::path::Path) {
-        tracing::info!(video = %path.display(), "video opened");
-        self.push_event(EventLevel::Info, format!("opened {}", path.display()));
+    pub fn note_video_opened(
+        &mut self,
+        path: &std::path::Path,
+        metadata: &crate::ffprobe::VideoMetadata,
+    ) {
+        tracing::info!(
+            video = %path.display(),
+            width = metadata.display_width(),
+            height = metadata.display_height(),
+            fps_num = metadata.fps_num,
+            fps_den = metadata.fps_den,
+            rotation = metadata.rotation,
+            "video opened"
+        );
+        self.push_event(
+            EventLevel::Info,
+            format!(
+                "opened {} ({}x{} @ {}/{} fps, rotation {})",
+                path.display(),
+                metadata.display_width(),
+                metadata.display_height(),
+                metadata.fps_num,
+                metadata.fps_den,
+                metadata
+                    .rotation
+                    .map_or("none".to_string(), |r| r.to_string()),
+            ),
+        );
     }
 
     /// Records an arbitrary error as an `AppEvent` (task 10.5's "Open
@@ -911,9 +936,19 @@ impl AppState {
         let Some(seed) = self.seed else { return };
         let tuning = self.settings.tuning();
         let coast_limit = self.settings.coast_limit;
+        let strategy_count = crate::compare::strategy_matrix().len();
+        tracing::info!(
+            video = %self.video_path.display(),
+            seed_frame = seed.frame_index,
+            strategy_count,
+            "strategy benchmark started"
+        );
         self.push_event(
             EventLevel::Info,
-            format!("strategy benchmark started @ frame {}", seed.frame_index),
+            format!(
+                "strategy benchmark started @ frame {} ({strategy_count} strategies)",
+                seed.frame_index
+            ),
         );
         let handle = crate::compare::spawn_benchmark(
             self.video_path.clone(),
@@ -953,10 +988,23 @@ impl AppState {
                     self.benchmark_progress = Some((strategy_index, total));
                 }
                 crate::compare::BenchmarkMessage::Done(rows) => {
-                    self.push_event(
-                        EventLevel::Info,
-                        format!("strategy benchmark complete ({} strategies)", rows.len()),
+                    let winner_label = crate::compare::recommend(
+                        &rows.iter().map(|r| r.metrics).collect::<Vec<_>>(),
+                    )
+                    .map(|i| rows[i].strategy.label());
+                    let message = match &winner_label {
+                        Some(label) => format!(
+                            "strategy benchmark complete ({} strategies, winner: {label})",
+                            rows.len()
+                        ),
+                        None => format!("strategy benchmark complete ({} strategies)", rows.len()),
+                    };
+                    tracing::info!(
+                        strategy_count = rows.len(),
+                        winner = winner_label.as_deref(),
+                        "strategy benchmark done"
                     );
+                    self.push_event(EventLevel::Info, message);
                     self.benchmark_rows = Some(rows);
                     self.benchmark = None;
                     self.benchmark_progress = None;
@@ -1844,11 +1892,13 @@ mod tests {
     #[test]
     fn note_video_opened_pushes_an_info_event_naming_the_file() {
         let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
-        state.note_video_opened(std::path::Path::new("/tmp/new-video.mp4"));
+        state.note_video_opened(std::path::Path::new("/tmp/new-video.mp4"), &meta(Some(10)));
         let event = state.events.back().unwrap();
         assert_eq!(event.level, EventLevel::Info);
         assert!(event.message.contains("opened"));
         assert!(event.message.contains("new-video.mp4"));
+        assert!(event.message.contains("4x4"));
+        assert!(event.message.contains("30/1"));
     }
 
     #[test]
@@ -1869,7 +1919,7 @@ mod tests {
     #[test]
     fn a_fresh_app_state_for_a_newly_opened_video_carries_no_prior_session_state() {
         let mut previous = state_in_review();
-        previous.note_video_opened(std::path::Path::new("first.mp4"));
+        previous.note_video_opened(std::path::Path::new("first.mp4"), &meta(Some(10)));
         assert!(previous.seed.is_some());
         assert!(previous.results.is_some());
 

@@ -56,6 +56,8 @@ pub fn spawn_thumbnails(
         thumbnail_strip::sample_frame_indices(frame_count, thumbnail_strip::THUMBNAIL_COUNT);
     let (tx, rx) = mpsc::channel::<ThumbnailMessage>();
 
+    tracing::info!(count = frame_indices.len(), "thumbnail worker started");
+
     let indices_for_thread = frame_indices.clone();
     thread::spawn(move || {
         let mut decoder = SeekingFrameDecoder::new(video_path, width, height, fps_num, fps_den);
@@ -94,6 +96,7 @@ pub fn spawn_thumbnails(
                 }
             }
         }
+        tracing::info!(count = indices_for_thread.len(), "thumbnail worker done");
         let _ = tx.send(ThumbnailMessage::Done);
     });
 
