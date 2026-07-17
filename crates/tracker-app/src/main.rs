@@ -82,7 +82,7 @@ fn main() {
             Ok(a) => a,
             Err(e) => {
                 eprintln!(
-                    "usage: tracker-app compare <video> --seed-frame N --seed X,Y [--frames N] [--out path.json]"
+                    "usage: tracker-app compare <video> --seed-frame N --seed X,Y [--frames N] [--full] [--out path.json] [--export-overlays] [--out-dir dir]"
                 );
                 eprintln!("error: {e}");
                 std::process::exit(2);
