@@ -74,6 +74,36 @@ How each remaining design element maps onto egui 0.29 primitives — workers on
   every UI task (Xvfb recipe: `env -u WAYLAND_DISPLAY xvfb-run` + ImageMagick
   `import -window root`; app must be given a video arg to show full chrome).
 
+## Design-fidelity gap audit (fable-5, 2026-07-17 — user: "GUI not even close")
+
+Side-by-side of the mock vs our dark-mode screenshot. 13.1 shipped pieces
+(pill, section labels, monospace, palette constants) but never wired the
+palette into egui's global style — root cause of the whole gap. → task 13.7:
+
+1. `ChromePalette` → `egui::Style`/`Visuals` for both themes: `panel_fill`,
+   `window_fill`, `extreme_bg_color`, widget `bg_fill`/`weak_bg_fill`,
+   `bg_stroke` (hairlines #2c2c31), rounding 4.0 widgets / 6.0 cards,
+   selection color = accent. Dark uses the design hex exactly; light keeps
+   the existing contrast-tested equivalents. One function
+   (`palette::apply_chrome(ctx, dark_mode)`) called on startup + theme
+   toggle — never per-frame.
+2. Card chrome helper (`section_card`) wrapping every side-panel section
+   (guide, status, settings, results blocks already have headline cards —
+   unify) in #1f1f24 fill + border + 6.0 rounding + 14px inner margin.
+3. Right panel: 460px default (design), fill #18181b (new `side_bg` field
+   on `ChromePalette`).
+4. Hint bar: quiet strip (#202024 bg, muted text 12.5px), not a colored
+   status banner; keep severity colors only for real warnings/errors.
+5. Buttons: dark #26262b fill, #3a3a40 border, 4.0 rounding via the global
+   widget visuals from (1) — no per-button styling.
+6. Filmstrip: design replaced it with the segment scrub + transport row.
+   Keep the strip available but collapsed by default once results exist
+   (segments become the primary navigation); still shown pre-tracking.
+7. Verification: dark-mode Xvfb screenshot (set `dark_mode:true` in a
+   scratch XDG_STATE_HOME, don't touch the user's real settings.json)
+   compared against the mock at matching window size; light mode contrast
+   tests must stay green.
+
 ## Deliberate deviations
 
 - Design's "▶" implies actual clip playback; v1 in-app playback = playhead loop between in/out via existing seek decoder (real-time-ish), true decoded playback stays on ROADMAP.
