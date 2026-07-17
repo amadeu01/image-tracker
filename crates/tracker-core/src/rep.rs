@@ -252,10 +252,19 @@ pub fn segment_reps(velocity: &[VelocitySample], config: RepSegmentationConfig) 
 
 /// Absolute vertical travel over a run, by trapezoidal integration of `vy`
 /// over the run's sample times. Units follow the samples (px or m).
+///
+/// Assumes strictly increasing `t_seconds` — `velocity_series` already
+/// rejects non-monotonic input (`VelocityError::NonMonotonicTime`), so
+/// every caller in this crate feeds monotone times; `dt` is still clamped
+/// to ≥0 so a hostile direct caller degrades to underestimating travel
+/// (rep discarded) rather than producing negative/NaN displacement.
+/// Slight underestimate vs true ROM is inherent: only samples inside the
+/// run are integrated, excluding sub-dead-band ramp tails — fine given the
+/// 40 px gate vs ~190 px real-rep margin.
 fn run_displacement(velocity: &[VelocitySample], run: &Run) -> f64 {
     let mut displacement = 0.0;
     for k in run.start..run.end {
-        let dt = velocity[k + 1].t_seconds - velocity[k].t_seconds;
+        let dt = (velocity[k + 1].t_seconds - velocity[k].t_seconds).max(0.0);
         displacement += 0.5 * (velocity[k].vy + velocity[k + 1].vy) * dt;
     }
     displacement.abs()
