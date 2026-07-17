@@ -1400,8 +1400,8 @@ impl AppState {
         self.push_event(EventLevel::Info, "tracking resumed".to_string());
     }
 
-    /// Whether Stop is currently available: any active (running or paused)
-    /// run.
+    /// Whether Finish (task 15.4 rename of Stop) is currently available:
+    /// any active (running, user-paused, or reseed-paused) run.
     pub fn can_stop_tracking(&self) -> bool {
         self.tracking.is_some()
     }
@@ -1420,14 +1420,14 @@ impl AppState {
             handle.stop();
         }
         self.paused = false;
-        tracing::info!("tracking stop requested (user)");
+        tracing::info!("tracking finish requested (user)");
         self.push_event(
             EventLevel::Info,
-            "stop requested: finishing with results so far".to_string(),
+            "finish requested: ending the run with results so far".to_string(),
         );
     }
 
-    /// Whether Discard is currently available: same gate as Stop (any
+    /// Whether Discard is currently available: same gate as Finish (any
     /// active run).
     pub fn can_discard_tracking(&self) -> bool {
         self.tracking.is_some()
@@ -2169,8 +2169,8 @@ mod tests {
         assert!(state.can_stop_tracking());
         state.stop_tracking();
         let event = state.events.back().unwrap();
-        assert!(event.message.contains("stop requested"));
-        // Stop is a request to the worker, not an immediate teardown: the
+        assert!(event.message.contains("finish requested"));
+        // Finish is a request to the worker, not an immediate teardown: the
         // handle/tracking_run stay in place until the worker's `Done`
         // arrives via `poll_tracking`, same as a clean-EOF finish.
         assert!(state.tracking.is_some());

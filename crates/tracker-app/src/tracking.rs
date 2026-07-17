@@ -818,8 +818,47 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
                         video_frame_index = seed_frame_index + session.frame_index(),
                         "tracking needs reseed: object lost, waiting for a new seed"
                     );
-                    match reseed_rx.recv() {
-                        Ok(cmd) => {
+                    // Task 15.4: this wait must observe *both* channels.
+                    // Blocking on `reseed_rx.recv()` alone left
+                    // `ControlCommand::Stop` queued unread for the whole
+                    // pause — the user's Stop/Finish was ignored until a
+                    // reseed arrived (real session: Finish hit twice, run
+                    // kept going). std mpsc has no select, and crossbeam
+                    // isn't a dependency, so alternate: block on the reseed
+                    // channel with a short timeout, and on each timeout
+                    // drain `control_rx` for a Stop (which ends the run via
+                    // the same Ok(()) -> Done-with-partial-samples path as
+                    // every other checkpoint; Discard also sends Stop).
+                    // Pause/Resume during a reseed-wait are no-ops: the
+                    // worker is already not consuming frames, and the
+                    // resume that matters is the reseed itself.
+                    let reseed = loop {
+                        match reseed_rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                            Ok(cmd) => break Some(cmd),
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                let mut stop = false;
+                                while let Ok(cmd) = control_rx.try_recv() {
+                                    if cmd == ControlCommand::Stop {
+                                        stop = true;
+                                    }
+                                }
+                                if stop {
+                                    tracing::info!(
+                                        "tracking stopped by user while awaiting reseed; \
+                                         ending with samples collected so far"
+                                    );
+                                    return Ok(());
+                                }
+                            }
+                            // Reseed channel closed while paused: same
+                            // channel-closed semantics as before (see the
+                            // doc comment above) — end the run cleanly so
+                            // the caller emits Done with partial samples.
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break None,
+                        }
+                    };
+                    match reseed {
+                        Some(cmd) => {
                             let relative = cmd.video_frame_index.saturating_sub(seed_frame_index);
                             session.reseed(relative, cmd.position);
                             tracing::info!(
@@ -843,7 +882,7 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
                         // far, rather than leaving the run silently
                         // "running" forever from the caller's point of
                         // view.
-                        Err(_) => {
+                        None => {
                             tracing::info!(
                                 "reseed channel closed while paused; ending run with samples collected so far"
                             );
@@ -1596,6 +1635,77 @@ mod tests {
             .filter(|m| matches!(m, TrackingMessage::Progress { .. }))
             .count();
         assert_eq!(progress_count, frame_count as usize);
+    }
+
+    /// Task 15.4 regression: `Stop` (the toolbar's Finish) sent while the
+    /// worker is blocked *awaiting a reseed* (`NeedsReseed`) must end the
+    /// run promptly with the samples collected so far, exactly like Stop at
+    /// any other checkpoint. Before the fix the reseed wait blocked on
+    /// `reseed_rx.recv()` alone and never read `control_rx`, so Stop queued
+    /// unread and the run stayed paused forever (real user session: Stop
+    /// hit twice, run kept going).
+    #[test]
+    fn stop_command_is_honored_while_paused_awaiting_reseed() {
+        let (width, height) = (2u32, 2u32);
+        let frame_count = 8u8;
+        let mut source = frame_source_with(width, height, frame_count);
+        // Miss from frame 0 so the session pauses (NeedsReseed) well before
+        // the source's EOF.
+        let tracker = ScriptedTracker {
+            miss_range: Some((0, u64::MAX)),
+            frames_seen: 0,
+            position: Point::new(1.0, 1.0),
+        };
+        let seed_frame_index = 0u64;
+        let mut session = TrackingSession::new(
+            tracker,
+            0,
+            Point::new(1.0, 1.0),
+            session_config(TrackerTuning::default()),
+        );
+        let (tx, rx) = mpsc::channel::<TrackingMessage>();
+        // Keep the reseed sender alive for the whole run: the loop must end
+        // because Stop was seen, not because the reseed channel closed.
+        let (reseed_tx, reseed_rx) = mpsc::channel::<ReseedCommand>();
+        let (control_tx, control_rx) = mpsc::channel::<ControlCommand>();
+        let stopper = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            control_tx.send(ControlCommand::Stop).unwrap();
+        });
+
+        let result = run_tracking_loop(
+            &mut source,
+            &mut session,
+            seed_frame_index,
+            &tx,
+            &reseed_rx,
+            &control_rx,
+        );
+        stopper.join().unwrap();
+        drop(reseed_tx);
+
+        assert!(
+            result.is_ok(),
+            "loop must end cleanly on Stop while awaiting a reseed"
+        );
+        assert_eq!(
+            session.state(),
+            SessionState::NeedsReseed,
+            "session was never reseeded: Stop, not a reseed, ended the wait"
+        );
+        // Progress messages were sent up to the pause; the caller will turn
+        // the session's partial samples into Done. The loop must not have
+        // read past the pause point.
+        let messages: Vec<_> = rx.try_iter().collect();
+        let max_reported = messages
+            .iter()
+            .filter_map(|m| m.video_frame_index())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_reported < frame_count as u64 - 1,
+            "run read past the pause point after Stop (max reported {max_reported})"
+        );
     }
 
     /// `Stop` received while blocked in `Pause` also ends the run cleanly

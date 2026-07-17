@@ -147,6 +147,11 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                     {
                         state.resume_tracking();
                     }
+                    // Task 15.4: the user must be able to end the run from
+                    // the reseed pause too — this is exactly where a real
+                    // session got stuck hitting a Finish that only the
+                    // running-branch below offered.
+                    finish_discard_buttons(ui, state);
                 } else if state.tracking.is_some() {
                     // Task 10.4: session lifecycle controls, shown while a run
                     // is active (running or user-paused) instead of the Track
@@ -167,20 +172,7 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                     {
                         state.pause_tracking();
                     }
-                    if ui
-                        .add_enabled(state.can_stop_tracking(), egui::Button::new("Stop"))
-                        .on_hover_text("stop now and keep the results collected so far")
-                        .clicked()
-                    {
-                        state.stop_tracking();
-                    }
-                    if ui
-                        .add_enabled(state.can_discard_tracking(), egui::Button::new("Discard"))
-                        .on_hover_text("abort the run and throw away its results, keeping the seed")
-                        .clicked()
-                    {
-                        state.discard_tracking();
-                    }
+                    finish_discard_buttons(ui, state);
                 } else if ui
                     .add_enabled(state.can_start_tracking(), egui::Button::new("Track"))
                     .on_hover_text("start tracking the seeded object from its frame to the end")
@@ -228,6 +220,31 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                 });
             });
         });
+}
+
+/// Finish/Discard controls for an active run (task 15.4): shown both in the
+/// running/user-paused branch and in the reseed-pause branch, so the user
+/// can always end a run — the reseed pause previously offered only Resume,
+/// which is where a real session got stuck. "Finish" (renamed from "Stop")
+/// keeps the results collected so far; a finished run can't resume.
+fn finish_discard_buttons(ui: &mut egui::Ui, state: &mut super::state::AppState) {
+    if ui
+        .add_enabled(state.can_stop_tracking(), egui::Button::new("Finish"))
+        .on_hover_text(
+            "end the run now and keep the results so far — a finished run can't resume; \
+             Re-track starts over from the seed",
+        )
+        .clicked()
+    {
+        state.stop_tracking();
+    }
+    if ui
+        .add_enabled(state.can_discard_tracking(), egui::Button::new("Discard"))
+        .on_hover_text("abort the run and throw away its results, keeping the seed")
+        .clicked()
+    {
+        state.discard_tracking();
+    }
 }
 
 /// Draws the Live/Results pill toggle (task 13.1): two selectable labels
