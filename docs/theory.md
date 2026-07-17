@@ -7,7 +7,7 @@ we're actually fighting in phone footage, and why some "obvious" fixes
 contributors; assumes familiarity with the vocabulary in
 [CONTEXT.md](../CONTEXT.md).
 
-This is a living document. Section 7 (Experiment log) is where empirical
+This is a living document. Section 8 (Experiment log) is where empirical
 results from `docs/e2e-results.md` and future strategy-benchmark runs (task
 11.4) get distilled into durable, dated evidence.
 
@@ -451,7 +451,510 @@ computed over the correctly bounded concentric phase — matching the metric
 definition this domain's target users (lifters, per the README) already
 expect from commercial VBT devices.
 
-## 7. Experiment log
+## 7. Strategy deep-dive
+
+Per-strategy reference for the four building blocks a Tracking Strategy
+(CONTEXT.md) is assembled from: the two trackers (Template/ZNCC, Color) and
+the two preprocessor filters (Gaussian blur, Median). Each gets an ELI5
+one-liner (reused verbatim by the GUI's strategy tooltips, task 14.2), an
+engineer's walkthrough with the actual math, a Rust walkthrough of the
+`tracker-core` implementation with verbatim snippets, and a worked numeric
+mini-example. §2–§5 above carry the derivations; this section links rather
+than repeats them.
+
+All four implementations are dependency-free Rust: plain `Vec<f32>` /
+`Vec<f64>` buffers in row-major order (`data[y * width + x]`), no image
+crate, no SIMD, no `unsafe`.
+
+### 7.1 Template tracking (ZNCC)
+
+**ELI5.** Find the sticker that looks most like the sticker you pointed at
+— every frame, the tracker slides a little photo of what you clicked over
+the nearby area and keeps the spot where the picture lines up best, even if
+the lighting got brighter or dimmer.
+
+**Engineer.** Per frame:
+
+1. Take the last known position `(cx, cy)`.
+2. For every integer offset `(dx, dy)` with `|dx|, |dy| ≤ search_radius`,
+   extract a `(2·patch_radius+1)²` luma patch centered at
+   `(cx+dx, cy+dy)` (skipping positions where the patch would leave the
+   frame — `extract_patch` returns `None`, never a clamped patch, see §1).
+3. Score each candidate against **both** templates (anchor and adaptive,
+   §3) with ZNCC and take the max:
+
+   ```
+   ZNCC(T, I) = Σᵢ (T(i) − T̄)(I(i) − Ī)  /  sqrt( Σᵢ(T(i) − T̄)² · Σᵢ(I(i) − Ī)² )
+   effective(candidate) = max( ZNCC(anchor, candidate), ZNCC(adaptive, candidate) )
+   ```
+
+4. The best-scoring candidate wins if its score ≥ `min_score` (default
+   0.4) → `Found`; the adaptive template is refreshed from the winner only
+   when the score also clears `update_threshold` (default 0.7) — the
+   anti-drift gate of §3.
+
+**Complexity.** With search radius `R` and patch radius `r`:
+`(2R+1)²` candidate positions × `(2r+1)²` pixels per ZNCC evaluation × 2
+templates, i.e. `O(R²·r²)` per frame. The app's defaults
+(`tracker-app`'s `DEFAULT_SEARCH_RADIUS = 30`, `DEFAULT_PATCH_RADIUS = 12`) give
+61² · 25² · 2 ≈ 4.7M multiply-adds per frame — fine at these sizes without
+the integral-image tricks of Lewis 1995 (§2 references).
+
+**Robust/fragile.** Exactly invariant to brightness/contrast (positive
+affine) change — derivation in §2, "The affine-invariance proof". Degrades
+gracefully under i.i.d. sensor noise (§5). Fragile against non-affine
+appearance change (3D rotation, specular highlights, occlusion) — that's
+what the anchor+adaptive dual-template design (§3) mitigates — and against
+anything structurally similar in the search window (false peaks, §5).
+
+**Rust walkthrough.** `Zncc` (`metric.rs`) is a zero-sized struct
+implementing the `CorrelationMetric` trait over two `Patch`es (flat
+`Vec<f32>` luma planes). Means come from an iterator sum; the
+covariance/variance accumulation is a single index loop so `num`, `var_a`,
+`var_b` fall out of one pass. All accumulation is `f64` even though samples
+are `f32`, and the zero-variance case returns `Some(0.0)` instead of NaN.
+
+<details><summary>ZNCC scoring — crates/tracker-core/src/metric.rs:25</summary>
+
+```rust
+    fn score(&self, a: &Patch, b: &Patch) -> Option<f64> {
+        if a.side() != b.side() {
+            return None;
+        }
+
+        let av = a.values();
+        let bv = b.values();
+
+        let n = av.len() as f64;
+        if n == 0.0 {
+            return Some(0.0);
+        }
+
+        let mean_a: f64 = av.iter().map(|&v| v as f64).sum::<f64>() / n;
+        let mean_b: f64 = bv.iter().map(|&v| v as f64).sum::<f64>() / n;
+
+        let mut num = 0.0;
+        let mut var_a = 0.0;
+        let mut var_b = 0.0;
+        for i in 0..av.len() {
+            let da = av[i] as f64 - mean_a;
+            let db = bv[i] as f64 - mean_b;
+            num += da * db;
+            var_a += da * da;
+            var_b += db * db;
+        }
+
+        let denom = (var_a * var_b).sqrt();
+        if denom == 0.0 {
+            return Some(0.0);
+        }
+
+        Some(num / denom)
+    }
+```
+
+</details>
+
+The search loop (`TemplateTracker::step`, `tracker.rs`) filters each
+candidate through the configured `PreprocessorChain` *before* scoring — the
+same-space invariant of §5 — and keeps the running best with
+`Option::is_none_or`:
+
+<details><summary>Search-window loop — crates/tracker-core/src/tracker.rs:217</summary>
+
+```rust
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let x = cx + dx;
+                let y = cy + dy;
+                let Some(candidate) = extract_patch(frame, x, y, self.config.patch_radius) else {
+                    continue;
+                };
+                let candidate = self.config.preprocessor.apply_patch(&candidate);
+                let anchor_score = metric.score(&self.anchor, &candidate);
+                let adaptive_score = metric.score(&self.adaptive, &candidate);
+                let score = match (anchor_score, adaptive_score) {
+                    (Some(a), Some(b)) => a.max(b),
+                    (Some(a), None) => a,
+                    (None, Some(b)) => b,
+                    (None, None) => continue,
+                };
+                if best
+                    .as_ref()
+                    .is_none_or(|(_, best_score, _)| score > *best_score)
+                {
+                    best = Some((Point::new(x as f64, y as f64), score, candidate));
+                }
+            }
+        }
+```
+
+</details>
+
+**Worked example (3×3 patch).** Template
+`T = [1,2,3,4,5,6,7,8,9]`, mean `T̄ = 5`, deviations
+`[−4,−3,−2,−1,0,1,2,3,4]`, so `Σ(T−T̄)² = 60`.
+
+- Candidate `I = 2T + 5` (double contrast, +5 brightness): §2's proof says
+  the score is exactly `1.0` — the gain cancels, the offset vanishes with
+  the mean.
+- Candidate `I = [1,2,3,4,5,6,7,8,90]` (one specular blowout in the corner):
+  `Ī = 126/9 = 14`, deviations `[−13,−12,−11,−10,−9,−8,−7,−6,76]`.
+  Numerator `Σ dT·dI = 52+36+22+10+0−8−14−18+304 = 384`;
+  `Σ(I−Ī)² = 6540`; denominator `√(60·6540) ≈ 626.4`.
+  `ZNCC = 384/626.4 ≈ 0.61` — one bad pixel out of nine drops a perfect
+  match to 0.61, below the default `update_threshold` (0.7) but above
+  `min_score` (0.4): still `Found`, but not allowed to contaminate the
+  adaptive template. That is §3's gate working as designed.
+
+### 7.2 Color tracking (color model)
+
+**ELI5.** Remember the color of the dot you pointed at, then every frame
+find all the nearby specks with that same color and stand in the middle of
+them.
+
+**Engineer.** Two phases:
+
+*Learn* (`ColorModel::learn`, `color.rs`): sample every pixel of the
+`(2r+1)²` seed patch, convert to HSV (`rgb_to_hsv`, the standard
+max-channel case split — see §4), and keep three summary values: the
+**circular mean** of hue (unit vectors summed, angle of the resultant —
+wraparound-safe for reds, §4) and the plain **medians** of saturation and
+value.
+
+*Match + track* (`ColorModel::matches` + `ColorTracker::step`,
+`color_tracker.rs`): a pixel matches iff it passes three independent band
+checks against the learned model —
+
+```
+hue_distance(h, h₀) ≤ hue_tolerance        (wraparound-safe: min(|Δ|, 360−|Δ|), tol 20° default)
+|s − s₀| ≤ sat_tolerance                    (0.3 default)
+|v − v₀| ≤ val_tolerance                    (0.35 default)
+```
+
+The tracker scans the `(2R+1)²` search window (clamped to the frame),
+counts matching pixels, and returns their **centroid**
+`(Σx/count, Σy/count)` as the position, with
+
+```
+score = matched_pixels / scanned_pixels     (window fill fraction)
+```
+
+as `Found`'s score; fewer than `min_pixels` matches (default 5) is a
+`Miss`. There is no correlation surface at all — position is a first
+moment of a binary mask, which is why color's "jitter" numbers in §7's
+11.4 row can look artificially smooth.
+
+**Complexity.** `O(R²)` per frame — one HSV conversion plus three range
+checks per window pixel. No `r²` factor: the patch only exists at learn
+time. This is why §4 calls color *cheaper per pixel* than template
+matching.
+
+**Robust/fragile.** Immune to the object's own rotation and shape change
+(only color matters). Fragile exactly when the color isn't distinct: hue is
+mathematically undefined at zero saturation, so a gray marker or gray gym
+background collapses the hue band's selectivity — §4's
+"saturation/value floors" discussion, and the reason `suggest_tracker`
+(and `compare`'s notes column) warn on indistinct seeds.
+
+**Rust walkthrough.** `ColorModel` is a `Copy` struct of six `f64`s
+(learned h/s/v + three tolerances). `matches` is three early-return band
+checks; `median_angle_deg` is a fold over `(sin, cos)` accumulators.
+
+<details><summary>Per-pixel match — crates/tracker-core/src/color.rs:148</summary>
+
+```rust
+    pub fn matches(&self, rgb: [u8; 3]) -> bool {
+        let (h, s, v) = rgb_to_hsv(rgb);
+
+        if hue_distance_deg(h, self.hue) > self.hue_tolerance {
+            return false;
+        }
+        if (s - self.sat).abs() > self.sat_tolerance {
+            return false;
+        }
+        if (v - self.val).abs() > self.val_tolerance {
+            return false;
+        }
+        true
+    }
+```
+
+</details>
+
+<details><summary>Circular hue mean — crates/tracker-core/src/color.rs:206</summary>
+
+```rust
+fn median_angle_deg(hues: &[f64]) -> f64 {
+    if hues.is_empty() {
+        return 0.0;
+    }
+    let (sum_sin, sum_cos) = hues.iter().fold((0.0, 0.0), |(s, c), h| {
+        let rad = h.to_radians();
+        (s + rad.sin(), c + rad.cos())
+    });
+    let mean = sum_sin.atan2(sum_cos).to_degrees();
+    mean.rem_euclid(360.0)
+}
+```
+
+</details>
+
+<details><summary>Centroid scan — crates/tracker-core/src/color_tracker.rs:271</summary>
+
+```rust
+        let mut count: u64 = 0;
+        let mut sum_x: f64 = 0.0;
+        let mut sum_y: f64 = 0.0;
+        let mut scanned: u64 = 0;
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                scanned += 1;
+                let rgb = region.pixel_at(x, y);
+                if self.model.matches(rgb) {
+                    count += 1;
+                    sum_x += x as f64;
+                    sum_y += y as f64;
+                }
+            }
+        }
+
+        if count == 0 || count < self.config.min_pixels as u64 {
+            return StepOutcome::Miss;
+        }
+
+        let position = Point::new(sum_x / count as f64, sum_y / count as f64);
+        let score = count as f64 / scanned as f64;
+        StepOutcome::Found { position, score }
+```
+
+</details>
+
+Note the search window is filtered per RGB channel plane through the same
+`PreprocessorChain` before matching (`RgbRegion::apply_chain`,
+`color_tracker.rs`) — three independent `apply_plane` calls, see §7.3's
+module-doc quote for why that's the same computation as the template path.
+
+**Worked example (circular hue mean).** Seed patch hues sampled as
+`{350°, 10°}` — a red cluster straddling the 0°/360° wrap. A naive numeric
+median/mean gives `180°` (cyan — completely wrong). The circular mean:
+`sin 350° + sin 10° = −0.1736 + 0.1736 = 0`;
+`cos 350° + cos 10° = 0.9848 + 0.9848 = 1.9697`;
+`atan2(0, 1.9697) = 0°` — red, correct. Then a candidate pixel with
+`h = 355°` is `hue_distance_deg(355, 0) = 5° ≤ 20°` → hue band passes.
+
+### 7.3 GaussianBlur preprocessor
+
+**ELI5.** Gently smudge the picture so the tiny random speckles average
+away, like squinting a little — the big shapes stay, the grain goes.
+
+**Engineer.** Convolution with a normalized 1D Gaussian, applied
+horizontally then vertically (separable — a 2D Gaussian kernel is the
+outer product of two 1D ones, so two 1D passes compute the exact same
+result as one 2D pass):
+
+```
+w(x) = exp( −x² / (2σ²) ),  x ∈ [−radius, radius],   then w normalized so Σw = 1
+radius = ceil(3σ)  (minimum 1)
+```
+
+The `3σ` radius rule captures > 99% of the Gaussian's mass (99.7% within
+±3σ). Boundary handling is clamp-to-edge (replicate the border sample), so
+a flat region stays exactly flat instead of darkening toward an implicit
+zero pad. Why a Gaussian at all — the frequency-domain low-pass argument
+and what it does/doesn't help with — is §5, "Filter theory".
+
+**Complexity.** Separability is the point: `O(W·H·(2·radius+1))` per pass,
+two passes — linear in kernel *width*, versus `O(W·H·(2·radius+1)²)` for a
+naive 2D convolution. For σ = 1.5 (radius 5, the benchmark default) that's
+11 taps × 2 passes = 22 multiply-adds per pixel instead of 121.
+
+**Robust/fragile.** Effective against broadband per-pixel sensor grain;
+blurs genuine edges too (including the plate boundary the tracker wants
+sharp) and does nothing special for structured blocking artifacts — §5.
+
+**Rust walkthrough.** `Preprocessor` (`preprocessor.rs`) is a **closed
+enum**, not a `dyn` trait object. The module docs state the reasoning
+directly (`preprocessor.rs:24`):
+
+> This is a deliberately closed enum rather than a `dyn Preprocessor` trait
+> object: the filter set is small and fixed (CONTEXT.md names Gaussian and
+> median specifically), and a concrete, `Clone + PartialEq + Debug` type is
+> what lets `TemplateTrackerConfig`/`ColorTrackerConfig` embed an optional
+> chain and still be compared/cloned in tests without `Box<dyn ..>`
+> plumbing. `PreprocessorChain` (an ordered `Vec<Preprocessor>`) is the
+> "chain" the CONTEXT.md term and task 11.3's `--filter` flags describe.
+
+The single operation both trackers share is
+`apply_plane(&[f32], width, height) -> Vec<f32>` on a row-major plane —
+the template path calls it once (luma), the color path three times (R, G,
+B). Kernel weights are computed in `f64` and normalized by their sum:
+
+<details><summary>Kernel construction — crates/tracker-core/src/preprocessor.rs:137</summary>
+
+```rust
+fn gaussian_kernel_1d(sigma: f64) -> Vec<f64> {
+    let sigma = sigma.max(1e-6);
+    let radius = (3.0 * sigma).ceil().max(1.0) as i64;
+    let mut kernel: Vec<f64> = (-radius..=radius)
+        .map(|i| {
+            let x = i as f64;
+            (-0.5 * (x / sigma).powi(2)).exp()
+        })
+        .collect();
+    let sum: f64 = kernel.iter().sum();
+    for v in &mut kernel {
+        *v /= sum;
+    }
+    kernel
+}
+```
+
+</details>
+
+<details><summary>Horizontal pass with clamp-to-edge — crates/tracker-core/src/preprocessor.rs:162</summary>
+
+```rust
+    // Horizontal pass.
+    let mut horiz = vec![0.0f32; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let mut acc = 0.0f64;
+            for (k, &w) in kernel.iter().enumerate() {
+                let dx = k as i64 - radius;
+                let sx = clamp_index(x as i64 + dx, width);
+                acc += w * data[y * width + sx] as f64;
+            }
+            horiz[y * width + x] = acc as f32;
+        }
+    }
+```
+
+</details>
+
+**Worked example (σ = 1.5).** `radius = ceil(4.5) = 5`, so an 11-tap
+kernel. Unnormalized weights `exp(−x²/4.5)`:
+
+| x | 0 | ±1 | ±2 | ±3 | ±4 | ±5 |
+|---|---|----|----|----|----|----|
+| raw | 1.000 | 0.8007 | 0.4111 | 0.1353 | 0.0286 | 0.0039 |
+| normalized | 0.2660 | 0.2130 | 0.1094 | 0.0360 | 0.0076 | 0.0010 |
+
+(sum of raw = 3.7591). A single +100 impulse on a flat field becomes
++26.6 at its own pixel after the horizontal pass, then ×0.2660 again
+vertically: +7.1 at the center after both passes — attenuated ~14×, but
+*spread*, not removed (compare §7.4's median, which removes it outright —
+the `chain_applies_steps_in_order` test in `preprocessor.rs` demonstrates
+exactly this difference).
+
+### 7.4 Median preprocessor
+
+**ELI5.** For every dot in the picture, look at it and its neighbors, line
+them up from darkest to brightest, and keep the one in the middle — so one
+crazy bright speck gets outvoted by its normal neighbors.
+
+**Engineer.** A nonlinear order-statistic filter: each output pixel is the
+median of the `k × k` input neighborhood around it (`k` odd; an even `k`
+degrades to `k−1` since only the integer radius `k/2` is used),
+clamp-to-edge at borders:
+
+```
+out(x, y) = median{ in(x+dx, y+dy) : |dx|, |dy| ≤ ⌊k/2⌋ }
+```
+
+Kills impulse outliers completely (an impulse never survives unless it
+fills over half the window) while preserving genuine step edges exactly —
+the median of a window straddling an edge is one of the two sides' values,
+never a blend. Why that matters for compression-artifact edges vs. sensor
+grain: §5, "Filter theory".
+
+**Complexity.** `O(W·H · k² log k²)` with this implementation's
+sort-per-window (each `k²` window is collected into a reused `Vec` and
+sorted). Not separable — a median filter has no horizontal/vertical
+decomposition — and no histogram-sliding trick is used; at `k = 3` on
+patch-sized regions the constant is trivial.
+
+**Robust/fragile.** Best-in-class on salt-and-pepper/impulse noise and
+kind to step edges; comparatively weak on Gaussian grain and can
+stair-step smooth gradients (§5). §8's 11.4 benchmark row found `median:3`
+consistently the weakest template filter on those (clean-ish) clips —
+evidence, not a law: it's clip-dependent, which is why strategies are
+swappable.
+
+**Rust walkthrough.** Same `apply_plane` shape as Gaussian. One `window`
+`Vec` is allocated once and `clear()`ed per pixel (capacity `(2r+1)²`);
+sorting uses `sort_by` with `partial_cmp` because the samples are `f32`
+(no `Ord`), with `Ordering::Equal` as the NaN fallback.
+
+<details><summary>Median filter — crates/tracker-core/src/preprocessor.rs:193</summary>
+
+```rust
+fn median_filter(data: &[f32], width: usize, height: usize, k: u32) -> Vec<f32> {
+    if width == 0 || height == 0 {
+        return data.to_vec();
+    }
+    let radius = (k / 2) as i64;
+    let mut out = vec![0.0f32; width * height];
+    let mut window = Vec::with_capacity(((2 * radius + 1) * (2 * radius + 1)) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            window.clear();
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    let sx = clamp_index(x as i64 + dx, width);
+                    let sy = clamp_index(y as i64 + dy, height);
+                    window.push(data[sy * width + sx]);
+                }
+            }
+            window.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            out[y * width + x] = window[window.len() / 2];
+        }
+    }
+    out
+}
+```
+
+</details>
+
+**Worked example (k = 3, one impulse).** A flat 50-valued field with one
+salt pixel of 255 at the center. The 3×3 window around it is
+`[50,50,50,50,255,50,50,50,50]`; sorted:
+`[50,50,50,50,50,50,50,50,255]`; middle element (index 4) = **50**. The
+impulse is removed *exactly* — not attenuated and spread like the Gaussian
+in §7.3 (this is `median_filter_removes_single_pixel_salt_and_pepper` in
+`preprocessor.rs`'s tests). Its neighbors' windows each contain the 255
+once, still outvoted 8-to-1, so they stay 50 too.
+
+### 7.5 "Test strategies": what the benchmark measures
+
+The `compare` benchmark (`crates/tracker-app/src/compare.rs`; GUI's "Test
+strategies" button, CLI `tracker-app compare`) runs the fixed 6-strategy
+matrix — {none, gaussian:1.5, median:3} × {template, color} — over the same
+frames with the same seed, then reports per strategy:
+
+- **tracked %** — fraction of stepped frames that ended `Found` (or were
+  coasted over and later interpolated); the primary "did it stay on the
+  bar" number.
+- **misses / gaps / reseeds** — raw `Miss` frames; *gaps* count contiguous
+  miss runs (a 5-frame outage is one gap, not five); *auto-reseeds* count
+  gap runs long enough to exceed `coast_limit` (§1's gap logic).
+- **mean score** — template only: mean ZNCC of tracked frames (color's
+  fill-fraction score isn't comparable, §7.2).
+- **mean jitter** — mean Euclidean distance between *consecutive tracked*
+  positions. A stationary-ish, well-locked track has low jitter; but read
+  it with §8's 11.4 caveat — a coarse color centroid can post artificially
+  low jitter while not actually locked onto the right pixels.
+
+`recommend` picks the winner mechanically: highest `tracked_pct`; exact
+tie → lowest `mean_jitter` (a strategy with no tracked samples sorts as
+infinite jitter and loses every tie); still tied → the earlier strategy in
+the matrix's fixed order wins. The notes column (e.g. the
+indistinct-color warning from `suggest_tracker`'s heuristic) is part of
+the output for a reason: §8's 11.4 row is a worked case where the
+mechanical winner wasn't the right pick.
+
+## 8. Experiment log
 
 Empirical results and tuning decisions, most recent first. Full detail and
 reproduction commands live in [docs/e2e-results.md](e2e-results.md); this
