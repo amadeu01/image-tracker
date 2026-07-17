@@ -16,10 +16,29 @@ use eframe::egui;
 use super::palette::{self, LossSeverity, StatusKind};
 use super::state::{AppState, EventLevel};
 
-/// Widened from 260 in task 13.3: the design's 7-column rep table
-/// (#/DEPTH/PEAK/MEAN/LOSS/TIME/▶) needs ~300px of monospace columns to
-/// render without overlap; the panel stays user-resizable.
-const PANEL_WIDTH: f32 = 320.0;
+/// Widened 320 → 460 in task 13.7 to match the design mock's fixed 460px
+/// right column (13.3 had already widened 260 → 320 for the rep table);
+/// the panel stays user-resizable.
+const PANEL_WIDTH: f32 = 460.0;
+
+/// Card chrome for one side-panel section (task 13.7, the design's
+/// `#1f1f24` / `#2c2c31` / radius-6 / 14px-padding cards): every section
+/// (guide, status, settings, results, events) renders inside one of these
+/// on the darker `side_bg` panel, instead of 12.x's bare
+/// separator-delimited stack.
+fn section_card<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let chrome = palette::chrome_palette(ui.visuals().dark_mode);
+    egui::Frame::none()
+        .fill(chrome.panel_bg)
+        .stroke(egui::Stroke::new(1.0, chrome.border))
+        .rounding(6.0)
+        .inner_margin(egui::Margin::same(14.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add_contents(ui)
+        })
+        .inner
+}
 
 /// Section-header typography (task 13.1): the design specifies uppercase,
 /// small (~11px), letter-spaced labels rather than egui's default
@@ -84,34 +103,34 @@ const STEP_HOWTO: [(u8, &str); 5] = [
 ];
 
 pub fn show(ctx: &egui::Context, state: Option<&mut AppState>) {
+    let chrome = palette::chrome_palette(ctx.style().visuals.dark_mode);
     egui::SidePanel::right("side_panel")
         .default_width(PANEL_WIDTH)
         .resizable(true)
+        .frame(
+            egui::Frame::default()
+                .fill(chrome.side_bg)
+                .inner_margin(egui::Margin::same(14.0)),
+        )
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let Some(state) = state else {
-                    empty_guide_section(ui);
+                    section_card(ui, empty_guide_section);
                     return;
                 };
-                guide_section(ui, state);
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-                status_section(ui, state);
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-                super::settings_section::tracking_settings_section(ui, state);
+                section_card(ui, |ui| guide_section(ui, state));
+                ui.add_space(12.0);
+                section_card(ui, |ui| status_section(ui, state));
+                ui.add_space(12.0);
+                section_card(ui, |ui| {
+                    super::settings_section::tracking_settings_section(ui, state)
+                });
                 if state.results.is_some() {
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-                    results_section(ui, state);
+                    ui.add_space(12.0);
+                    section_card(ui, |ui| results_section(ui, state));
                 }
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-                events_section(ui, state);
+                ui.add_space(12.0);
+                section_card(ui, |ui| events_section(ui, state));
             });
         });
 }
@@ -963,7 +982,13 @@ fn headline_card(
     value: String,
     value_color: Option<egui::Color32>,
 ) {
-    egui::Frame::group(ui.style())
+    // Same chrome as `section_card` (13.7's harmonisation), tighter margin —
+    // these sit nested inside the Results section card.
+    let chrome = palette::chrome_palette(ui.visuals().dark_mode);
+    egui::Frame::none()
+        .fill(chrome.panel_bg)
+        .stroke(egui::Stroke::new(1.0, chrome.border))
+        .rounding(6.0)
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .show(ui, |ui| {
             ui.vertical(|ui| {

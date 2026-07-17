@@ -81,6 +81,11 @@ pub struct TrackerApp {
     /// theme before the first frame, and `update` leaves it alone rather
     /// than fighting further `ThemeChanged` events.
     theme_override: Option<bool>,
+    /// User's explicit filmstrip open/closed override (task 13.7). `None`
+    /// means "use the default": open pre-tracking, collapsed once results
+    /// exist (the design replaced the strip with the segment scrub as the
+    /// primary navigation). See `thumbnail_panel::show`.
+    pub filmstrip_override: Option<bool>,
 }
 
 impl TrackerApp {
@@ -105,6 +110,7 @@ impl TrackerApp {
             thumbnails: None,
             thumbnail_textures: Vec::new(),
             theme_override: theme::load_override(),
+            filmstrip_override: None,
         }
     }
 
@@ -114,11 +120,7 @@ impl TrackerApp {
     /// the click feels instant.
     pub fn toggle_theme(&mut self, ctx: &egui::Context) {
         let new_dark = !ctx.style().visuals.dark_mode;
-        ctx.set_visuals(if new_dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        });
+        palette::apply_chrome(ctx, new_dark);
         self.theme_override = Some(new_dark);
         theme::save_override(new_dark);
     }
@@ -272,20 +274,24 @@ impl TrackerApp {
 
 impl eframe::App for TrackerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Re-apply a persisted user override (task 12.4) once the effective
-        // theme drifts from it — only ever happens on the very first frame
-        // after launch (there's no other code path that changes
-        // `dark_mode` behind the override's back), but checking rather than
-        // unconditionally calling `set_visuals` every frame avoids fighting
-        // any future system `ThemeChanged` re-application when there's no
-        // override at all (`theme_override: None`, the common case).
-        if let Some(dark) = self.theme_override {
-            if ctx.style().visuals.dark_mode != dark {
-                ctx.set_visuals(if dark {
-                    egui::Visuals::dark()
-                } else {
-                    egui::Visuals::light()
-                });
+        // Keep the chrome visuals installed (task 13.7, superseding 12.4's
+        // stock `Visuals::dark()/light()` re-apply). The effective theme is
+        // the persisted user override when there is one, else whatever
+        // egui/winit's system-theme-follow currently says
+        // (`visuals.dark_mode`) — so with no override, a system
+        // `ThemeChanged` flips `dark_mode`, `panel_fill` no longer matches
+        // our palette, and this reinstalls the chrome for the new theme
+        // instead of fighting the follow logic. The `panel_fill` check also
+        // covers the very first frame (stock visuals) and any future stock
+        // re-application; when nothing drifted this is a cheap no-op
+        // comparison, never a per-frame `set_visuals`.
+        {
+            let visuals = ctx.style().visuals.clone();
+            let dark = self.theme_override.unwrap_or(visuals.dark_mode);
+            if visuals.dark_mode != dark
+                || visuals.panel_fill != palette::chrome_palette(dark).app_bg
+            {
+                palette::apply_chrome(ctx, dark);
             }
         }
         if let Some(state) = &mut self.state {

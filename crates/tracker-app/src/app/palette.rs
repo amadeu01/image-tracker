@@ -165,6 +165,19 @@ pub struct ChromePalette {
     pub panel_bg: Color32,
     pub border: Color32,
     pub accent: Color32,
+    /// Right side-panel fill (design `#18181b`): between `app_bg` and
+    /// `panel_bg` so the cards on top of it still read as raised.
+    pub side_bg: Color32,
+    /// Top toolbar strip fill (design `#1d1d21`).
+    pub toolbar_bg: Color32,
+    /// Button/interactive-widget fill (design `#26262b`).
+    pub button_bg: Color32,
+    /// Button border (design `#3a3a40`), also used as the hovered stroke.
+    pub button_border: Color32,
+    /// Quiet hint-bar strip background (design `#202024`).
+    pub hint_bg: Color32,
+    /// Quiet hint-bar text (design `#9a9aa2`).
+    pub hint_text: Color32,
 }
 
 /// Returns the shell chrome palette for `dark_mode`. See `ChromePalette`.
@@ -175,6 +188,12 @@ pub fn chrome_palette(dark_mode: bool) -> ChromePalette {
             panel_bg: Color32::from_rgb(0x1f, 0x1f, 0x24),
             border: Color32::from_rgb(0x2c, 0x2c, 0x31),
             accent: Color32::from_rgb(0x6e, 0xa3, 0xec),
+            side_bg: Color32::from_rgb(0x18, 0x18, 0x1b),
+            toolbar_bg: Color32::from_rgb(0x1d, 0x1d, 0x21),
+            button_bg: Color32::from_rgb(0x26, 0x26, 0x2b),
+            button_border: Color32::from_rgb(0x3a, 0x3a, 0x40),
+            hint_bg: Color32::from_rgb(0x20, 0x20, 0x24),
+            hint_text: Color32::from_rgb(0x9a, 0x9a, 0xa2),
         }
     } else {
         ChromePalette {
@@ -185,8 +204,85 @@ pub fn chrome_palette(dark_mode: bool) -> ChromePalette {
             // in it stay >=3:1 against a near-white panel (the dark hex
             // 0x6ea3ec fails that against white).
             accent: Color32::from_rgb(0x2f, 0x6f, 0xd1),
+            // Slightly-off-white so the white cards still read as raised —
+            // the same panel_bg/side_bg relationship the dark theme has.
+            side_bg: Color32::from_rgb(0xec, 0xec, 0xef),
+            toolbar_bg: Color32::from_rgb(0xea, 0xea, 0xee),
+            button_bg: Color32::from_rgb(0xff, 0xff, 0xff),
+            button_border: Color32::from_rgb(0xc4, 0xc4, 0xcb),
+            hint_bg: Color32::from_rgb(0xe7, 0xe7, 0xea),
+            hint_text: Color32::from_rgb(0x55, 0x55, 0x5c),
         }
     }
+}
+
+/// Builds the app's global `egui::Visuals` from `chrome_palette` (task
+/// 13.7). This is the fix for the 13.4 user finding "GUI not even close to
+/// the design": 13.1 defined `ChromePalette` but every panel/widget still
+/// rendered egui's stock visuals because nothing ever pushed the palette
+/// into the global `Style`. Pure (no `Context`), so tests can assert the
+/// mapping; `apply_chrome` is the one-liner that installs it.
+pub fn chrome_visuals(dark_mode: bool) -> eframe::egui::Visuals {
+    use eframe::egui::{Rounding, Stroke, Visuals};
+    let p = chrome_palette(dark_mode);
+    let mut v = if dark_mode {
+        Visuals::dark()
+    } else {
+        Visuals::light()
+    };
+    v.panel_fill = p.app_bg;
+    v.window_fill = p.panel_bg;
+    v.extreme_bg_color = p.app_bg;
+    v.faint_bg_color = p.button_bg;
+    v.hyperlink_color = p.accent;
+    v.selection.bg_fill = p.accent.gamma_multiply(0.35);
+    v.selection.stroke = Stroke::new(1.0, p.accent);
+
+    let rounding = Rounding::same(4.0);
+    let w = &mut v.widgets;
+    w.noninteractive.bg_fill = p.app_bg;
+    w.noninteractive.weak_bg_fill = p.panel_bg;
+    w.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
+    w.noninteractive.rounding = rounding;
+    w.inactive.bg_fill = p.button_bg;
+    w.inactive.weak_bg_fill = p.button_bg;
+    w.inactive.bg_stroke = Stroke::new(1.0, p.button_border);
+    w.inactive.rounding = rounding;
+    // Hover/active: the mock's hover is `#2e2e34` — one step lighter than
+    // the resting button; derive both from `button_bg` so light mode gets
+    // the equivalent relationship (slightly darker there) for free.
+    let (hovered_bg, active_bg) = if dark_mode {
+        (
+            Color32::from_rgb(0x2e, 0x2e, 0x34),
+            Color32::from_rgb(0x35, 0x35, 0x3c),
+        )
+    } else {
+        (
+            Color32::from_rgb(0xf0, 0xf0, 0xf3),
+            Color32::from_rgb(0xe4, 0xe4, 0xe9),
+        )
+    };
+    w.hovered.bg_fill = hovered_bg;
+    w.hovered.weak_bg_fill = hovered_bg;
+    w.hovered.bg_stroke = Stroke::new(1.0, p.button_border);
+    w.hovered.rounding = rounding;
+    w.active.bg_fill = active_bg;
+    w.active.weak_bg_fill = active_bg;
+    w.active.bg_stroke = Stroke::new(1.0, p.accent);
+    w.active.rounding = rounding;
+    w.open.bg_fill = p.button_bg;
+    w.open.weak_bg_fill = p.button_bg;
+    w.open.bg_stroke = Stroke::new(1.0, p.button_border);
+    w.open.rounding = rounding;
+    v
+}
+
+/// Installs `chrome_visuals` on the context. Called at startup, on the
+/// theme toggle, and whenever `TrackerApp::update` detects the effective
+/// visuals have drifted back to stock (e.g. a system `ThemeChanged`
+/// re-application) — never unconditionally per-frame.
+pub fn apply_chrome(ctx: &eframe::egui::Context, dark_mode: bool) {
+    ctx.set_visuals(chrome_visuals(dark_mode));
 }
 
 /// Relative luminance (WCAG-style, sRGB-approximated) used only by the
@@ -372,6 +468,97 @@ mod tests {
         for dark_mode in [true, false] {
             let p = chrome_palette(dark_mode);
             assert_ne!(p.panel_bg, p.border);
+        }
+    }
+
+    #[test]
+    fn chrome_palette_dark_shell_hex_matches_the_design_mock_13_7() {
+        let p = chrome_palette(true);
+        assert_eq!(p.side_bg, Color32::from_rgb(0x18, 0x18, 0x1b));
+        assert_eq!(p.toolbar_bg, Color32::from_rgb(0x1d, 0x1d, 0x21));
+        assert_eq!(p.button_bg, Color32::from_rgb(0x26, 0x26, 0x2b));
+        assert_eq!(p.button_border, Color32::from_rgb(0x3a, 0x3a, 0x40));
+        assert_eq!(p.hint_bg, Color32::from_rgb(0x20, 0x20, 0x24));
+        assert_eq!(p.hint_text, Color32::from_rgb(0x9a, 0x9a, 0xa2));
+    }
+
+    #[test]
+    fn chrome_palette_shell_colors_differ_between_dark_and_light_mode() {
+        let dark = chrome_palette(true);
+        let light = chrome_palette(false);
+        assert_ne!(dark.side_bg, light.side_bg);
+        assert_ne!(dark.toolbar_bg, light.toolbar_bg);
+        assert_ne!(dark.button_bg, light.button_bg);
+        assert_ne!(dark.button_border, light.button_border);
+        assert_ne!(dark.hint_bg, light.hint_bg);
+        assert_ne!(dark.hint_text, light.hint_text);
+    }
+
+    #[test]
+    fn hint_text_is_readable_against_hint_bg_in_both_themes() {
+        // The quiet hint strip's own text/background pair (design's
+        // #9a9aa2-on-#202024). 3:1 minimum, per the task spec; both themes
+        // comfortably exceed it.
+        for dark_mode in [true, false] {
+            let p = chrome_palette(dark_mode);
+            assert!(
+                contrast_ratio(p.hint_text, p.hint_bg) >= 3.0,
+                "dark_mode={dark_mode} hint_text {:?} too low contrast on hint_bg {:?}",
+                p.hint_text,
+                p.hint_bg
+            );
+        }
+    }
+
+    #[test]
+    fn default_text_is_readable_against_every_new_shell_background() {
+        // The default egui text color must stay readable on each surface
+        // the shell now paints (buttons/toolbar/side panel/cards).
+        for dark_mode in [true, false] {
+            let p = chrome_palette(dark_mode);
+            let text = chrome_visuals(dark_mode).widgets.inactive.fg_stroke.color;
+            for (name, bg) in [
+                ("side_bg", p.side_bg),
+                ("toolbar_bg", p.toolbar_bg),
+                ("button_bg", p.button_bg),
+                ("panel_bg", p.panel_bg),
+                ("app_bg", p.app_bg),
+            ] {
+                assert!(
+                    contrast_ratio(text, bg) >= 4.5,
+                    "dark_mode={dark_mode} default text {text:?} vs {name} {bg:?} too low"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chrome_visuals_maps_the_palette_onto_egui_visuals() {
+        for dark_mode in [true, false] {
+            let p = chrome_palette(dark_mode);
+            let v = chrome_visuals(dark_mode);
+            assert_eq!(v.dark_mode, dark_mode);
+            assert_eq!(v.panel_fill, p.app_bg);
+            assert_eq!(v.window_fill, p.panel_bg);
+            assert_eq!(v.extreme_bg_color, p.app_bg);
+            assert_eq!(v.hyperlink_color, p.accent);
+            assert_eq!(v.selection.stroke.color, p.accent);
+            assert_eq!(v.widgets.inactive.bg_fill, p.button_bg);
+            assert_eq!(v.widgets.inactive.bg_stroke.color, p.button_border);
+            assert_eq!(v.widgets.noninteractive.bg_stroke.color, p.border);
+            assert_eq!(
+                v.widgets.inactive.rounding,
+                eframe::egui::Rounding::same(4.0)
+            );
+        }
+    }
+
+    #[test]
+    fn button_border_is_distinguishable_from_button_fill() {
+        for dark_mode in [true, false] {
+            let p = chrome_palette(dark_mode);
+            assert_ne!(p.button_bg, p.button_border);
+            assert_ne!(p.side_bg, p.panel_bg, "cards must read raised on side_bg");
         }
     }
 

@@ -16,8 +16,20 @@ pub fn show(ctx: &egui::Context, state: Option<&AppState>) {
         return;
     };
     let dark_mode = ctx.style().visuals.dark_mode;
-    let (bg, text) = palette::banner_colors(dark_mode, banner_kind(state));
-    let border = palette::chrome_palette(dark_mode).border;
+    let chrome = palette::chrome_palette(dark_mode);
+    // Task 13.7: informational states render as the design's *quiet* hint
+    // strip (#202024 bg / #9a9aa2 text — `chrome.hint_bg`/`hint_text`)
+    // rather than a bright tinted banner; only `ActionNeeded` (a real
+    // "you must click something" state) keeps its severity colors from
+    // `palette::banner_colors` (whose contrast tests are unchanged).
+    let kind = banner_kind(state);
+    let (bg, text) = match kind {
+        BannerKind::ActionNeeded => palette::banner_colors(dark_mode, kind),
+        BannerKind::Working | BannerKind::Done | BannerKind::Neutral => {
+            (chrome.hint_bg, chrome.hint_text)
+        }
+    };
+    let border = chrome.border;
     egui::TopBottomPanel::top("mode_banner")
         .frame(
             egui::Frame::default()

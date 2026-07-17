@@ -26,7 +26,37 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
     let current_frame = app.state.as_ref().map(|s| s.current_frame).unwrap_or(0);
     let highlighted = thumbnail_strip::nearest_slot(&frame_indices, current_frame);
 
+    // Task 13.7: once results exist the rep-segment scrub is the primary
+    // navigation (per the design, which dropped the filmstrip entirely), so
+    // the strip defaults to collapsed then — but stays one click away via
+    // the 🎞 toggle below, and stays open by default pre-tracking.
+    let has_results = app
+        .state
+        .as_ref()
+        .map(|s| s.results.is_some())
+        .unwrap_or(false);
+    let open = app.filmstrip_override.unwrap_or(!has_results);
+
     egui::TopBottomPanel::bottom("thumbnail_strip").show(ctx, |ui| {
+        let label = if open {
+            "🎞 Filmstrip ▾"
+        } else {
+            "🎞 Filmstrip ▸"
+        };
+        if ui
+            .small_button(label)
+            .on_hover_text(if open {
+                "hide the thumbnail filmstrip"
+            } else {
+                "show the thumbnail filmstrip"
+            })
+            .clicked()
+        {
+            app.filmstrip_override = Some(!open);
+        }
+        if !open {
+            return;
+        }
         ui.horizontal(|ui| {
             for (slot, &frame_index) in frame_indices.iter().enumerate() {
                 let is_current = highlighted == Some(slot);
