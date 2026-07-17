@@ -767,8 +767,17 @@ pub fn run_compare(args: CompareArgs) -> Result<(), CompareError> {
             .map_err(|e| format!("failed to create out dir {}: {e}", dir.display()))?;
     }
 
-    let timebase = Timebase::new(metadata.fps_num, metadata.fps_den)
-        .map_err(|e| format!("bad video fps for {}: {e:?}", args.video_path.display()))?;
+    // Only overlay rendering needs a timebase — a video with degenerate fps
+    // metadata must still be benchmarkable without --export-overlays
+    // (review finding on ed48dd1).
+    let timebase = if args.export_overlays {
+        Some(
+            Timebase::new(metadata.fps_num, metadata.fps_den)
+                .map_err(|e| format!("bad video fps for {}: {e:?}", args.video_path.display()))?,
+        )
+    } else {
+        None
+    };
 
     tracing::info!(
         video = %args.video_path.display(),
@@ -800,7 +809,8 @@ pub fn run_compare(args: CompareArgs) -> Result<(), CompareError> {
         );
         let row = match run {
             Ok(run) => {
-                if args.export_overlays {
+                let mut note = run.note;
+                if let Some(timebase) = timebase.filter(|_| args.export_overlays) {
                     let slug = strategy.slug();
                     let out_path =
                         overlay_output_path(&args.video_path, args.overlay_dir.as_deref(), &slug);
@@ -811,7 +821,11 @@ pub fn run_compare(args: CompareArgs) -> Result<(), CompareError> {
                     );
                     let bar_path =
                         outcomes_to_bar_path(&run.outcomes, args.seed_frame, args.seed, timebase);
-                    render_overlay_video(
+                    // One overlay failing must not abort the remaining
+                    // strategies' overlays/rows — degrade to a note, same
+                    // policy as a failed strategy run (review finding on
+                    // ed48dd1).
+                    match render_overlay_video(
                         &args.video_path,
                         &out_path,
                         metadata.display_width(),
@@ -820,24 +834,46 @@ pub fn run_compare(args: CompareArgs) -> Result<(), CompareError> {
                         metadata.fps_den,
                         &bar_path,
                         &[],
-                    )?;
-                    tracing::info!(
-                        strategy = %strategy.label(),
-                        overlay_path = %out_path.display(),
-                        "compare overlay render done"
-                    );
-                    println!(
-                        "[{}/{}] {} — overlay written: {}",
-                        i + 1,
-                        total,
-                        strategy.label(),
-                        out_path.display()
-                    );
+                    ) {
+                        Ok(()) => {
+                            tracing::info!(
+                                strategy = %strategy.label(),
+                                overlay_path = %out_path.display(),
+                                "compare overlay render done"
+                            );
+                            println!(
+                                "[{}/{}] {} — overlay written: {}",
+                                i + 1,
+                                total,
+                                strategy.label(),
+                                out_path.display()
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                strategy = %strategy.label(),
+                                overlay_path = %out_path.display(),
+                                error = %e,
+                                "compare overlay render failed"
+                            );
+                            println!(
+                                "[{}/{}] {} — overlay FAILED: {e}",
+                                i + 1,
+                                total,
+                                strategy.label(),
+                            );
+                            let msg = format!("overlay render failed: {e}");
+                            note = Some(match note {
+                                Some(existing) => format!("{existing}; {msg}"),
+                                None => msg,
+                            });
+                        }
+                    }
                 }
                 BenchmarkRow {
                     strategy,
                     metrics: compute_metrics(&run.outcomes, coast_limit),
-                    note: run.note,
+                    note,
                 }
             }
             Err(e) => BenchmarkRow {
