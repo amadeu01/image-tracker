@@ -17,6 +17,7 @@
 mod banner;
 mod bottom_bar;
 mod palette;
+mod settings_section;
 mod side_panel;
 mod state;
 mod theme;
