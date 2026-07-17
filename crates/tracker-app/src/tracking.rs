@@ -197,12 +197,18 @@ pub fn session_config(tuning: TrackerTuning) -> TrackingSessionConfig {
 /// (px/s) data keeps `RepSegmentationConfig::default_config`'s dead-band
 /// (tuned for pixel-scale motion); calibrated (m/s) data needs a much
 /// smaller `min_velocity` (bar speeds are typically well under 1-2 m/s), or
-/// every sample stays `Idle` and zero reps are ever detected. Shared by the
-/// CLI (`cli.rs`) and the GUI's post-tracking `SessionResults` (10.3) so the
-/// two never drift on this tuning.
+/// every sample stays `Idle` and zero reps are ever detected. Likewise
+/// `min_displacement` (task 15.1, phantom walkout reps): the px-scale 40.0
+/// default becomes 0.15 m calibrated — well under a real squat's ~0.5 m ROM,
+/// well above setup shuffling. Shared by the CLI (`cli.rs`), the GUI's
+/// post-tracking `SessionResults` (10.3), and the live rep counter (10.8)
+/// so the three never drift on this tuning.
 pub fn rep_segmentation_config(calibrated: bool) -> RepSegmentationConfig {
     if calibrated {
-        RepSegmentationConfig::builder().min_velocity(0.03).build()
+        RepSegmentationConfig::builder()
+            .min_velocity(0.03)
+            .min_displacement(0.15)
+            .build()
     } else {
         RepSegmentationConfig::default_config()
     }
@@ -1067,6 +1073,14 @@ mod tests {
         let cal = rep_segmentation_config(true);
         assert_eq!(uncal.min_velocity(), 5.0);
         assert_eq!(cal.min_velocity(), 0.03);
+    }
+
+    /// The min-displacement gate (task 15.1) must scale with units too:
+    /// px-scale default when uncalibrated, meter-scale when calibrated.
+    #[test]
+    fn rep_segmentation_config_scales_min_displacement_with_units() {
+        assert_eq!(rep_segmentation_config(false).min_displacement(), 40.0);
+        assert_eq!(rep_segmentation_config(true).min_displacement(), 0.15);
     }
 
     #[test]

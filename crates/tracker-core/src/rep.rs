@@ -21,7 +21,12 @@
 //! 3. **Idle is free-form** — `Idle` runs of any length/position are
 //!    allowed between and inside reps (rest between reps, or a pause at
 //!    the bottom of a squat); they never need to meet a minimum duration.
-//! 4. **Incomplete trailing reps are dropped** — an eccentric phase with no
+//! 4. **Minimum displacement** — each phase of a candidate rep must cover
+//!    at least `min_displacement` of vertical travel (integrated from the
+//!    velocity series); slow sustained drift (walkout/unrack shuffling)
+//!    passes the two gates above but only travels a few pixels, and is
+//!    discarded here rather than counted.
+//! 5. **Incomplete trailing reps are dropped** — an eccentric phase with no
 //!    following concentric phase (e.g. the clip ends mid-descent) is not
 //!    emitted, since depth/velocity metrics (5.4) for it would be bogus.
 //!
@@ -37,6 +42,7 @@ use crate::velocity::VelocitySample;
 pub struct RepSegmentationConfig {
     min_velocity: f64,
     min_phase_duration_seconds: f64,
+    min_displacement: f64,
 }
 
 impl RepSegmentationConfig {
@@ -55,10 +61,21 @@ impl RepSegmentationConfig {
     ///   eccentric/concentric phase (roughly 1-3s each within a 2-6s rep)
     ///   but long enough to reject single/double-frame jitter even at
     ///   60fps (0.15s is ~9 frames at 60fps, ~4-5 at 30fps).
+    /// - `min_displacement` 40.0: minimum vertical travel each of a rep's
+    ///   eccentric and concentric phases must cover, in whatever unit the
+    ///   positions feeding the `VelocitySample`s carry (px uncalibrated, m
+    ///   per `Calibration`). Guards against the walkout/unrack phantom-rep
+    ///   bug (task 15.1): slow sustained setup drift passes both the
+    ///   velocity dead-band and the phase-duration gate but only travels a
+    ///   handful of pixels. In our test footage a real squat covers ~180 px
+    ///   of ROM while walkout wobble stays well under 50 px, so 40 px sits
+    ///   comfortably between them for typical framing; callers working in
+    ///   meters should override to something like `0.15` m.
     pub fn default_config() -> Self {
         Self {
             min_velocity: 5.0,
             min_phase_duration_seconds: 0.15,
+            min_displacement: 40.0,
         }
     }
 
@@ -71,6 +88,12 @@ impl RepSegmentationConfig {
     /// to count as a real phase rather than jitter.
     pub fn min_phase_duration_seconds(&self) -> f64 {
         self.min_phase_duration_seconds
+    }
+
+    /// Minimum vertical travel (position units: px or m) each phase of a
+    /// candidate rep must cover; candidates below it are discarded.
+    pub fn min_displacement(&self) -> f64 {
+        self.min_displacement
     }
 }
 
@@ -94,6 +117,11 @@ impl RepSegmentationConfigBuilder {
 
     pub fn min_phase_duration_seconds(mut self, seconds: f64) -> Self {
         self.inner.min_phase_duration_seconds = seconds;
+        self
+    }
+
+    pub fn min_displacement(mut self, displacement: f64) -> Self {
+        self.inner.min_displacement = displacement;
         self
     }
 
@@ -191,11 +219,26 @@ pub fn segment_reps(velocity: &[VelocitySample], config: RepSegmentationConfig) 
         }
 
         if j < runs.len() && runs[j].phase == Phase::Ascending {
-            reps.push(Rep {
-                eccentric_start,
-                bottom,
-                concentric_end: runs[j].end,
-            });
+            // Displacement gate (task 15.1): each phase of a real rep must
+            // cover a minimum vertical travel. Per-phase (rather than total
+            // ROM) so that an asymmetric candidate — e.g. a long slow drift
+            // down with only a tiny bounce back up — is rejected too; for a
+            // genuine rep the two phases cover roughly the same distance,
+            // and any idle pause at the bottom contributes ~nothing, so
+            // per-phase and total-ROM agree on real reps. Undersized
+            // candidates are discarded outright (both phases consumed),
+            // never merged into a neighbor.
+            let eccentric_travel = run_displacement(velocity, &runs[i]);
+            let concentric_travel = run_displacement(velocity, &runs[j]);
+            if eccentric_travel >= config.min_displacement
+                && concentric_travel >= config.min_displacement
+            {
+                reps.push(Rep {
+                    eccentric_start,
+                    bottom,
+                    concentric_end: runs[j].end,
+                });
+            }
             i = j + 1;
         } else {
             // Descent with no following ascent: incomplete trailing rep,
@@ -205,6 +248,17 @@ pub fn segment_reps(velocity: &[VelocitySample], config: RepSegmentationConfig) 
     }
 
     reps
+}
+
+/// Absolute vertical travel over a run, by trapezoidal integration of `vy`
+/// over the run's sample times. Units follow the samples (px or m).
+fn run_displacement(velocity: &[VelocitySample], run: &Run) -> f64 {
+    let mut displacement = 0.0;
+    for k in run.start..run.end {
+        let dt = velocity[k + 1].t_seconds - velocity[k].t_seconds;
+        displacement += 0.5 * (velocity[k].vy + velocity[k + 1].vy) * dt;
+    }
+    displacement.abs()
 }
 
 /// Groups a label sequence into contiguous runs.
@@ -255,16 +309,20 @@ mod tests {
             .build()
     }
 
-    /// A single clean rep: ~1s idle, ~1s descent ramping vy up to 50,
-    /// ~1s ascent ramping vy down to -50, ~1s idle. At 30fps that's 120
-    /// samples total, comfortably above the min phase duration.
+    /// A single clean rep: ~1s idle, ~1s descent ramping vy up to 400,
+    /// ~1s ascent ramping vy down to -400, ~1s idle. At 30fps that's 120
+    /// samples total, comfortably above the min phase duration, and each
+    /// phase integrates to ~190 px of travel — realistic (a real squat in
+    /// our test footage covers ~180 px of ROM) and comfortably above the
+    /// 40 px `min_displacement` gate. (Pre-15.1 this ramped to only 50,
+    /// i.e. ~25 px of travel, which no real rep has.)
     fn clean_rep(idle_before: usize, idle_after: usize) -> Vec<f64> {
         let mut vys = vec![0.0; idle_before];
         for i in 0..30 {
-            vys.push(50.0 * (i as f64 / 29.0)); // descent: ramp 0 -> 50
+            vys.push(400.0 * (i as f64 / 29.0)); // descent: ramp 0 -> 400
         }
         for i in 0..30 {
-            vys.push(-50.0 * (i as f64 / 29.0)); // ascent: ramp 0 -> -50
+            vys.push(-400.0 * (i as f64 / 29.0)); // ascent: ramp 0 -> -400
         }
         vys.extend(vec![0.0; idle_after]);
         vys
@@ -326,14 +384,16 @@ mod tests {
 
     #[test]
     fn pause_at_bottom_still_yields_one_rep() {
+        // Realistic amplitude (~190 px travel per phase; was 50-peak ≈
+        // 25 px pre-15.1, below the new min_displacement gate).
         let mut vys = vec![0.0; 20];
         for i in 0..30 {
-            vys.push(50.0 * (i as f64 / 29.0));
+            vys.push(400.0 * (i as f64 / 29.0));
         }
         // Plateau (pause at the bottom of the squat) for 20 samples.
         vys.extend(vec![0.0; 20]);
         for i in 0..30 {
-            vys.push(-50.0 * (i as f64 / 29.0));
+            vys.push(-400.0 * (i as f64 / 29.0));
         }
         vys.extend(vec![0.0; 20]);
         let velocity = series(&vys);
@@ -375,6 +435,105 @@ mod tests {
         let cfg = RepSegmentationConfig::default_config();
         assert_eq!(cfg.min_velocity(), 5.0);
         assert_eq!(cfg.min_phase_duration_seconds(), 0.15);
+        assert_eq!(cfg.min_displacement(), 40.0);
         assert_eq!(cfg, RepSegmentationConfig::default());
+    }
+
+    /// Regression for the phantom-rep bug (task 15.1): during a walkout /
+    /// unrack the bar drifts slowly up and down by a few dozen pixels for
+    /// several seconds. Each oscillation clears both the velocity dead-band
+    /// (10 px/s > 5) and the minimum phase duration (0.5s > 0.15s), but the
+    /// travel per phase is only 10 px/s x 0.5s = 5 px — nowhere near a real
+    /// squat's ~180 px range of motion. Without a displacement gate this
+    /// counted as 3 "reps" before the lifter even started.
+    #[test]
+    fn walkout_like_small_slow_oscillation_yields_zero_reps() {
+        let mut vys = vec![0.0; 15];
+        for _ in 0..3 {
+            vys.extend(vec![10.0; 15]); // 0.5s slow drift down: 5 px travel
+            vys.extend(vec![-10.0; 15]); // 0.5s slow drift up: 5 px travel
+        }
+        vys.extend(vec![0.0; 15]);
+        let velocity = series(&vys);
+        let reps = segment_reps(&velocity, default_config());
+        assert_eq!(reps.len(), 0);
+    }
+
+    /// A real-amplitude rep (~190 px of travel per phase, matching the
+    /// ~180 px squat ROM in our test footage) must be unaffected by the
+    /// displacement gate.
+    #[test]
+    fn real_amplitude_rep_survives_displacement_gate() {
+        let vys = clean_rep(30, 30);
+        let velocity = series(&vys);
+        let reps = segment_reps(&velocity, default_config());
+        assert_eq!(reps.len(), 1);
+    }
+
+    /// Boundary behavior: a phase whose displacement is exactly
+    /// `min_displacement` is kept; strictly below is discarded. Constant
+    /// vy = 30 px/s across a run spanning exactly 1s integrates to exactly
+    /// 30.0 px per phase (trapezoid over a constant is exact).
+    #[test]
+    fn phase_displacement_exactly_at_threshold_is_kept() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(vec![30.0; 31]); // spans 30 frame gaps = 1.0s -> 30.0 px
+        vys.extend(vec![-30.0; 31]);
+        vys.extend(vec![0.0; 10]);
+        let velocity = series(&vys);
+
+        let at = RepSegmentationConfig::builder()
+            .min_velocity(5.0)
+            .min_phase_duration_seconds(0.15)
+            .min_displacement(30.0)
+            .build();
+        assert_eq!(segment_reps(&velocity, at).len(), 1);
+
+        let above = RepSegmentationConfig::builder()
+            .min_velocity(5.0)
+            .min_phase_duration_seconds(0.15)
+            .min_displacement(30.0 + 1e-9)
+            .build();
+        assert_eq!(segment_reps(&velocity, above).len(), 0);
+    }
+
+    /// Calibrated (meter-unit) variant: a 0.5 m rep passes a 0.15 m
+    /// displacement gate; a 0.05 m walkout-scale drift does not.
+    #[test]
+    fn calibrated_meter_units_gate_works() {
+        let config = RepSegmentationConfig::builder()
+            .min_velocity(0.02)
+            .min_phase_duration_seconds(0.15)
+            .min_displacement(0.15)
+            .build();
+
+        // 0.5 m/s for 1s each way -> 0.5 m per phase: a real rep.
+        let mut real = vec![0.0; 10];
+        real.extend(vec![0.5; 31]);
+        real.extend(vec![-0.5; 31]);
+        real.extend(vec![0.0; 10]);
+        assert_eq!(segment_reps(&series(&real), config).len(), 1);
+
+        // 0.05 m/s for 1s each way -> 0.05 m per phase: setup drift.
+        let mut drift = vec![0.0; 10];
+        drift.extend(vec![0.05; 31]);
+        drift.extend(vec![-0.05; 31]);
+        drift.extend(vec![0.0; 10]);
+        assert_eq!(segment_reps(&series(&drift), config).len(), 0);
+    }
+
+    /// A discarded undersized candidate must not merge with neighbors: a
+    /// tiny oscillation between two real reps still yields exactly 2 reps,
+    /// each with its own boundaries.
+    #[test]
+    fn undersized_candidate_between_real_reps_is_discarded_not_merged() {
+        let mut vys = clean_rep(15, 15);
+        vys.extend(vec![10.0; 15]);
+        vys.extend(vec![-10.0; 15]);
+        vys.extend(clean_rep(15, 15));
+        let velocity = series(&vys);
+        let reps = segment_reps(&velocity, default_config());
+        assert_eq!(reps.len(), 2);
+        assert!(reps[0].concentric_end < reps[1].eccentric_start);
     }
 }

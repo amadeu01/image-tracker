@@ -685,7 +685,11 @@ impl AppState {
         if self.tracking.is_some() || self.tracking_run.running {
             return Phase::TrackingPath {
                 frame: self.tracking_run.last_frame_index.unwrap_or(0),
-                total: self.metadata.frame_count.unwrap_or(0),
+                // Last valid 0-based frame index, not the raw frame count:
+                // must match the bottom status bar's "frame N/M" (which
+                // shows `frame_count - 1`), or the two disagree by one for
+                // the whole run (task 15.1: "541/3778" vs "541/3777").
+                total: self.metadata.frame_count.unwrap_or(0).saturating_sub(1),
             };
         }
         Phase::Idle
@@ -2364,7 +2368,11 @@ mod tests {
             });
         let text = state.banner_text();
         assert!(text.contains("42"));
-        assert!(text.contains("120"));
+        // Total is the last valid 0-based frame index (frame_count - 1),
+        // matching the bottom status bar's "frame N/M" (task 15.1: the
+        // banner used to show the raw frame count, one higher).
+        assert!(text.contains("119"));
+        assert!(!text.contains("120"));
         assert!(text.to_lowercase().contains("tracking"));
     }
 
@@ -2397,7 +2405,7 @@ mod tests {
             state.phase(),
             Phase::TrackingPath {
                 frame: 7,
-                total: 50
+                total: 49 // last valid 0-based index, not the raw count
             }
         );
     }
