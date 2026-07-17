@@ -6,6 +6,7 @@ use eframe::egui;
 
 use super::palette;
 use super::state::AppState;
+use super::theme;
 
 /// Design's status bar (task 13.1) is "a monospace one-liner: file · frame ·
 /// mode · seed · calibration" — `state.status_line()` already assembles the
@@ -132,6 +133,19 @@ pub fn show_scrub_bar(ctx: &egui::Context, state: Option<&mut AppState>) {
                 .clicked()
             {
                 state.next_frame();
+            }
+            // Bar-path overlay visibility toggle (task 15.2). Lives in the
+            // transport row so it's reachable both live and in review; the
+            // click persists immediately (same save-on-change stance as the
+            // stop-threshold DragValue).
+            let mut show = state.show_path;
+            if ui
+                .toggle_value(&mut show, "👁 Path")
+                .on_hover_text("show/hide the bar path overlay on the video")
+                .changed()
+            {
+                state.show_path = show;
+                theme::save_show_path(show);
             }
         });
     });

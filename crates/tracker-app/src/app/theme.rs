@@ -47,6 +47,11 @@ struct AppConfig {
     /// user has never changed it from `TrackingSettings::default`'s 20%.
     #[serde(default)]
     stop_threshold_pct: Option<f64>,
+    /// Bar-path overlay visibility (task 15.2). `None` when the user has
+    /// never toggled it — treated as "show" (`AppState::new`'s default) —
+    /// so files written by older builds keep working unchanged.
+    #[serde(default)]
+    show_path: Option<bool>,
 }
 
 fn config_path() -> PathBuf {
@@ -99,6 +104,7 @@ fn load() -> AppConfig {
         Ok(legacy) => AppConfig {
             dark_mode: Some(legacy.dark_mode),
             stop_threshold_pct: None,
+            show_path: None,
         },
         Err(_) => AppConfig::default(),
     }
@@ -153,6 +159,20 @@ pub fn save_stop_threshold(pct: f64) {
     write(&cfg);
 }
 
+/// Loads the persisted bar-path overlay visibility (task 15.2), if the user
+/// has ever toggled it. `None` means "use `AppState::new`'s default: shown."
+pub fn load_show_path() -> Option<bool> {
+    load().show_path
+}
+
+/// Persists the bar-path overlay visibility. Best-effort, same stance as
+/// `save_override`. Preserves the other persisted fields already on disk.
+pub fn save_show_path(show: bool) {
+    let mut cfg = load();
+    cfg.show_path = Some(show);
+    write(&cfg);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,15 +203,26 @@ mod tests {
     }
 
     #[test]
-    fn app_config_round_trips_both_fields_through_json() {
+    fn app_config_round_trips_all_fields_through_json() {
         let cfg = AppConfig {
             dark_mode: Some(true),
             stop_threshold_pct: Some(15.0),
+            show_path: Some(false),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.dark_mode, Some(true));
         assert_eq!(back.stop_threshold_pct, Some(15.0));
+        assert_eq!(back.show_path, Some(false));
+    }
+
+    #[test]
+    fn missing_show_path_field_parses_as_none_default_shown() {
+        // A settings.json written before 15.2 has no `show_path` key; it
+        // must parse (defaulting to None = "show"), not error.
+        let back: AppConfig =
+            serde_json::from_str(r#"{"dark_mode":true,"stop_threshold_pct":15.0}"#).unwrap();
+        assert_eq!(back.show_path, None);
     }
 
     #[test]

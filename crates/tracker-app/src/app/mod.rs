@@ -159,6 +159,11 @@ impl TrackerApp {
         if let Some(pct) = theme::load_stop_threshold() {
             state.settings.stop_threshold_pct = pct;
         }
+        // Restore the persisted bar-path overlay visibility (task 15.2),
+        // same pattern as the stop threshold above.
+        if let Some(show) = theme::load_show_path() {
+            state.show_path = show;
+        }
         self.state = Some(state);
         self.cache = Some(FrameCache::new(decoder, 16));
         self.texture = None;

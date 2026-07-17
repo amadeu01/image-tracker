@@ -113,21 +113,29 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         // over a gap) orange, so the honest/fabricated split from
         // CONTEXT.md's "Gap" term is visible on the path itself, not just
         // in the Results section's quality line.
-        if let Some(results) = &state.results {
-            draw_bar_path(
-                ui.painter(),
-                image_rect,
-                tex_size,
-                results.bar_path.points(),
-            );
-            if let Some(point) = results.bar_path.position_at(state.current_frame) {
-                draw_crosshair(
+        //
+        // 15.2: the whole overlay (polyline + its white current-position
+        // crosshair) is gated on `show_path` — the transport-row toggle.
+        // The *live* tracking crosshair above and the Seed marker are
+        // deliberately not gated: lock-on feedback stays visible even with
+        // the path hidden.
+        if state.show_path {
+            if let Some(results) = &state.results {
+                draw_bar_path(
                     ui.painter(),
                     image_rect,
                     tex_size,
-                    point.position,
-                    egui::Color32::WHITE,
+                    results.bar_path.points(),
                 );
+                if let Some(point) = results.bar_path.position_at(state.current_frame) {
+                    draw_crosshair(
+                        ui.painter(),
+                        image_rect,
+                        tex_size,
+                        point.position,
+                        egui::Color32::WHITE,
+                    );
+                }
             }
         }
     });

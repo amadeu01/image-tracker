@@ -499,6 +499,15 @@ pub struct AppState {
     /// selects (and clears any clip); only ▶ arms a clip. Nothing sets this
     /// yet — 13.3 owns that.
     pub rep_clip: Option<usize>,
+    /// Whether the bar-path overlay (the Review polyline + its
+    /// current-position marker) is drawn over the video (task 15.2).
+    /// Defaults to `true`; toggled from the transport row in
+    /// `bottom_bar.rs` and persisted via `theme::save_show_path` /
+    /// restored in `TrackerApp::load_video` (same seam as
+    /// `stop_threshold_pct`, keeping `AppState::new` IO-free). The *live*
+    /// tracking crosshair and the Seed marker deliberately ignore this —
+    /// lock-on feedback stays visible even with the path hidden.
+    pub show_path: bool,
 }
 
 impl AppState {
@@ -530,6 +539,7 @@ impl AppState {
             display_mode: DisplayMode::Results,
             selected_rep: None,
             rep_clip: None,
+            show_path: true,
         }
     }
 
@@ -1573,6 +1583,21 @@ mod tests {
             frame_count,
             rotation: None,
         }
+    }
+
+    #[test]
+    fn show_path_defaults_to_true() {
+        let state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        assert!(state.show_path, "path overlay must be visible by default");
+    }
+
+    #[test]
+    fn show_path_toggles_off_and_back_on() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        state.show_path = !state.show_path;
+        assert!(!state.show_path);
+        state.show_path = !state.show_path;
+        assert!(state.show_path);
     }
 
     #[test]
