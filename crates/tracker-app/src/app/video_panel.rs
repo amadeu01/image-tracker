@@ -5,7 +5,8 @@
 
 use eframe::egui;
 
-use super::state::Mode;
+use super::palette;
+use super::state::{effective_patch_radius, Mode, PATCH_RADIUS_RANGE};
 use super::TrackerApp;
 use crate::screen_map::screen_to_image_px;
 
@@ -58,8 +59,70 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
             }
         }
 
+        // 15.3: scroll over the video while placing a seed resizes the
+        // template patch region — writes the same `settings.patch_radius`
+        // the Advanced DragValue edits (that knob stays the source of
+        // truth; this is just another writer, clamped to the same range).
+        if state.mode == Mode::PlacingSeed && response.hovered() {
+            let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
+            if scroll_y.abs() > 0.0 {
+                let step: i64 = if scroll_y > 0.0 { 1 } else { -1 };
+                let next = (state.settings.patch_radius as i64 + step).clamp(
+                    *PATCH_RADIUS_RANGE.start() as i64,
+                    *PATCH_RADIUS_RANGE.end() as i64,
+                );
+                state.settings.patch_radius = next as u32;
+            }
+        }
+
+        let patch_radius = effective_patch_radius(&state.settings);
+        let accent = palette::chrome_palette(ui.visuals().dark_mode).accent;
+
+        // 15.3: live preview of the patch region under the cursor while
+        // placing, so the user sees the region they're about to seed.
+        if state.mode == Mode::PlacingSeed {
+            if let Some(hover_pos) = response.hover_pos() {
+                if let Some(image_px) = screen_to_image_px(
+                    hover_pos,
+                    image_rect,
+                    state.metadata.display_width(),
+                    state.metadata.display_height(),
+                ) {
+                    draw_patch_region(
+                        ui.painter(),
+                        image_rect,
+                        tex_size,
+                        image_px,
+                        patch_radius,
+                        accent,
+                    );
+                    draw_patch_hint(ui.painter(), image_rect, tex_size, image_px, patch_radius);
+                }
+            }
+        }
+
         if let Some(seed) = state.seed {
             if seed.frame_index == state.current_frame {
+                // 15.3: the seed region IS the template patch — draw the
+                // exact square the Template tracker will cut (side
+                // 2*r + 1 source px), so radius changes are visible live.
+                draw_patch_region(
+                    ui.painter(),
+                    image_rect,
+                    tex_size,
+                    seed.position,
+                    patch_radius,
+                    accent,
+                );
+                if state.mode == Mode::PlacingSeed {
+                    draw_patch_hint(
+                        ui.painter(),
+                        image_rect,
+                        tex_size,
+                        seed.position,
+                        patch_radius,
+                    );
+                }
                 draw_crosshair(
                     ui.painter(),
                     image_rect,
@@ -206,6 +269,67 @@ fn draw_crosshair(
         stroke,
     );
     painter.circle_stroke(screen, radius * 0.6, stroke);
+}
+
+/// Draw the template patch region (task 15.3): the square of source pixels
+/// the Template tracker cuts around the seed, side `2*radius + 1` image px,
+/// mapped through the drawn image rect so it scales with fit/letterboxing.
+/// Two-tone stroke — 1px dark outline outside a 1px accent stroke — so it
+/// stays visible on both bright and dark video content. Painter overlay
+/// only — never mutates frame pixels.
+fn draw_patch_region(
+    painter: &egui::Painter,
+    image_rect: egui::Rect,
+    image_native_size: egui::Vec2,
+    center_px: tracker_core::Point,
+    radius: u32,
+    accent: egui::Color32,
+) {
+    let Some(center) = image_px_to_screen(image_rect, image_native_size, center_px) else {
+        return;
+    };
+    if image_native_size.x <= 0.0 || image_native_size.y <= 0.0 {
+        return;
+    }
+    let scale_x = image_rect.width() / image_native_size.x;
+    let scale_y = image_rect.height() / image_native_size.y;
+    // The patch spans center ± radius inclusive: 2r + 1 source pixels.
+    let half = radius as f32 + 0.5;
+    let rect = egui::Rect::from_center_size(
+        center,
+        egui::Vec2::new(2.0 * half * scale_x, 2.0 * half * scale_y),
+    );
+    let outline = egui::Color32::from_black_alpha(180);
+    painter.rect_stroke(rect.expand(1.0), 0.0, egui::Stroke::new(1.0, outline));
+    painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, accent));
+}
+
+/// Small "patch NxN px — scroll to resize" label next to the patch region
+/// while placing a seed (task 15.3), on a translucent backdrop so it reads
+/// over any video content.
+fn draw_patch_hint(
+    painter: &egui::Painter,
+    image_rect: egui::Rect,
+    image_native_size: egui::Vec2,
+    center_px: tracker_core::Point,
+    radius: u32,
+) {
+    let Some(center) = image_px_to_screen(image_rect, image_native_size, center_px) else {
+        return;
+    };
+    let scale_x = image_rect.width() / image_native_size.x.max(1.0);
+    let side = 2 * radius + 1;
+    let text = format!("patch {side}\u{d7}{side} px \u{2014} scroll to resize");
+    let anchor = egui::pos2(center.x + (radius as f32 + 0.5) * scale_x + 8.0, center.y);
+    let galley =
+        painter.layout_no_wrap(text, egui::FontId::proportional(12.0), egui::Color32::WHITE);
+    let text_rect = egui::Align2::LEFT_CENTER.anchor_size(anchor, galley.size());
+    painter.rect_filled(
+        text_rect.expand(3.0),
+        3.0,
+        egui::Color32::from_black_alpha(150),
+    );
+    painter.galley(text_rect.min, galley, egui::Color32::WHITE);
 }
 
 /// Central-panel content when no video is loaded (10.5): a friendly prompt

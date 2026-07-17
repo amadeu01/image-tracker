@@ -171,6 +171,21 @@ pub struct TrackingSettings {
 /// Default stop-set velocity-loss threshold (%, task 13.5's design spec).
 pub const DEFAULT_STOP_THRESHOLD_PCT: f64 = 20.0;
 
+/// Valid range for `TrackingSettings::patch_radius` (task 15.3): shared by
+/// the Advanced DragValue in `settings_section.rs` and the scroll-to-resize
+/// gesture on the video panel, so both writers clamp identically.
+pub const PATCH_RADIUS_RANGE: std::ops::RangeInclusive<u32> = 4..=64;
+
+/// The patch radius a run started right now would actually use (task 15.3):
+/// the settings value clamped into [`PATCH_RADIUS_RANGE`]. Single source of
+/// truth for the drawn seed-region rectangle, so the overlay always matches
+/// the square the Template tracker will cut (side `2*r + 1` source pixels).
+pub fn effective_patch_radius(settings: &TrackingSettings) -> u32 {
+    settings
+        .patch_radius
+        .clamp(*PATCH_RADIUS_RANGE.start(), *PATCH_RADIUS_RANGE.end())
+}
+
 impl Default for TrackingSettings {
     fn default() -> Self {
         Self {
@@ -1583,6 +1598,36 @@ mod tests {
             frame_count,
             rotation: None,
         }
+    }
+
+    #[test]
+    fn effective_patch_radius_uses_settings_value() {
+        let mut settings = TrackingSettings::default();
+        assert_eq!(
+            effective_patch_radius(&settings),
+            crate::tracking::DEFAULT_PATCH_RADIUS
+        );
+        settings.patch_radius = 20;
+        assert_eq!(effective_patch_radius(&settings), 20);
+    }
+
+    #[test]
+    fn effective_patch_radius_clamps_into_valid_range() {
+        let mut settings = TrackingSettings {
+            patch_radius: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_patch_radius(&settings),
+            *PATCH_RADIUS_RANGE.start()
+        );
+        settings.patch_radius = 9999;
+        assert_eq!(effective_patch_radius(&settings), *PATCH_RADIUS_RANGE.end());
+    }
+
+    #[test]
+    fn patch_radius_range_covers_the_default() {
+        assert!(PATCH_RADIUS_RANGE.contains(&crate::tracking::DEFAULT_PATCH_RADIUS));
     }
 
     #[test]

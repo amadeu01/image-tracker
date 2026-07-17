@@ -237,7 +237,7 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                             "patch radius (px)",
                             &mut state.settings.patch_radius,
                             1.0,
-                            4..=64,
+                            super::state::PATCH_RADIUS_RANGE,
                             education::TIP_PATCH_RADIUS,
                         );
                         advanced_tuning_row(
