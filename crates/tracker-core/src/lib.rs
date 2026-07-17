@@ -40,8 +40,8 @@ pub use patch::{extract_patch, Patch};
 pub use preprocessor::{Preprocessor, PreprocessorChain};
 pub use rep::{segment_reps, Rep, RepSegmentationConfig, RepSegmentationConfigBuilder};
 pub use rep_metrics::{
-    all_rep_metrics, rep_metrics, set_duration_seconds, stop_set_evaluation, velocity_loss_percent,
-    RepMetrics, StopSet,
+    all_rep_metrics, linear_trend, rep_metrics, set_duration_seconds, stop_set_evaluation,
+    velocity_loss_percent, RepMetrics, StopSet,
 };
 pub use session::{
     Gap, Sample, SessionState, Source, TrackingSession, TrackingSessionConfig,

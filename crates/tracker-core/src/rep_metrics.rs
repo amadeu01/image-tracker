@@ -204,6 +204,38 @@ pub fn stop_set_evaluation(losses: &[Option<f64>], threshold_pct: f64) -> Option
     })
 }
 
+/// Least-squares linear fit of `values` over their indices (x = 0, 1, …),
+/// the velocity chart's trend line (task 13.4) — a straight port of the
+/// design mock's `renderVals()` fit (`slope = (n·Σxy − Σx·Σy) /
+/// (n·Σx² − (Σx)²)`, `intercept = (Σy − slope·Σx) / n`). Returns
+/// `(slope, intercept)` so a caller can evaluate the trend at any rep index
+/// as `intercept + slope * i`.
+///
+/// Returns `None` when a fit is undefined or would be dishonest: fewer than
+/// 2 points (no line through one point), or any non-finite value (a NaN/inf
+/// mean would poison the sums into a NaN line silently drawn at nonsense
+/// coordinates).
+pub fn linear_trend(values: &[f64]) -> Option<(f64, f64)> {
+    let n = values.len();
+    if n < 2 || values.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let nf = n as f64;
+    let sx: f64 = (0..n).map(|i| i as f64).sum();
+    let sy: f64 = values.iter().sum();
+    let sxy: f64 = values.iter().enumerate().map(|(i, v)| i as f64 * v).sum();
+    let sxx: f64 = (0..n).map(|i| (i * i) as f64).sum();
+    let denom = nf * sxx - sx * sx;
+    // With x = 0..n and n >= 2 the denominator is strictly positive, but
+    // guard anyway rather than divide by zero if that invariant ever bends.
+    if denom == 0.0 {
+        return None;
+    }
+    let slope = (nf * sxy - sx * sy) / denom;
+    let intercept = (sy - slope * sx) / nf;
+    Some((slope, intercept))
+}
+
 /// Wall-clock duration (seconds) spanned by the set: rep 1's
 /// `eccentric_start` timestamp to the last rep's `concentric_end`
 /// timestamp (the "SET TIME" headline card). `None` for an empty `metrics`
@@ -393,5 +425,50 @@ mod tests {
     #[test]
     fn set_duration_seconds_none_for_empty_metrics() {
         assert_eq!(set_duration_seconds(&[]), None);
+    }
+
+    #[test]
+    fn linear_trend_recovers_exact_line() {
+        // y = 2x + 1 over x = 0, 1, 2.
+        let (slope, intercept) = linear_trend(&[1.0, 3.0, 5.0]).unwrap();
+        assert!((slope - 2.0).abs() < 1e-9);
+        assert!((intercept - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn linear_trend_flat_data_has_zero_slope() {
+        let (slope, intercept) = linear_trend(&[0.8, 0.8, 0.8, 0.8]).unwrap();
+        assert!(slope.abs() < 1e-12);
+        assert!((intercept - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn linear_trend_matches_mock_least_squares_on_noisy_data() {
+        // The design mock's 8-rep means; expected slope/intercept computed
+        // with the mock's own formula by hand.
+        let means = [0.82, 0.80, 0.79, 0.76, 0.73, 0.70, 0.66, 0.61];
+        let (slope, intercept) = linear_trend(&means).unwrap();
+        let n = 8.0;
+        let sx = 28.0; // 0+1+..+7
+        let sy: f64 = means.iter().sum();
+        let sxy: f64 = means.iter().enumerate().map(|(i, v)| i as f64 * v).sum();
+        let sxx = 140.0; // 0+1+4+..+49
+        let expected_slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+        let expected_icpt = (sy - expected_slope * sx) / n;
+        assert!((slope - expected_slope).abs() < 1e-12);
+        assert!((intercept - expected_icpt).abs() < 1e-12);
+        assert!(slope < 0.0, "declining set must fit a falling trend");
+    }
+
+    #[test]
+    fn linear_trend_none_for_fewer_than_two_points() {
+        assert_eq!(linear_trend(&[]), None);
+        assert_eq!(linear_trend(&[0.8]), None);
+    }
+
+    #[test]
+    fn linear_trend_none_for_non_finite_values() {
+        assert_eq!(linear_trend(&[0.8, f64::NAN]), None);
+        assert_eq!(linear_trend(&[0.8, f64::INFINITY, 0.7]), None);
     }
 }
