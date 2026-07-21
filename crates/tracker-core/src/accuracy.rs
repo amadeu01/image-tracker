@@ -104,10 +104,13 @@ impl AccuracyReport {
     /// diameter in pixels. `None` when there is no error to report or the
     /// diameter is not a usable positive number.
     pub fn mean_error_plate_diameters(&self, plate_diameter_px: f64) -> Option<f64> {
-        if !(plate_diameter_px > 0.0) {
-            return None;
+        // Only a finite, strictly-positive diameter is a usable scale;
+        // zero, negative, and NaN all yield None.
+        if plate_diameter_px.is_finite() && plate_diameter_px > 0.0 {
+            self.mean_error_px.map(|e| e / plate_diameter_px)
+        } else {
+            None
         }
-        self.mean_error_px.map(|e| e / plate_diameter_px)
     }
 }
 

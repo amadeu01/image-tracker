@@ -14,6 +14,7 @@ pub struct TemplateTrackerConfig {
     search_radius: u32,
     min_score: f64,
     update_threshold: f64,
+    anchor_floor: f64,
     preprocessor: PreprocessorChain,
 }
 
@@ -44,6 +45,19 @@ impl TemplateTrackerConfig {
         self.update_threshold
     }
 
+    /// Minimum score against the *anchor* template (captured once at the
+    /// seed, never changed) for a candidate to be eligible at all — the
+    /// anchor's veto (17.3). Prevents the drift ratchet where the adaptive
+    /// template, refreshed from a slightly-wrong match, walks the tracker
+    /// off the object one pixel per frame while still scoring high against
+    /// itself (audit F3). Set below `min_score` so the anchor only rejects
+    /// candidates it no longer recognizes as the seeded object, not merely
+    /// weak ones; the adaptive still handles legitimate appearance change
+    /// (rotation, lighting) above this floor.
+    pub fn anchor_floor(&self) -> f64 {
+        self.anchor_floor
+    }
+
     /// The `Preprocessor` chain applied to the reference patch (at
     /// construction) and to every candidate patch (per step). Empty
     /// (identity/no-op) by default.
@@ -59,6 +73,7 @@ pub struct TemplateTrackerConfigBuilder {
     search_radius: u32,
     min_score: f64,
     update_threshold: f64,
+    anchor_floor: f64,
     preprocessor: PreprocessorChain,
 }
 
@@ -69,6 +84,7 @@ impl Default for TemplateTrackerConfigBuilder {
             search_radius: 15,
             min_score: 0.5,
             update_threshold: 0.7,
+            anchor_floor: 0.3,
             preprocessor: PreprocessorChain::new(),
         }
     }
@@ -99,6 +115,12 @@ impl TemplateTrackerConfigBuilder {
         self
     }
 
+    /// Minimum anchor score for a candidate to be eligible (17.3 veto).
+    pub fn anchor_floor(mut self, floor: f64) -> Self {
+        self.anchor_floor = floor;
+        self
+    }
+
     /// Sets the `Preprocessor` chain applied to the reference patch and
     /// every candidate patch (see CONTEXT.md, "Preprocessor").
     pub fn preprocessor(mut self, chain: PreprocessorChain) -> Self {
@@ -112,6 +134,7 @@ impl TemplateTrackerConfigBuilder {
             search_radius: self.search_radius,
             min_score: self.min_score,
             update_threshold: self.update_threshold,
+            anchor_floor: self.anchor_floor,
             preprocessor: self.preprocessor,
         }
     }
@@ -212,7 +235,11 @@ impl TemplateTracker {
         let cy = last_pos.y.round() as i64;
         let r = self.config.search_radius as i64;
 
-        let mut best: Option<(Point, f64, Patch)> = None;
+        // Each eligible candidate carries its winning (effective) score and
+        // its anchor score separately: the anchor score gates the adaptive
+        // refresh (17.3), so it must survive to the accept step, not be
+        // collapsed into the effective score here.
+        let mut best: Option<(Point, f64, f64, Patch)> = None;
 
         for dy in -r..=r {
             for dx in -r..=r {
@@ -224,23 +251,54 @@ impl TemplateTracker {
                 let candidate = self.config.preprocessor.apply_patch(&candidate);
                 let anchor_score = metric.score(&self.anchor, &candidate);
                 let adaptive_score = metric.score(&self.adaptive, &candidate);
-                let score = match (anchor_score, adaptive_score) {
-                    (Some(a), Some(b)) => a.max(b),
-                    (Some(a), None) => a,
-                    (None, Some(b)) => b,
-                    (None, None) => continue,
+
+                // The anchor's veto (17.3, audit F3): a candidate is only
+                // eligible if the never-changing anchor still recognizes it
+                // above `anchor_floor`. Without this, `max(anchor, adaptive)`
+                // lets a candidate the anchor rejects win on the adaptive's
+                // score alone, and the refresh writes that error back into
+                // the adaptive — a drift ratchet with no restoring force.
+                let Some(anchor_score) = anchor_score.filter(|a| *a >= self.config.anchor_floor)
+                else {
+                    continue;
+                };
+
+                // Among eligible candidates the effective (winning) score is
+                // still max(anchor, adaptive): the adaptive may *refine* the
+                // match within the anchor's approval, it just can't override
+                // the anchor's identity check above.
+                let score = match adaptive_score {
+                    Some(b) => anchor_score.max(b),
+                    None => anchor_score,
                 };
                 if best
                     .as_ref()
-                    .is_none_or(|(_, best_score, _)| score > *best_score)
+                    .is_none_or(|(_, best_score, _, _)| score > *best_score)
                 {
-                    best = Some((Point::new(x as f64, y as f64), score, candidate));
+                    best = Some((
+                        Point::new(x as f64, y as f64),
+                        score,
+                        anchor_score,
+                        candidate,
+                    ));
                 }
             }
         }
 
         match best {
-            Some((position, score, candidate)) if score >= self.config.min_score => {
+            Some((position, score, _anchor_score, candidate))
+                if score >= self.config.min_score =>
+            {
+                // Refresh the adaptive when the effective match is strong
+                // (>= update_threshold). The anchor veto above already
+                // guaranteed the winning candidate cleared `anchor_floor`,
+                // so a refreshed adaptive can only ever be a patch the
+                // anchor still recognizes as the seeded object — this keeps
+                // the adaptive useful for real appearance change (a rotated
+                // plate can score high on the adaptive while the anchor
+                // sits at the floor) without reopening the drift ratchet
+                // (audit F3), because a candidate the anchor has lost
+                // entirely never becomes eligible to refresh from.
                 if score >= self.config.update_threshold {
                     self.adaptive = candidate;
                 }
@@ -278,6 +336,8 @@ mod tests {
             .build()
     }
 
+
+
     #[test]
     fn config_builder_has_defaults() {
         let config = TemplateTrackerConfig::builder().build();
@@ -285,6 +345,66 @@ mod tests {
         assert_eq!(config.search_radius(), 15);
         assert_eq!(config.min_score(), 0.5);
         assert_eq!(config.update_threshold(), 0.7);
+        assert_eq!(config.anchor_floor(), 0.3);
+    }
+
+    /// Builds a frame whose left half is one gray value and right half
+    /// another, so a patch's appearance depends on where it sits — used to
+    /// exercise anchor vs adaptive disagreement.
+    fn split_frame(width: u32, height: u32, boundary: i64, left: u8, right: u8) -> Frame {
+        let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+        for _y in 0..height as i64 {
+            for x in 0..width as i64 {
+                let v = if x < boundary { left } else { right };
+                rgb.extend_from_slice(&[v, v, v]);
+            }
+        }
+        Frame::new(width, height, rgb).unwrap()
+    }
+
+    /// 17.3: a candidate the anchor rejects (below `anchor_floor`) must not
+    /// be selected, even if it is the best available match — the anchor's
+    /// veto. Regression against the `max(anchor, adaptive)` ratchet.
+    #[test]
+    fn anchor_floor_vetoes_candidates_the_anchor_rejects() {
+        // Seed on a bright square: anchor learns "bright patch on dark".
+        let seed_frame = frame_with_square(40, 40, 18, 18, 5);
+        let config = TemplateTrackerConfig::builder()
+            .patch_radius(3)
+            .search_radius(6)
+            .min_score(0.3)
+            .anchor_floor(0.5)
+            .build();
+        let mut tracker = TemplateTracker::new(&seed_frame, Point::new(20.0, 20.0), config).unwrap();
+
+        // Next frame: the square is gone entirely (uniform field). Nothing
+        // resembles the anchor, so every candidate is vetoed → Miss, rather
+        // than locking onto whatever scored least-badly.
+        let empty = split_frame(40, 40, 40, 20, 20);
+        assert_eq!(tracker.step(&empty, Point::new(20.0, 20.0)), StepOutcome::Miss);
+    }
+
+    /// 17.3: with a permissive (zero) floor the veto is disabled and the
+    /// tracker behaves as before — guards against the floor silently
+    /// breaking legitimate tracking.
+    #[test]
+    fn zero_anchor_floor_preserves_normal_tracking() {
+        let seed_frame = frame_with_square(40, 40, 18, 18, 5);
+        let config = TemplateTrackerConfig::builder()
+            .patch_radius(3)
+            .search_radius(6)
+            .min_score(0.5)
+            .anchor_floor(0.0)
+            .build();
+        let mut tracker = TemplateTracker::new(&seed_frame, Point::new(20.0, 20.0), config).unwrap();
+        // Same square shifted right by 2px: should be found near (22,20).
+        let moved = frame_with_square(40, 40, 20, 18, 5);
+        match tracker.step(&moved, Point::new(20.0, 20.0)) {
+            StepOutcome::Found { position, .. } => {
+                assert!((position.x - 22.0).abs() <= 1.0, "x was {}", position.x);
+            }
+            StepOutcome::Miss => panic!("should have found the shifted square"),
+        }
     }
 
     #[test]
@@ -437,45 +557,69 @@ mod tests {
             .build()
     }
 
+    /// The adaptive template still absorbs *partial* appearance change —
+    /// change the anchor no longer scores at `min_score` but still
+    /// recognizes above `anchor_floor`. This is the legitimate half of the
+    /// 3.6 dual-template design that 17.3 preserves. (In this synthetic
+    /// walk, anchor score decays 1.0 → 0.63 by t=0.5; the real target, the
+    /// rotation-invariant sleeve end, decays far less.)
     #[test]
-    fn dual_template_stays_found_through_gradual_appearance_change_that_would_lose_anchor_alone() {
-        let width = 30;
-        let height = 30;
+    fn adaptive_absorbs_partial_appearance_change_above_the_anchor_floor() {
+        let (width, height, cx, cy, radius) = (30u32, 30u32, 15i64, 15i64, 3i64);
         let pos = Point::new(15.0, 15.0);
-        let cx = 15i64;
-        let cy = 15i64;
-        let radius = 3i64;
-
         let seed_frame = frame_with_blended_pattern(width, height, cx, cy, radius, 0.0);
-        let config = dual_template_config();
-        let mut tracker = TemplateTracker::new(&seed_frame, pos, config.clone()).unwrap();
+        // Floor low enough to admit the partial walk (anchor >= 0.6 through t=0.5).
+        let config = TemplateTrackerConfig::builder()
+            .patch_radius(3)
+            .search_radius(2)
+            .min_score(0.5)
+            .update_threshold(0.7)
+            .anchor_floor(0.3)
+            .build();
+        let mut tracker = TemplateTracker::new(&seed_frame, pos, config).unwrap();
 
-        // Walk the appearance gradually from pattern_a (t=0.0) to pattern_b
-        // (t=1.0) in small per-frame steps small enough that each
-        // consecutive step scores above `update_threshold`, so the adaptive
-        // template keeps re-locking on. The object never moves.
-        let mut last_frame = seed_frame.clone();
-        for step in 1..=10 {
-            let t = step as f64 / 10.0;
+        for step in 1..=5 {
+            let t = step as f64 / 10.0; // up to t=0.5, anchor still ~0.63
             let frame = frame_with_blended_pattern(width, height, cx, cy, radius, t);
             match tracker.step(&frame, pos) {
                 StepOutcome::Found { position, .. } => assert_eq!(position, pos),
                 StepOutcome::Miss => panic!("dual-template lost the object at t={t}"),
             }
-            last_frame = frame;
         }
+    }
 
-        // Confirm the premise: an anchor-only tracker (no adaptive update)
-        // really would have lost this by the end — the anchor patch (t=0.0)
-        // scored directly against the final appearance (t=1.0) falls below
-        // min_score.
-        let anchor_patch = extract_patch(&seed_frame, cx, cy, config.patch_radius()).unwrap();
-        let final_patch = extract_patch(&last_frame, cx, cy, config.patch_radius()).unwrap();
-        let anchor_only_score = Zncc.score(&anchor_patch, &final_patch).unwrap();
-        assert!(
-            anchor_only_score < config.min_score(),
-            "expected anchor-only score to have dropped below min_score, got {anchor_only_score}"
-        );
+    /// 17.3, the ratchet-stopper: once appearance walks far enough that the
+    /// anchor no longer recognizes the patch at all (score below
+    /// `anchor_floor`), the tracker Misses rather than following the
+    /// adaptive onto what is, by the anchor's judgement, a different object.
+    /// Under the old `max(anchor, adaptive)` combinator this walked all the
+    /// way to an anti-correlated pattern (anchor score -0.19) while still
+    /// reporting Found — the drift that audit F3 traced onto rack hardware.
+    #[test]
+    fn veto_stops_tracking_once_appearance_leaves_the_anchor_behind() {
+        let (width, height, cx, cy, radius) = (30u32, 30u32, 15i64, 15i64, 3i64);
+        let pos = Point::new(15.0, 15.0);
+        let seed_frame = frame_with_blended_pattern(width, height, cx, cy, radius, 0.0);
+        let config = TemplateTrackerConfig::builder()
+            .patch_radius(3)
+            .search_radius(2)
+            .min_score(0.5)
+            .update_threshold(0.7)
+            .anchor_floor(0.3)
+            .build();
+        let mut tracker = TemplateTracker::new(&seed_frame, pos, config).unwrap();
+
+        // Walk the whole way to the anti-correlated pattern_b. Somewhere
+        // past the floor (~t=0.65) the veto must engage and stay engaged.
+        let mut missed = false;
+        for step in 1..=10 {
+            let t = step as f64 / 10.0;
+            let frame = frame_with_blended_pattern(width, height, cx, cy, radius, t);
+            if tracker.step(&frame, pos) == StepOutcome::Miss {
+                missed = true;
+            }
+        }
+        assert!(missed, "veto never engaged despite appearance fully leaving the anchor");
     }
 
     #[test]
