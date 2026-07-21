@@ -92,6 +92,7 @@ pub fn read_points(path: &Path) -> Result<Vec<Sample>, GradeError> {
     };
     let (fi, xi, yi) = (idx("frame_index")?, idx("x_px")?, idx("y_px")?);
     let gi = idx("gap_flag").ok();
+    let ci = idx("confidence").ok();
 
     let mut out = Vec::new();
     for (n, line) in lines.enumerate() {
@@ -108,6 +109,7 @@ pub fn read_points(path: &Path) -> Result<Vec<Sample>, GradeError> {
         };
         // gap_flag true == this position was interpolated across a gap.
         let interpolated = gi.is_some_and(|i| matches!(get(i), "true" | "1"));
+        let confidence = ci.and_then(|i| get(i).parse::<f64>().ok());
         out.push(Sample {
             frame_index,
             position: Point::new(x, y),
@@ -116,6 +118,7 @@ pub fn read_points(path: &Path) -> Result<Vec<Sample>, GradeError> {
             } else {
                 Source::Tracked
             },
+            confidence,
         });
     }
     Ok(out)
@@ -214,7 +217,8 @@ pub fn print_report(r: &AccuracyReport, args: &GradeArgs) {
             None => "—".into(),
         }
     );
-    println!("  FALSE CONFIDENCE     {}  (bar absent, position reported as tracked)", r.false_confidence);
+    println!("  FALSE CONFIDENCE     {}  (bar absent, confident position reported)", r.false_confidence);
+    println!("  suspect while absent {}  (bar absent, low-confidence position)", r.suspect_while_absent);
     println!("  coasted while absent {}", r.coasted_while_absent);
     println!("  correctly absent     {}", r.correctly_absent);
 }

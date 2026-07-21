@@ -113,6 +113,12 @@ pub struct Sample {
     pub frame_index: u64,
     pub position: Point,
     pub source: Source,
+    /// Identity confidence at this frame (17.4): `Some(anchor_score)` for a
+    /// directly-`Tracked` sample, `None` for an `Interpolated` (coasted) one
+    /// or the seed. This is the honest "is this still the seeded object?"
+    /// measure — a confident false lock reports a *low* value here even
+    /// while its effective match score is ~1.0 (audit F5).
+    pub confidence: Option<f64>,
 }
 
 /// A span of frames where the object could not be detected.
@@ -181,6 +187,10 @@ impl<T: Tracker> TrackingSession<T> {
                 frame_index: seed_frame_index,
                 position: seed,
                 source: Source::Tracked,
+                // The seed is a human-placed point, not a tracker match — it
+                // has no anchor score, so confidence is None (the user is the
+                // ground truth for this one frame).
+                confidence: None,
             }],
             gaps: Vec::new(),
             open_gap_start: None,
@@ -266,7 +276,11 @@ impl<T: Tracker> TrackingSession<T> {
         };
 
         match outcome {
-            StepOutcome::Found { position, .. } => {
+            StepOutcome::Found {
+                position,
+                identity_confidence,
+                ..
+            } => {
                 if let Some(gap_start) = self.open_gap_start.take() {
                     self.gaps.push(Gap {
                         start: gap_start,
@@ -281,6 +295,7 @@ impl<T: Tracker> TrackingSession<T> {
                     frame_index: next_index,
                     position,
                     source: Source::Tracked,
+                    confidence: Some(identity_confidence),
                 });
             }
             StepOutcome::Miss => {
@@ -319,6 +334,7 @@ impl<T: Tracker> TrackingSession<T> {
                 frame_index,
                 position,
                 source: Source::Interpolated,
+                confidence: None,
             });
         }
     }
@@ -377,6 +393,9 @@ impl<T: Tracker> TrackingSession<T> {
             frame_index: effective_frame_index,
             position: point,
             source: Source::Tracked,
+            // A reseed is a (human or auto) re-placed point, like the seed:
+            // no anchor score of its own.
+            confidence: None,
         });
     }
 }
@@ -655,6 +674,7 @@ mod tests {
                 StepOutcome::Found {
                     position: Point::new(40.0, 40.0), // e.g. the rack, far off
                     score: 0.55,
+                    identity_confidence: 0.55,
                 },
             ],
         );
@@ -683,6 +703,7 @@ mod tests {
                 StepOutcome::Found {
                     position: Point::new(20.0, 20.0),
                     score: 0.9,
+                    identity_confidence: 0.9,
                 },
             ],
         );
@@ -706,6 +727,7 @@ mod tests {
             vec![StepOutcome::Found {
                 position: Point::new(6.0, 6.0),
                 score: 0.55,
+                identity_confidence: 0.55,
             }],
         );
         session.step(&blank_frame(W, H)); // frame 1: weak Found, but no gap open
@@ -745,6 +767,7 @@ mod tests {
                 StepOutcome::Found {
                     position: Point::new(100.0, 100.0),
                     score: 1.0,
+                    identity_confidence: 1.0,
                 },
             ],
         );
@@ -771,6 +794,7 @@ mod tests {
                 StepOutcome::Found {
                     position: Point::new(20.0, 20.0), // ~21px away
                     score: 1.0,
+                    identity_confidence: 1.0,
                 },
             ],
         );
@@ -790,6 +814,7 @@ mod tests {
         let tracker = ScriptedTracker::new(vec![StepOutcome::Found {
             position: Point::new(100.0, 100.0),
             score: 1.0,
+            identity_confidence: 1.0,
         }]);
         let config = TrackingSessionConfig::builder()
             .coast_limit(5)
@@ -816,6 +841,7 @@ mod tests {
                 StepOutcome::Found {
                     position: Point::new(500.0, 500.0),
                     score: 1.0,
+                    identity_confidence: 1.0,
                 },
             ],
         );
@@ -838,6 +864,7 @@ mod tests {
                 StepOutcome::Found {
                     position: Point::new(20.0, 20.0),
                     score: 0.05, // would fail any sane reacquire threshold
+                    identity_confidence: 0.05,
                 },
             ],
         );

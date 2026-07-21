@@ -362,6 +362,10 @@ impl TrackingRunState {
                     frame_index: video_frame_index,
                     position,
                     source,
+                    // Interim/preview reconstruction from Progress messages;
+                    // the exported path is the session's own BarPath (Done),
+                    // which carries the real per-frame confidence.
+                    confidence: None,
                 });
                 false
             }
@@ -960,6 +964,7 @@ mod tests {
                 _ => StepOutcome::Found {
                     position: self.position,
                     score: 1.0,
+                    identity_confidence: 1.0,
                 },
             }
         }
@@ -1029,6 +1034,7 @@ mod tests {
             search_radius: Some(40),
             min_score: Some(0.55),
             update_threshold: Some(0.8),
+            anchor_floor: None,
             coast_limit: None,
             reacquire_min_score: None,
             preprocessor: PreprocessorChain::default(),

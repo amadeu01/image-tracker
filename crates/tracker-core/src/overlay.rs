@@ -351,6 +351,7 @@ mod tests {
             frame_index,
             position: Point::new(x, y),
             source,
+            confidence: None,
         }
     }
 

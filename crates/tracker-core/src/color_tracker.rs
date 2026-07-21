@@ -291,7 +291,14 @@ impl ColorTracker {
 
         let position = Point::new(sum_x / count as f64, sum_y / count as f64);
         let score = count as f64 / scanned as f64;
-        StepOutcome::Found { position, score }
+        // The color tracker has no separate identity template: its
+        // fill-fraction is already an honest confidence, so identity and
+        // effective score coincide (17.4).
+        StepOutcome::Found {
+            position,
+            score,
+            identity_confidence: score,
+        }
     }
 }
 
@@ -373,7 +380,7 @@ mod tests {
 
         let outcome = tracker.step(&frame, Point::new(20.0, 20.0));
         match outcome {
-            StepOutcome::Found { position, score } => {
+            StepOutcome::Found { position, score, .. } => {
                 assert!((position.x - 19.5).abs() < 1e-6);
                 assert!((position.y - 19.5).abs() < 1e-6);
                 assert!(score > 0.0 && score <= 1.0);
@@ -497,7 +504,7 @@ mod tests {
 
         let outcome = tracker.step(&frame, Point::new(20.0, 20.0));
         match outcome {
-            StepOutcome::Found { position, score } => {
+            StepOutcome::Found { position, score, .. } => {
                 assert!((position.x - 19.5).abs() < 1e-6);
                 assert!((position.y - 19.5).abs() < 1e-6);
                 assert!(score > 0.0);

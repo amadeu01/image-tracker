@@ -76,6 +76,7 @@ mod tests {
             t_seconds: frame_index as f64 / 30.0,
             position: Point::new(x, y),
             source,
+            confidence: None,
         }
     }
 

@@ -54,6 +54,10 @@ pub struct PathPoint {
     pub t_seconds: f64,
     pub position: Point,
     pub source: Source,
+    /// Identity confidence (17.4), carried through from the source `Sample`:
+    /// `Some(anchor_score)` for a tracked point, `None` for interpolated,
+    /// seed, or reseed points.
+    pub confidence: Option<f64>,
 }
 
 /// The Bar Path aggregate: a `TrackingSession`'s positions and gaps, with a
@@ -83,6 +87,7 @@ impl BarPath {
                     t_seconds: timebase.timestamp(frame_index),
                     position: s.position,
                     source: s.source,
+                    confidence: s.confidence,
                 }
             })
             .collect();
@@ -170,6 +175,7 @@ mod tests {
             frame_index,
             position: Point::new(x, y),
             source,
+            confidence: None,
         }
     }
 

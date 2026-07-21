@@ -149,6 +149,7 @@ pub fn outcomes_to_bar_path(
         frame_index: 0, // session-relative; BarPath::new shifts by start_frame
         position: seed_position,
         source: Source::Tracked,
+        confidence: None,
     });
     for (i, outcome) in outcomes.iter().enumerate() {
         if let FrameOutcome::Found { position, .. } = *outcome {
@@ -156,6 +157,7 @@ pub fn outcomes_to_bar_path(
                 frame_index: i as u64 + 1,
                 position,
                 source: Source::Tracked,
+                confidence: None,
             });
         }
     }
@@ -391,7 +393,7 @@ pub fn run_strategy(
             None => break, // segment ran past end of video; report what we have
         };
         match tracker.step(&frame, last_pos) {
-            StepOutcome::Found { position, score } => {
+            StepOutcome::Found { position, score, .. } => {
                 outcomes.push(FrameOutcome::Found { position, score });
                 last_pos = position;
             }

@@ -152,7 +152,21 @@ pub enum TemplateTrackerError {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StepOutcome {
     /// The template was located above the configured `min_score` threshold.
-    Found { position: Point, score: f64 },
+    ///
+    /// `score` is the *effective* winning score used for accept/reacquire
+    /// gating. `identity_confidence` (17.4) is the honest "is this still the
+    /// seeded object?" signal: for `TemplateTracker` it is the score against
+    /// the never-changing **anchor**, not the effective `max(anchor,
+    /// adaptive)` — the adaptive self-matches at ~1.0 once it locks onto
+    /// anything, so the effective score is useless as a confidence measure
+    /// (audit F5, measured: a background false lock reports effective 1.000
+    /// while its anchor score sits at ~0.45). For `ColorTracker` the two are
+    /// the same (its fill-fraction is already an honest confidence).
+    Found {
+        position: Point,
+        score: f64,
+        identity_confidence: f64,
+    },
     /// No candidate in the search window scored above the threshold (or no
     /// candidate patch was available, e.g. window fully off-frame). Feeds
     /// the Gap logic (1.6): a miss signal.
@@ -286,7 +300,7 @@ impl TemplateTracker {
         }
 
         match best {
-            Some((position, score, _anchor_score, candidate))
+            Some((position, score, anchor_score, candidate))
                 if score >= self.config.min_score =>
             {
                 // Refresh the adaptive when the effective match is strong
@@ -302,7 +316,14 @@ impl TemplateTracker {
                 if score >= self.config.update_threshold {
                     self.adaptive = candidate;
                 }
-                StepOutcome::Found { position, score }
+                StepOutcome::Found {
+                    position,
+                    score,
+                    // The anchor score is the honest identity confidence
+                    // (17.4): similarity to the original seed, immune to the
+                    // adaptive template's self-referential inflation.
+                    identity_confidence: anchor_score,
+                }
             }
             _ => StepOutcome::Miss,
         }
@@ -454,7 +475,7 @@ mod tests {
         let outcome = tracker.step(&moved_frame, last_pos);
 
         match outcome {
-            StepOutcome::Found { position, score } => {
+            StepOutcome::Found { position, score, .. } => {
                 assert_eq!(position, Point::new(17.0, 9.0));
                 assert!(score > 0.9, "expected high score, got {score}");
             }
@@ -496,7 +517,7 @@ mod tests {
         // the object at its known location.
         let outcome = tracker.step(&ref_frame, seed);
         match outcome {
-            StepOutcome::Found { position, score } => {
+            StepOutcome::Found { position, score, .. } => {
                 assert_eq!(position, seed);
                 assert!(score > 0.9);
             }
@@ -646,7 +667,7 @@ mod tests {
         // this would no longer score a near-perfect match.
         let outcome = tracker.step(&seed_frame, pos);
         match outcome {
-            StepOutcome::Found { position, score } => {
+            StepOutcome::Found { position, score, .. } => {
                 assert_eq!(position, pos);
                 assert!(
                     score > 0.99,
@@ -766,7 +787,7 @@ mod tests {
 
         let outcome = tracker.step(&seed_frame, seed);
         match outcome {
-            StepOutcome::Found { position, score } => {
+            StepOutcome::Found { position, score, .. } => {
                 assert_eq!(position, seed);
                 assert!(
                     score > 0.99,
@@ -842,7 +863,7 @@ mod tests {
             for (i, &(sx, sy)) in positions.iter().enumerate() {
                 let frame = noisy_frame_with_square(width, height, sx, sy, size, i as u32 + 1);
                 match tracker.step(&frame, last_pos) {
-                    StepOutcome::Found { position, score } => {
+                    StepOutcome::Found { position, score, .. } => {
                         found_count += 1;
                         score_sum += score;
                         last_pos = position;

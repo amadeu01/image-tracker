@@ -87,9 +87,15 @@ pub struct AccuracyReport {
     pub max_error_px: Option<f64>,
     /// Fraction of `Visible` labels tracked within `tolerance_px`.
     pub within_tolerance: Option<f64>,
-    /// Frames where the bar was NOT visible but the tracker still reported
-    /// a directly-tracked position. The headline honesty failure.
+    /// Frames where the bar was NOT visible but the tracker reported a
+    /// directly-tracked position *with high identity confidence* (or no
+    /// confidence data). The headline honesty failure: confidently wrong.
     pub false_confidence: usize,
+    /// Frames where the bar was not visible and the tracker reported a
+    /// tracked position but flagged it low-confidence (17.4). Honest doubt,
+    /// not a confident lie — the downstream can exclude these the way it
+    /// already excludes interpolated samples.
+    pub suspect_while_absent: usize,
     /// Frames where the bar was not visible and the tracker reported an
     /// interpolated (coasted) position. Less severe — the pipeline already
     /// flags these as uncertain — but still counted.
@@ -130,9 +136,27 @@ pub fn grade(
     labels: &[GroundTruthLabel],
     tolerance_px: f64,
 ) -> AccuracyReport {
+    grade_with_confidence(samples, labels, tolerance_px, DEFAULT_TRUSTED_CONFIDENCE)
+}
+
+/// Identity confidence at or above which a tracked sample is treated as a
+/// confident claim (17.4). A sample below this on an absent frame is
+/// `suspect_while_absent` (honest doubt) rather than `false_confidence`.
+/// Chosen from the measured gap: real tracking sits at ~0.99 anchor score,
+/// background false locks at ~0.4–0.5 (audit F5).
+pub const DEFAULT_TRUSTED_CONFIDENCE: f64 = 0.7;
+
+/// As [`grade`], with an explicit trusted-confidence threshold.
+pub fn grade_with_confidence(
+    samples: &[Sample],
+    labels: &[GroundTruthLabel],
+    tolerance_px: f64,
+    trusted_confidence: f64,
+) -> AccuracyReport {
     let mut errors: Vec<f64> = Vec::new();
     let mut unmatched = 0usize;
     let mut false_confidence = 0usize;
+    let mut suspect_while_absent = 0usize;
     let mut coasted_while_absent = 0usize;
     let mut correctly_absent = 0usize;
 
@@ -148,9 +172,19 @@ pub fn grade(
             (LabelStatus::Blurred(_), Some(_)) => {}
             (LabelStatus::Visible(_) | LabelStatus::Blurred(_), None) => unmatched += 1,
 
-            // Bar absent: any *tracked* report is false confidence.
+            // Bar absent: a tracked report is false confidence only if the
+            // tracker was *confident* about it. A low-confidence tracked
+            // sample (17.4) is honest doubt, counted separately; a sample
+            // with no confidence data is treated as a confident claim (can't
+            // prove doubt, so don't excuse it).
             (LabelStatus::Occluded | LabelStatus::OutOfFrame, Some(s)) => match s.source {
-                Source::Tracked => false_confidence += 1,
+                Source::Tracked => {
+                    if s.confidence.is_some_and(|c| c < trusted_confidence) {
+                        suspect_while_absent += 1;
+                    } else {
+                        false_confidence += 1;
+                    }
+                }
                 Source::Interpolated => coasted_while_absent += 1,
             },
             (LabelStatus::Occluded | LabelStatus::OutOfFrame, None) => correctly_absent += 1,
@@ -181,6 +215,7 @@ pub fn grade(
         max_error_px: max,
         within_tolerance: within,
         false_confidence,
+        suspect_while_absent,
         coasted_while_absent,
         correctly_absent,
     }
@@ -195,10 +230,16 @@ mod tests {
     use super::*;
 
     fn tracked(frame_index: u64, x: f64, y: f64) -> Sample {
+        // High confidence by default (a confident claim).
+        tracked_conf(frame_index, x, y, Some(0.95))
+    }
+
+    fn tracked_conf(frame_index: u64, x: f64, y: f64, confidence: Option<f64>) -> Sample {
         Sample {
             frame_index,
             position: Point::new(x, y),
             source: Source::Tracked,
+            confidence,
         }
     }
 
@@ -207,6 +248,7 @@ mod tests {
             frame_index,
             position: Point::new(x, y),
             source: Source::Interpolated,
+            confidence: None,
         }
     }
 
@@ -270,6 +312,39 @@ mod tests {
         assert_eq!(r.false_confidence, 1);
         assert_eq!(r.correctly_absent, 0);
         assert_eq!(r.scored_frames, 0);
+    }
+
+    /// 17.4: a low-confidence tracked sample on an absent frame is honest
+    /// doubt, not a confident lie.
+    #[test]
+    fn low_confidence_tracked_sample_while_absent_is_suspect_not_false_confidence() {
+        let samples = vec![tracked_conf(7, 400.0, 100.0, Some(0.45))];
+        let labels = vec![occluded(7)];
+        let r = grade(&samples, &labels, 5.0);
+        assert_eq!(r.false_confidence, 0);
+        assert_eq!(r.suspect_while_absent, 1);
+    }
+
+    /// 17.4: a *high*-confidence tracked sample on an absent frame is still
+    /// the headline failure — the tracker was confidently wrong.
+    #[test]
+    fn high_confidence_tracked_sample_while_absent_is_false_confidence() {
+        let samples = vec![tracked_conf(7, 400.0, 100.0, Some(0.95))];
+        let labels = vec![occluded(7)];
+        let r = grade(&samples, &labels, 5.0);
+        assert_eq!(r.false_confidence, 1);
+        assert_eq!(r.suspect_while_absent, 0);
+    }
+
+    /// A sample with no confidence data can't prove doubt, so it is treated
+    /// as a confident claim rather than excused.
+    #[test]
+    fn missing_confidence_while_absent_counts_as_false_confidence() {
+        let samples = vec![tracked_conf(7, 400.0, 100.0, None)];
+        let labels = vec![occluded(7)];
+        let r = grade(&samples, &labels, 5.0);
+        assert_eq!(r.false_confidence, 1);
+        assert_eq!(r.suspect_while_absent, 0);
     }
 
     #[test]

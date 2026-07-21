@@ -1899,6 +1899,7 @@ mod tests {
             frame_index,
             position: tracker_core::Point::new(x, y),
             source,
+            confidence: None,
         }
     }
 

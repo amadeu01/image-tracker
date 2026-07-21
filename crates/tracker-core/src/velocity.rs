@@ -180,6 +180,7 @@ mod tests {
             t_seconds: t,
             position: Point::new(x, y),
             source,
+            confidence: None,
         }
     }
 

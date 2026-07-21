@@ -16,11 +16,13 @@ fn sample_path() -> BarPath {
             frame_index: 0,
             position: Point::new(10.0, 20.0),
             source: Source::Tracked,
+            confidence: Some(0.9),
         },
         Sample {
             frame_index: 1,
             position: Point::new(12.0, 22.0),
             source: Source::Interpolated,
+            confidence: None,
         },
     ];
     BarPath::new(&samples, &[], tb, 0)

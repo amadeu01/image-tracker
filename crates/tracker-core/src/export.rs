@@ -67,7 +67,7 @@ pub fn export_csv(
 ) -> String {
     let vel_by_frame = velocity_by_frame(velocity);
     let mut out = String::from(
-        "frame_index,t_seconds,x_px,y_px,x_m,y_m,gap_flag,vx,vy,speed,velocity_unit,velocity_interpolated\n",
+        "frame_index,t_seconds,x_px,y_px,x_m,y_m,gap_flag,vx,vy,speed,velocity_unit,velocity_interpolated,confidence\n",
     );
     for p in path.points() {
         let xm = x_m(p.position.x, cal);
@@ -85,8 +85,9 @@ pub fn export_csv(
         let interp_field = vel
             .map(|v| v.from_interpolated.to_string())
             .unwrap_or_default();
+        let confidence_field = p.confidence.map(|c| format!("{c:.4}")).unwrap_or_default();
         out.push_str(&format!(
-            "{},{:.6},{:.6},{:.6},{},{},{},{},{},{},{},{}\n",
+            "{},{:.6},{:.6},{:.6},{},{},{},{},{},{},{},{},{}\n",
             p.frame_index,
             p.t_seconds,
             p.position.x,
@@ -98,7 +99,8 @@ pub fn export_csv(
             vy_field,
             speed_field,
             unit_field,
-            interp_field
+            interp_field,
+            confidence_field
         ));
     }
     out
@@ -143,10 +145,14 @@ pub fn export_json(
         let interp_field = vel
             .map(|v| v.from_interpolated.to_string())
             .unwrap_or_else(|| "null".to_string());
+        let confidence_field = p
+            .confidence
+            .map(|c| format!("{c:.4}"))
+            .unwrap_or_else(|| "null".to_string());
         out.push_str(&format!(
-            "  {{\"frame_index\": {}, \"t_seconds\": {:.6}, \"x_px\": {:.6}, \"y_px\": {:.6}, \"x_m\": {}, \"y_m\": {}, \"gap_flag\": {}, \"vx\": {}, \"vy\": {}, \"speed\": {}, \"velocity_unit\": {}, \"velocity_interpolated\": {}}}",
+            "  {{\"frame_index\": {}, \"t_seconds\": {:.6}, \"x_px\": {:.6}, \"y_px\": {:.6}, \"x_m\": {}, \"y_m\": {}, \"gap_flag\": {}, \"vx\": {}, \"vy\": {}, \"speed\": {}, \"velocity_unit\": {}, \"velocity_interpolated\": {}, \"confidence\": {}}}",
             p.frame_index, p.t_seconds, p.position.x, p.position.y, xm_field, ym_field, gap_flag,
-            vx_field, vy_field, speed_field, unit_field, interp_field
+            vx_field, vy_field, speed_field, unit_field, interp_field, confidence_field
         ));
         if i + 1 < points.len() {
             out.push(',');
@@ -225,6 +231,7 @@ mod tests {
             frame_index,
             position: Point::new(x, y),
             source,
+            confidence: None,
         }
     }
 
@@ -244,7 +251,7 @@ mod tests {
         let header = csv.lines().next().unwrap();
         assert_eq!(
             header,
-            "frame_index,t_seconds,x_px,y_px,x_m,y_m,gap_flag,vx,vy,speed,velocity_unit,velocity_interpolated"
+            "frame_index,t_seconds,x_px,y_px,x_m,y_m,gap_flag,vx,vy,speed,velocity_unit,velocity_interpolated,confidence"
         );
     }
 

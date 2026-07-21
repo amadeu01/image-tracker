@@ -272,6 +272,7 @@ mod tests {
                 t_seconds: i as f64 / 30.0,
                 position: Point::new(0.0, y),
                 source: Source::Tracked,
+                confidence: None,
             })
             .collect();
         let velocity = crate::velocity::velocity_series(&points, 1, None).unwrap();
