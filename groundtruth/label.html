@@ -1,0 +1,137 @@
+<meta charset="utf-8">
+<title>Bar label tool</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; font:14px/1.4 system-ui, sans-serif; background:#14161a; color:#e8eaed; }
+  header { display:flex; gap:14px; align-items:center; padding:10px 14px; background:#1d2027; border-bottom:1px solid #2c313c; flex-wrap:wrap; position:sticky; top:0; z-index:5;}
+  button { background:#2a2f3a; color:#e8eaed; border:1px solid #3a4150; border-radius:6px; padding:6px 12px; font:inherit; cursor:pointer; }
+  button:hover { background:#343b48; }
+  button.on { background:#7c5cff; border-color:#7c5cff; }
+  .stage { position:relative; display:inline-block; margin:14px; }
+  canvas { image-rendering: pixelated; cursor:crosshair; border:1px solid #333; display:block; }
+  .pill { padding:3px 9px; border-radius:99px; background:#2a2f3a; font-variant-numeric:tabular-nums; }
+  .ok { background:#1e4620; } .none { background:#4a1e1e; }
+  #list { margin:0 14px 40px; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  #list td,#list th { border:1px solid #2c313c; padding:3px 10px; text-align:left; }
+  #list tr.cur { background:#2a2340; }
+  textarea { width:calc(100% - 28px); height:150px; margin:0 14px; background:#0f1115; color:#cfd3da; border:1px solid #2c313c; font:12px ui-monospace,monospace; }
+  kbd { background:#2a2f3a; border:1px solid #3a4150; border-radius:4px; padding:1px 6px; font:12px ui-monospace,monospace; }
+</style>
+
+<header>
+  <button id="prev">◀ prev</button>
+  <span class="pill" id="pos">–</span>
+  <button id="next">next ▶</button>
+  <span class="pill" id="fname">–</span>
+  <span class="pill" id="coord">click to set</span>
+  <span class="pill" id="status">–</span>
+  <span style="flex:1"></span>
+  zoom
+  <button class="z" data-z="2">2×</button>
+  <button class="z" data-z="4">4×</button>
+  <button class="z" data-z="8">8×</button>
+  <button id="occ">mark occluded <kbd>o</kbd></button>
+  <button id="clear">clear <kbd>c</kbd></button>
+  <button id="save">save CSV</button>
+</header>
+
+<div class="stage"><canvas id="cv"></canvas></div>
+
+<p style="margin:0 14px"><kbd>←</kbd>/<kbd>→</kbd> frames · <kbd>o</kbd> occluded · <kbd>c</kbd> clear · click sets the point · arrow-drag not needed, just click again to move it. Scroll the page if the image is taller than the window.</p>
+
+<table id="list"></table>
+<textarea id="csv" readonly></textarea>
+
+<script>
+const params = new URLSearchParams(location.search);
+const VID = params.get('v') || 'v3';
+let FRAMES = [], i = 0, Z = 4, pts = {};
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+let img = new Image();
+
+async function boot() {
+  const r = await fetch('frames_index.json'); const idx = await r.json();
+  FRAMES = idx[VID] || [];
+  const saved = localStorage.getItem('labels_'+VID);
+  if (saved) pts = JSON.parse(saved);
+  document.title = VID + ' — bar label tool';
+  load();
+}
+function load() {
+  const f = FRAMES[i];
+  img = new Image();
+  img.onload = draw;
+  img.src = 'frames/' + VID + '_' + f + '.png';
+  document.getElementById('fname').textContent = VID + ' frame ' + f;
+  document.getElementById('pos').textContent = (i+1) + ' / ' + FRAMES.length;
+  render();
+}
+function draw() {
+  cv.width = img.width * Z; cv.height = img.height * Z;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(img, 0, 0, cv.width, cv.height);
+  const p = pts[FRAMES[i]];
+  if (p && p.status === 'visible') {
+    const x = p.x * Z + Z/2, y = p.y * Z + Z/2;
+    ctx.strokeStyle = '#ff00ff'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, y-26); ctx.lineTo(x, y-8); ctx.moveTo(x, y+8); ctx.lineTo(x, y+26);
+    ctx.moveTo(x-26, y); ctx.lineTo(x-8, y); ctx.moveTo(x+8, y); ctx.lineTo(x+26, y);
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.stroke();
+  }
+}
+function render() {
+  const f = FRAMES[i], p = pts[f];
+  const c = document.getElementById('coord'), s = document.getElementById('status');
+  c.textContent = p && p.status==='visible' ? `(${p.x}, ${p.y})` : 'click to set';
+  s.textContent = p ? p.status : 'unlabelled';
+  s.className = 'pill ' + (p ? (p.status==='visible' ? 'ok' : 'none') : '');
+  const rows = FRAMES.map((f,n) => {
+    const q = pts[f];
+    return `<tr class="${n===i?'cur':''}"><td>${f}</td><td>${q?(q.status==='visible'?q.x:'—'):''}</td>`
+         + `<td>${q?(q.status==='visible'?q.y:'—'):''}</td><td>${q?q.status:''}</td></tr>`;
+  }).join('');
+  document.getElementById('list').innerHTML =
+    '<tr><th>frame</th><th>x</th><th>y</th><th>status</th></tr>' + rows;
+  document.getElementById('csv').value = toCSV();
+  localStorage.setItem('labels_'+VID, JSON.stringify(pts));
+  draw();
+}
+function toCSV() {
+  let out = 'video,frame_index,x_px,y_px,status,target\n';
+  for (const f of FRAMES) {
+    const p = pts[f]; if (!p) continue;
+    out += `${VID},${f},${p.status==='visible'?p.x:''},${p.status==='visible'?p.y:''},${p.status},bar_sleeve_end\n`;
+  }
+  return out;
+}
+cv.addEventListener('click', e => {
+  const r = cv.getBoundingClientRect();
+  const x = Math.floor((e.clientX - r.left) / Z), y = Math.floor((e.clientY - r.top) / Z);
+  pts[FRAMES[i]] = { x, y, status:'visible' };
+  render();
+});
+document.getElementById('next').onclick = () => { i = Math.min(i+1, FRAMES.length-1); load(); };
+document.getElementById('prev').onclick = () => { i = Math.max(i-1, 0); load(); };
+document.getElementById('occ').onclick = () => { pts[FRAMES[i]] = { status:'occluded' }; render(); };
+document.getElementById('clear').onclick = () => { delete pts[FRAMES[i]]; render(); };
+document.querySelectorAll('.z').forEach(b => b.onclick = () => {
+  Z = +b.dataset.z;
+  document.querySelectorAll('.z').forEach(o => o.classList.toggle('on', o===b));
+  draw();
+});
+document.getElementById('save').onclick = async () => {
+  const res = await fetch('/save?v=' + VID, { method:'POST', body: toCSV() });
+  document.getElementById('save').textContent = res.ok ? 'saved ✓' : 'save failed';
+  setTimeout(()=>document.getElementById('save').textContent='save CSV', 1500);
+};
+addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight') document.getElementById('next').click();
+  if (e.key === 'ArrowLeft') document.getElementById('prev').click();
+  if (e.key === 'o') document.getElementById('occ').click();
+  if (e.key === 'c') document.getElementById('clear').click();
+});
+document.querySelector('.z[data-z="4"]').classList.add('on');
+boot();
+</script>

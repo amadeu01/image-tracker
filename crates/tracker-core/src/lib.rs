@@ -3,6 +3,7 @@
 //! No UI/IO dependencies. Geometry, trackers, gaps, calibration,
 //! kinematics, reps, and color advisor logic will live here.
 
+pub mod accuracy;
 pub mod bar_path;
 pub mod calibration;
 pub mod color;
@@ -24,6 +25,7 @@ pub mod tracker;
 pub mod velocity;
 pub mod video_sink;
 
+pub use accuracy::{grade, AccuracyReport, GroundTruthLabel, LabelStatus};
 pub use bar_path::{BarPath, PathPoint, Timebase, TimebaseError};
 pub use calibration::{Calibration, CalibrationError};
 pub use color::{rgb_to_hsv, ColorModel, ColorModelConfig, ColorModelError};

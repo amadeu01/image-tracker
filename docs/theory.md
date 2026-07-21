@@ -967,3 +967,116 @@ table is the durable, at-a-glance summary. Future strategy-benchmark runs
 | 2026-07-15 | 3.6 — dual-template (anchor + adaptive) tracking, re-run with visually re-picked seeds on all 4 test videos | v3/v4: 0 gaps, 0 reseeds (unaffected — anchor alone was already sufficient). v1: improved over 3.5 (2 gaps vs 3 reseeds, different seeds so not fully controlled). v2: honest negative result by the numbers (6 reseeds, 26 interpolated) — visual review was needed to judge whether the dual-template change actually helped, since gap/reseed counts alone don't distinguish "same tracker, harder clip" from "regression." Synthetic per-pixel blend tests (non-affine, since a uniform brightness ramp doesn't exercise the adaptive path under ZNCC's own invariance) confirmed the anchor-only tracker really would have lost the object where the dual-template one didn't. | §2 (why a uniform ramp doesn't test anything — ZNCC already handles that); §3 (anchor/adaptive/update_threshold design) |
 | 2026-07-15 | 3.4/3.5 — rotation metadata bug found via visual (not CSV) review | Phone-captured v1/v2 carry `rotation=-90` Display Matrix side data; `ffmpeg` auto-rotates its decoded output but the pipeline sized `Frame` buffers from ffprobe's *coded* (pre-rotation) dimensions, silently reinterpreting every row at the wrong stride. Produced plausible-looking CSV output (no crash, no NaN, plausible y-ranges by coincidence) while tracking scrambled pixel data end to end — only caught by extracting and visually inspecting decoded frames. | §1 (decode/rotation); general lesson: CSV/numeric plausibility alone is an insufficient verification method for an image pipeline (see PLAN.md's review log, 2026-07-15 and 2026-07-16 entries, for the same pattern recurring with 10.9's duplicate-frame bug) |
 | 2026-07-16 | 11.4 — strategy benchmark (`tracker-app compare`): {none, gaussian:1.5, median:3} × {template, color}, 200-frame segments on v1 (seed frame 789 @ 312,430) and v3 (seed frame 300 @ 260,120) | v1: all 6 strategies track ≥98.5%; winner `gaussian:1.5/color` (100% tracked, 0.81px jitter) by the tie-break rule, but every color strategy carries the `suggest_tracker`-indistinct note (v1's marker isn't color-distinct from its background) — color's near-zero jitter here is an artifact of a coarse blob centroid over a small, mostly-static window on this segment, not evidence the color model is actually locking onto the right pixels; `gaussian:1.5/template` (100% tracked, 6.95px jitter) is template-tracking's own best filter and the safer pick given the indistinct-color caveat. v3: winner `none/template` (100% tracked, 0.23px jitter, mean correlation 0.987) — no filtering needed at all; color strategies again get the indistinct-color note and post visibly worse jitter (0.62–0.65px) and lower mean fill-fraction than every template variant. Across both clips, Gaussian blur nudged template correlation up slightly (0.961→0.973 on v1, 0.987→0.996 on v3) without moving tracked% (already ≥98.5% unfiltered on these two relatively clean clips); median:3 was consistently the weakest template filter of the three (lowest correlation each time), though still never worse on tracked%. Full tables: `out/compare/v1.json`, `out/compare/v3.json`. | §5 (filter theory: why Gaussian/median move score without moving the pipeline's correctness guarantee); the color-strategy caveat is `suggest.rs`'s own heuristic (4.3) surfacing here — a "winning" jitter number from a tracker `suggest_tracker` itself would have steered away from is a reason to read `compare`'s notes column, not just its numbers, echoing 3.4/3.5/10.9's recurring lesson above that a clean-looking metric isn't the same as a correct one. |
+
+## 9. The sports science behind the numbers (VBT)
+
+Everything above is about producing a Bar Path faithfully. This section is
+about *why anyone wants one* — the velocity-based training (VBT) literature
+that gives our per-rep metrics their meaning, and where our measurement
+method sits relative to the instruments that literature was built on.
+
+### 9.1 Why velocity at all
+
+The load–velocity relationship is close to linear for a given lifter and
+exercise: the heavier the load relative to 1RM, the slower the concentric
+phase. That linearity is what lets a velocity reading stand in for a
+percentage of 1RM *on the day*, without a 1RM test — the core claim of VBT
+([Weakley et al., *Velocity-Based Training: From Theory to Application*,
+Strength & Conditioning Journal 2021](https://doi.org/10.1519/ssc.0000000000000560);
+[Science for Sport overview](https://www.scienceforsport.com/velocity-based-training/)).
+
+Two derived constructs matter for us:
+
+- **Minimum velocity threshold (MVT)** — the mean concentric velocity of
+  the last rep a lifter can complete. Roughly exercise-specific and roughly
+  stable within a lifter, so a rep landing near MVT means "at failure."
+  Not universally reliable: for the deadlift, individualized load–velocity
+  profiles significantly *under*-predicted true 1RM
+  ([Ruf et al., JSCR 2018](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5968962/)).
+- **Velocity loss (VL)** — the drop in mean concentric velocity of a rep
+  versus the best (usually first) rep of the set, as a percentage. Used as
+  a live set-termination rule.
+
+### 9.2 Which velocity variable
+
+Three candidates are in common use: mean velocity (MV, averaged over the
+whole concentric phase), mean propulsive velocity (MPV, averaged only until
+bar acceleration drops below −9.81 m/s²), and peak velocity (PV, the max
+instantaneous value). MV shows the strongest linearity of the
+load–velocity relationship and the lowest between-subject variability at
+1RM, which is why it is the recommended default for profiling
+([García-Ramos et al., JSCR 2018](https://journals.lww.com/nsca-jscr/fulltext/2018/05000/mean_velocity_vs__mean_propulsive_velocity_vs_.11.aspx);
+[GymAware discussion](https://gymaware.com/do-you-need-mean-propulsive-velocity/)).
+
+This is exactly the split `rep_metrics.rs` already encodes and §6 already
+argues on signal-processing grounds: `mean_concentric_velocity` is computed
+as concentric displacement ÷ duration (the MV definition, not an average of
+per-sample speeds, which would be sampling-density biased), while
+`peak_concentric_speed` is reported alongside it as the noisier, more
+sample-position-sensitive companion. We do not compute MPV: it needs a
+reliable second derivative (acceleration) of a camera-derived position
+signal, which §6's noise-amplification argument says we should not trust at
+our sampling rate and pixel noise level.
+
+### 9.3 Velocity loss thresholds — what the evidence supports
+
+VL thresholds are the mechanism behind our stop-set recommendation
+(milestone 13.5, default 20%). The evidence is directional rather than
+prescriptive:
+
+- Low VL thresholds (≈10–20%) better preserve jump, sprint, and
+  velocity-against-submaximal-load performance; higher thresholds (>25%)
+  favor hypertrophy
+  ([Jukic et al., *Sports Medicine* 2023 — systematic review + meta-analysis](https://link.springer.com/article/10.1007/s40279-022-01754-4);
+  [Chen et al., *Int. J. Sports Sci. & Coaching* 2024](https://journals.sagepub.com/doi/abs/10.1177/17479541241244581)).
+- Strength gains are broadly *insensitive* to VL threshold — several
+  thresholds produce similar 1RM improvements
+  ([Andersen et al., JSCR 2021](https://pubmed.ncbi.nlm.nih.gov/34100789/)).
+- VL thresholds do reliably control the kinetic/kinematic output of a set,
+  which is the reason to use them as a live control variable at all
+  ([Held et al., 2020](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7558277/)).
+- Block-periodized practice commonly runs ~30% VL in accumulation phases,
+  ~20% in strength phases, ~10% in strength-power phases.
+
+Design consequence: 20% is a defensible *default*, not a truth. The
+threshold must stay user-configurable (13.5 makes it so, 5–40%), and the
+UI should present "stop set recommended" as a coaching cue, never as a
+verdict.
+
+### 9.4 Where a camera sits among VBT instruments
+
+Linear position transducers (LPTs) remain the reference instrument —
+direct linear displacement, ~1000 Hz sampling
+([Pérez-Castilla et al., *PLOS ONE* 2020](https://journals.plos.org/plosone/article?id=10.1371%2Fjournal.pone.0232465)).
+Video and smartphone-based systems have closed much of the gap for *mean*
+concentric velocity specifically
+([automatic video-based back squat system, 2021](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7866505/);
+[concurrent validity of smartphone VBT apps in powerlifting, *PLOS ONE* 2024](https://journals.plos.org/plosone/article?id=10.1371%2Fjournal.pone.0313919);
+[Balsalobre-Fernández et al., 2017](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5581394/)).
+
+Known error sources for camera-based measurement, all of which apply to us:
+
+| Source | Effect | Our position |
+|---|---|---|
+| Camera not perpendicular / bar out of the sagittal plane | Foreshortened vertical displacement → systematic under-read | Documented filming guidance; perspective correction is on ROADMAP |
+| Lens distortion | Position error varying across the frame | Unmodelled; worst near frame edges |
+| Handheld camera motion | Adds camera displacement to bar displacement | Tripod guidance; no stabilization |
+| Frame rate | Bounds temporal resolution of PV far more than of MV | Reinforces §9.2's MV-over-PV choice |
+| Pixel→meter scale from one marked segment | Any calibration error scales *all* metric outputs linearly | `Calibration` from a known plate diameter (0.450 m competition plate) |
+| Manual digitizing (in older apps) | Human error per rep | Not applicable — our tracking is automatic |
+
+The honest summary: mean concentric velocity from a tripod-mounted,
+perpendicular camera is the metric with published support at this
+measurement quality. Peak velocity, and anything derived from
+acceleration, should be read as indicative only.
+
+### 9.5 Cross-references
+
+- §6 — why MV is computed from endpoints and why we refuse to compute MPV.
+- `rep_metrics.rs` — the `mean_concentric_velocity` / `peak_concentric_speed`
+  split, and `excluded_interpolated_samples` (VBT numbers must not be
+  quietly computed over coasted-through Gaps).
+- `rep.rs` — phase boundaries; 15.1's `min_displacement` exists so walkout
+  and re-rack motion is not reported as a rep, which would corrupt the
+  rep-1 baseline every VL percentage is measured against.
+- Milestone 13.5 — stop-set threshold UI.

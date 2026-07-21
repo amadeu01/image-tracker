@@ -8,6 +8,7 @@ pub mod ffmpeg_sink;
 pub mod ffmpeg_source;
 pub mod ffprobe;
 pub mod frame_cache;
+pub mod grade;
 pub mod overlay_export;
 pub mod screen_map;
 pub mod seek_source;

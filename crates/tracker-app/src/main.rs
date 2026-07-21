@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 
-use tracker_app::{app, cli, compare, ffprobe, telemetry};
+use tracker_app::{app, cli, compare, ffprobe, grade, telemetry};
 
 fn main() {
     let (_telemetry_guard, log_path) = telemetry::init();
@@ -71,6 +71,24 @@ fn main() {
             }
         };
         if let Err(e) = cli::run_advise(advise_args) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if !args.is_empty() && args[0] == "grade" {
+        let grade_args = match grade::parse_grade_args(&args[1..]) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!(
+                    "usage: tracker-app grade <points.csv> <truth.csv> [--plate-px N] [--tolerance-dia F]"
+                );
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+        };
+        if let Err(e) = grade::run_grade(grade_args) {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
