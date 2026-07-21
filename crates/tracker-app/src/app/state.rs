@@ -230,6 +230,7 @@ impl TrackingSettings {
             search_radius: Some(self.search_radius),
             min_score: Some(self.min_score),
             update_threshold: Some(self.update_threshold),
+            anchor_floor: None,
             coast_limit: Some(self.coast_limit),
             reacquire_min_score: Some(self.reacquire_min_score),
             preprocessor: self.preprocessor_chain(),

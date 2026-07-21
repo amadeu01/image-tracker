@@ -30,6 +30,10 @@ pub const DEFAULT_PATCH_RADIUS: u32 = 12;
 pub const DEFAULT_SEARCH_RADIUS: u32 = 30;
 pub const DEFAULT_MIN_SCORE: f64 = 0.4;
 pub const DEFAULT_UPDATE_THRESHOLD: f64 = 0.7;
+/// Anchor veto floor (17.3): a candidate is eligible only if the anchor
+/// template still scores it at or above this. Below `min_score` so it
+/// rejects only candidates the anchor no longer recognizes as the object.
+pub const DEFAULT_ANCHOR_FLOOR: f64 = 0.3;
 pub const DEFAULT_COAST_LIMIT: u32 = 5;
 /// Minimum score a mid-gap `Found` must clear to count as reacquisition
 /// (10.2/10.2b). Originally wired straight to `update_threshold` (0.7),
@@ -108,6 +112,10 @@ pub struct TrackerTuning {
     pub search_radius: Option<u32>,
     pub min_score: Option<f64>,
     pub update_threshold: Option<f64>,
+    /// `--anchor-floor` (17.3): overrides `DEFAULT_ANCHOR_FLOOR`. Set to 0
+    /// to disable the anchor veto (reproduces the pre-17.3 drift-ratchet
+    /// behaviour for A/B comparison).
+    pub anchor_floor: Option<f64>,
     pub coast_limit: Option<u32>,
     /// `--reacquire-min-score` (10.2b): overrides
     /// `DEFAULT_REACQUIRE_MIN_SCORE`, decoupled from `update_threshold` so
@@ -156,6 +164,7 @@ pub fn tracker_config(tuning: TrackerTuning) -> TemplateTrackerConfig {
         .search_radius(tuning.search_radius.unwrap_or(DEFAULT_SEARCH_RADIUS))
         .min_score(tuning.min_score.unwrap_or(DEFAULT_MIN_SCORE))
         .update_threshold(tuning.update_threshold.unwrap_or(DEFAULT_UPDATE_THRESHOLD))
+        .anchor_floor(tuning.anchor_floor.unwrap_or(DEFAULT_ANCHOR_FLOOR))
         .preprocessor(tuning.preprocessor)
         .build()
 }

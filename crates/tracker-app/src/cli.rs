@@ -143,6 +143,12 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
                 );
                 i += 2;
             }
+            "--anchor-floor" => {
+                let v = args.get(i + 1).ok_or("--anchor-floor needs a value")?;
+                tuning.anchor_floor =
+                    Some(v.parse().map_err(|_| format!("bad --anchor-floor: {v}"))?);
+                i += 2;
+            }
             "--coast-limit" => {
                 let v = args.get(i + 1).ok_or("--coast-limit needs a value")?;
                 tuning.coast_limit =
