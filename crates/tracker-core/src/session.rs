@@ -19,6 +19,7 @@ pub struct TrackingSessionConfig {
     max_reacquire_distance: Option<f64>,
     coast_uncertainty_growth: f64,
     sustained_suspect_limit: u32,
+    lost_confidence: f64,
 }
 
 impl TrackingSessionConfig {
@@ -90,6 +91,22 @@ impl TrackingSessionConfig {
     pub fn sustained_suspect_limit(&self) -> u32 {
         self.sustained_suspect_limit
     }
+
+    /// The identity-confidence floor (17.4b) below which a `Found` counts
+    /// toward the sustained-suspect streak that trips `SessionState::Lost`.
+    ///
+    /// This is deliberately **lower** than 17.4's `DEFAULT_TRUSTED_CONFIDENCE`
+    /// (0.7, the honest-doubt threshold used to *flag* Suspect samples in
+    /// exports). Terminating the whole run is a heavier action than flagging a
+    /// sample, so it must require confidence in the genuine-false-lock band,
+    /// not merely "somewhat uncertain". Measured (audit + 2026-07-22 user
+    /// footage): a correct track whose plate appearance shifts at unrack
+    /// decays only to ~0.57 against the fixed seed, while a real lock onto rack
+    /// hardware collapses to ~0.40-0.46. Default 0.45 sits between them, so a
+    /// correct-but-changed track is never killed. Tunable per footage.
+    pub fn lost_confidence(&self) -> f64 {
+        self.lost_confidence
+    }
 }
 
 /// Builder for `TrackingSessionConfig`.
@@ -100,6 +117,7 @@ pub struct TrackingSessionConfigBuilder {
     max_reacquire_distance: Option<f64>,
     coast_uncertainty_growth: Option<f64>,
     sustained_suspect_limit: Option<u32>,
+    lost_confidence: Option<f64>,
 }
 
 impl TrackingSessionConfigBuilder {
@@ -142,6 +160,13 @@ impl TrackingSessionConfigBuilder {
         self
     }
 
+    /// Sets the identity-confidence floor (17.4b) below which a `Found`
+    /// counts toward the Lost streak. Leave unset for the default (0.45).
+    pub fn lost_confidence(mut self, floor: f64) -> Self {
+        self.lost_confidence = Some(floor);
+        self
+    }
+
     pub fn build(self) -> TrackingSessionConfig {
         TrackingSessionConfig {
             coast_limit: self.coast_limit.unwrap_or(5),
@@ -149,6 +174,7 @@ impl TrackingSessionConfigBuilder {
             max_reacquire_distance: self.max_reacquire_distance,
             coast_uncertainty_growth: self.coast_uncertainty_growth.unwrap_or(20.0),
             sustained_suspect_limit: self.sustained_suspect_limit.unwrap_or(10),
+            lost_confidence: self.lost_confidence.unwrap_or(0.45),
         }
     }
 }
@@ -398,14 +424,16 @@ impl<T: Tracker> TrackingSession<T> {
                     confidence: Some(identity_confidence),
                 });
 
-                // 17.4b: a `Found` that keeps claiming success while its
-                // own anchor score stays below the honest-doubt threshold
-                // (17.4's `DEFAULT_TRUSTED_CONFIDENCE`) for
-                // `sustained_suspect_limit` frames in a row is a "tracked,
-                // but wrong" run (audit F5), not a transient blip — give up
-                // rather than let it keep exporting confident-looking
-                // samples off the seeded object.
-                if identity_confidence < crate::accuracy::DEFAULT_TRUSTED_CONFIDENCE {
+                // 17.4b: a `Found` that keeps claiming success while its own
+                // anchor score stays below `lost_confidence` (the genuine
+                // false-lock band, ~0.45 — NOT 17.4's 0.7 doubt threshold,
+                // which a correct-but-appearance-changed track routinely dips
+                // into at unrack, causing a false Lost before rep 1) for
+                // `sustained_suspect_limit` frames in a row is a "tracked, but
+                // wrong" run (audit F5), not a transient blip — give up rather
+                // than let it keep exporting confident-looking samples off the
+                // seeded object.
+                if identity_confidence < self.config.lost_confidence {
                     self.suspect_streak += 1;
                     if self.suspect_streak >= self.config.sustained_suspect_limit {
                         self.state = SessionState::Lost;
