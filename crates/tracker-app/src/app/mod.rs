@@ -27,14 +27,27 @@ mod video_panel;
 
 pub use state::{AppState, DisplayMode, Mode, Phase, Seed, DEFAULT_CALIBRATION_LENGTH_METERS};
 
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use eframe::egui;
 
+use crate::decode_worker::{self, DecodeHandle, DecodeMessage};
 use crate::ffprobe::VideoMetadata;
-use crate::frame_cache::FrameCache;
 use crate::seek_source::SeekingFrameDecoder;
 use crate::thumbnail_worker::{self, ThumbnailHandle, ThumbnailMessage};
+
+/// How many decoded frames `TrackerApp::frames` keeps on the UI side (task
+/// 18.1). This is a *second*, much smaller cache than the decode worker's
+/// own `FrameCache` — the worker's cache exists so it doesn't re-spawn
+/// ffmpeg for a frame it already decoded; this one exists so the UI thread
+/// can read a `tracker_core::Frame` it already has (to draw the texture, or
+/// to run `suggest_tracker` for a seed placed on the currently-visible
+/// frame — see `video_panel.rs`'s seed-placement handler) without ever
+/// blocking on the worker. Small: unlike the worker's cache this is never
+/// used to avoid a re-decode, just to answer "do I already have this frame
+/// in hand".
+const UI_FRAME_CACHE_CAPACITY: usize = 8;
 
 /// Video extensions offered in the "Open video…" file dialog (10.5). Not
 /// exhaustive (ffmpeg reads far more), just the common ones a user is likely
@@ -53,7 +66,24 @@ const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "mkv", "avi", "webm"];
 /// for "is a video open" — `state.is_some()`.
 pub struct TrackerApp {
     pub state: Option<AppState>,
-    cache: Option<FrameCache<SeekingFrameDecoder>>,
+    /// The async frame-decode worker (task 18.1): the UI sends "want frame
+    /// N" and drains replies with `try_recv` in `update`/`poll_decode`.
+    /// Never call a decoder synchronously from here again — see
+    /// `docs/gui-threading.md` finding G1, which this replaces.
+    decode: Option<DecodeHandle<tracker_core::Frame>>,
+    /// Small UI-side cache of recently-decoded frames, populated only from
+    /// `DecodeMessage::Decoded` replies (see `UI_FRAME_CACHE_CAPACITY`).
+    /// `frame_order` tracks insertion order for eviction (a plain FIFO is
+    /// enough here — this is a "do I already have it" convenience cache,
+    /// not a performance-critical LRU like the worker's own).
+    frames: HashMap<u64, tracker_core::Frame>,
+    frame_order: VecDeque<u64>,
+    /// Set when a seed was placed on a frame the UI didn't already have in
+    /// `frames` (task 18.1's fix for finding G2): `(frame_index, position)`
+    /// the seed was placed at. The frame is requested from the worker and
+    /// `note_seed_suggestion` is applied once it arrives in `poll_decode`,
+    /// instead of blocking the click handler on a synchronous decode.
+    pending_seed_suggestion: Option<(u64, tracker_core::Point)>,
     texture: Option<egui::TextureHandle>,
     /// Which frame `texture` currently shows, so we don't re-upload every
     /// frame when nothing changed.
@@ -103,7 +133,10 @@ impl TrackerApp {
     pub fn empty() -> Self {
         Self {
             state: None,
-            cache: None,
+            decode: None,
+            frames: HashMap::new(),
+            frame_order: VecDeque::new(),
+            pending_seed_suggestion: None,
             texture: None,
             texture_frame: None,
             open_error: None,
@@ -165,9 +198,93 @@ impl TrackerApp {
             state.show_path = show;
         }
         self.state = Some(state);
-        self.cache = Some(FrameCache::new(decoder, 16));
+        self.decode = Some(decode_worker::spawn_decode_worker(decoder, 16));
+        self.frames.clear();
+        self.frame_order.clear();
+        self.pending_seed_suggestion = None;
         self.texture = None;
         self.texture_frame = None;
+    }
+
+    /// Records a newly-decoded frame in the small UI-side cache
+    /// (`frames`/`frame_order`), evicting the oldest entry once
+    /// `UI_FRAME_CACHE_CAPACITY` is exceeded.
+    fn remember_frame(&mut self, frame_index: u64, frame: tracker_core::Frame) {
+        if !self.frames.contains_key(&frame_index) {
+            self.frame_order.push_back(frame_index);
+            while self.frame_order.len() > UI_FRAME_CACHE_CAPACITY {
+                if let Some(oldest) = self.frame_order.pop_front() {
+                    self.frames.remove(&oldest);
+                }
+            }
+        }
+        self.frames.insert(frame_index, frame);
+    }
+
+    /// Drains the decode worker's reply channel (task 18.1), uploading a
+    /// texture when the arriving frame is the one currently wanted
+    /// (`state.current_frame`) and resolving a pending seed suggestion
+    /// (the G2 fix — see `pending_seed_suggestion`'s doc comment) when its
+    /// frame arrives. Returns `true` if anything was processed, so `update`
+    /// knows to request a repaint, mirroring `poll_thumbnails`.
+    fn poll_decode(&mut self, ctx: &egui::Context) -> bool {
+        let Some(handle) = &self.decode else {
+            return false;
+        };
+        // Drain into a `Vec` first: `remember_frame` etc below need `&mut
+        // self`, which can't coexist with `handle.results` borrowing
+        // `self.decode` immutably.
+        let messages: Vec<_> = handle.results.try_iter().collect();
+        let mut any = false;
+        for msg in messages {
+            any = true;
+            match msg {
+                DecodeMessage::Decoded { frame_index, frame } => {
+                    self.remember_frame(frame_index, frame.clone());
+                    if let Some(state) = &mut self.state {
+                        if frame_index == state.current_frame {
+                            let size = [frame.width() as usize, frame.height() as usize];
+                            let image = egui::ColorImage::from_rgb(size, frame.rgb());
+                            let handle = ctx.load_texture(
+                                "current-frame",
+                                image,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            self.texture = Some(handle);
+                            self.texture_frame = Some(frame_index);
+                            state.status.clear();
+                        }
+                        if let Some((pending_frame, position)) = self.pending_seed_suggestion {
+                            if pending_frame == frame_index {
+                                self.pending_seed_suggestion = None;
+                                let kind = tracker_core::suggest_tracker(
+                                    &frame,
+                                    position,
+                                    tracker_core::TrackerSuggestionConfig::default(),
+                                );
+                                state.note_seed_suggestion(kind);
+                            }
+                        }
+                    }
+                }
+                DecodeMessage::Error {
+                    frame_index,
+                    message,
+                } => {
+                    tracing::error!(frame = frame_index, error = %message, "failed to decode frame");
+                    if let Some(state) = &mut self.state {
+                        if frame_index == state.current_frame {
+                            state.status =
+                                format!("failed to decode frame {frame_index}: {message}");
+                        }
+                    }
+                    if self.pending_seed_suggestion.map(|(f, _)| f) == Some(frame_index) {
+                        self.pending_seed_suggestion = None;
+                    }
+                }
+            }
+        }
+        any
     }
 
     /// Drains any pending messages from the thumbnail-decode worker (10.6),
@@ -250,29 +367,34 @@ impl TrackerApp {
         }
     }
 
-    fn ensure_texture(&mut self, ctx: &egui::Context) {
+    /// Requests the currently-wanted frame from the decode worker if the
+    /// displayed texture doesn't already match `state.current_frame` (task
+    /// 18.1, replacing the synchronous `FrameCache::get` this used to call
+    /// directly — see `docs/gui-threading.md` finding G1). Never decodes
+    /// anything itself: if the UI-side `frames` cache already has the
+    /// wanted frame (e.g. it was decoded for a previous purpose, like a
+    /// seed suggestion), upload it immediately; otherwise ask the worker
+    /// and let `poll_decode` pick up the reply on a later frame. Safe to
+    /// call every `update` — a repeat `want()` for the same index the
+    /// worker is already decoding is coalesced away for free.
+    fn request_current_frame(&mut self, ctx: &egui::Context) {
         let Some(state) = &mut self.state else {
-            return;
-        };
-        let Some(cache) = &mut self.cache else {
             return;
         };
         if self.texture_frame == Some(state.current_frame) {
             return; // already showing the right frame
         }
-        match cache.get(state.current_frame) {
-            Ok(frame) => {
-                let size = [frame.width() as usize, frame.height() as usize];
-                let image = egui::ColorImage::from_rgb(size, frame.rgb());
-                let handle = ctx.load_texture("current-frame", image, egui::TextureOptions::LINEAR);
-                self.texture = Some(handle);
-                self.texture_frame = Some(state.current_frame);
-                state.status.clear();
-            }
-            Err(e) => {
-                tracing::error!(frame = state.current_frame, error = %e, "failed to decode frame");
-                state.status = format!("failed to decode frame {}: {e}", state.current_frame);
-            }
+        if let Some(frame) = self.frames.get(&state.current_frame).cloned() {
+            let size = [frame.width() as usize, frame.height() as usize];
+            let image = egui::ColorImage::from_rgb(size, frame.rgb());
+            let handle = ctx.load_texture("current-frame", image, egui::TextureOptions::LINEAR);
+            self.texture = Some(handle);
+            self.texture_frame = Some(state.current_frame);
+            state.status.clear();
+            return;
+        }
+        if let Some(decode) = &self.decode {
+            decode.want(state.current_frame);
         }
     }
 }
@@ -329,7 +451,19 @@ impl eframe::App for TrackerApp {
         if self.poll_thumbnails(ctx) {
             ctx.request_repaint();
         }
-        self.ensure_texture(ctx);
+        if self.poll_decode(ctx) {
+            ctx.request_repaint();
+        }
+        self.request_current_frame(ctx);
+        // Keep repainting while the wanted frame hasn't arrived yet, so the
+        // "decoding…" state (video_panel.rs) and the eventual texture both
+        // show up promptly instead of waiting for some unrelated input to
+        // trigger the next repaint.
+        if let Some(state) = &self.state {
+            if self.texture_frame != Some(state.current_frame) {
+                ctx.request_repaint();
+            }
+        }
         handle_frame_step_shortcuts(ctx, self.state.as_mut());
 
         toolbar::show(ctx, self);

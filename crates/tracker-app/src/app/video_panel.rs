@@ -12,7 +12,7 @@ use crate::screen_map::screen_to_image_px;
 
 pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
     egui::CentralPanel::default().show(ctx, |ui| {
-        let (Some(state), Some(cache)) = (&mut app.state, &mut app.cache) else {
+        if app.state.is_none() {
             empty_state_prompt(ui, app.open_error.as_deref());
             return;
         };
@@ -21,6 +21,17 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
             return;
         };
         let texture = texture.clone();
+        // 18.1 (finding G2): the wanted frame (`state.current_frame`) may
+        // not be the one `texture` currently shows — the decode worker just
+        // hasn't replied yet (fast scrub, or tracking-follow outrunning
+        // ffmpeg). Draw the stale texture rather than block, but say so.
+        let decoding_current = app
+            .state
+            .as_ref()
+            .is_some_and(|state| app.texture_frame != Some(state.current_frame));
+        let Some(state) = &mut app.state else {
+            return;
+        };
         let available = ui.available_size();
         let tex_size = texture.size_vec2();
         let scale = (available.x / tex_size.x)
@@ -29,6 +40,26 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         let response =
             ui.add(egui::Image::new((texture.id(), tex_size * scale)).sense(egui::Sense::click()));
         let image_rect = response.rect;
+
+        // 18.1 point 3: a subtle non-blocking affordance while the wanted
+        // frame hasn't arrived from the decode worker yet — the image above
+        // is still the last frame that *did* arrive, never a block.
+        if decoding_current {
+            let galley = ui.painter().layout_no_wrap(
+                "decoding…".to_string(),
+                egui::FontId::proportional(12.0),
+                egui::Color32::WHITE,
+            );
+            let anchor = image_rect.min + egui::vec2(8.0, 8.0);
+            let text_rect = egui::Align2::LEFT_TOP.anchor_size(anchor, galley.size());
+            ui.painter().rect_filled(
+                text_rect.expand(4.0),
+                3.0,
+                egui::Color32::from_black_alpha(150),
+            );
+            ui.painter()
+                .galley(text_rect.min, galley, egui::Color32::WHITE);
+        }
 
         let calibrating = matches!(state.mode, Mode::Calibrating { .. });
 
@@ -43,13 +74,29 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
                     if state.mode == Mode::PlacingSeed {
                         state.place_seed(image_px);
                         if let Some(seed) = state.seed {
-                            if let Ok(frame) = cache.get(seed.frame_index) {
+                            // 18.1 (finding G2): this used to call
+                            // `cache.get(seed.frame_index)` synchronously,
+                            // spawning ffmpeg on the UI thread if the seed
+                            // frame wasn't already cached. Now: use it
+                            // immediately if the UI-side cache already has
+                            // it (the common case — the seed is placed on
+                            // the currently-displayed frame, which is
+                            // already decoded), otherwise ask the decode
+                            // worker and apply the suggestion later, once
+                            // `poll_decode` sees the reply.
+                            if let Some(frame) = app.frames.get(&seed.frame_index) {
                                 let kind = tracker_core::suggest_tracker(
-                                    &frame,
+                                    frame,
                                     seed.position,
                                     tracker_core::TrackerSuggestionConfig::default(),
                                 );
                                 state.note_seed_suggestion(kind);
+                            } else {
+                                app.pending_seed_suggestion =
+                                    Some((seed.frame_index, seed.position));
+                                if let Some(decode) = &app.decode {
+                                    decode.want(seed.frame_index);
+                                }
                             }
                         }
                     } else if calibrating {
