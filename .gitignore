@@ -18,5 +18,6 @@
 
 # Ground-truth sampled frames are regenerable via groundtruth/extract_frames.sh;
 # the hand labels (groundtruth/v*.csv) are the committed source of truth.
+!groundtruth/v*.csv
 /groundtruth/frames/
 /groundtruth/*_verify.png

@@ -8,6 +8,8 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/rust-2021-orange.svg">
   <img alt="Status" src="https://img.shields.io/badge/status-early%20development-yellow.svg">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-passing-brightgreen.svg">
+  <a href="docs/theory.md"><img alt="Docs" src="https://img.shields.io/badge/docs-theory.md-blue.svg"></a>
 </p>
 
 # image-tracker
@@ -37,7 +39,7 @@ Bonus: the **Marker Color Advisor** analyses your video's palette and tells you 
 
 ## Status
 
-Early development — core tracking (adaptive template + color trackers), GUI with side panel, overlay/CSV/JSON outputs, kinematics + per-rep VBT metrics, telemetry, and CI are done (milestones 1–5, 7.2, 8, most of 9); run guide and distribution polish are in progress. See [PLAN.md](PLAN.md) for the live task board and [CONTEXT.md](CONTEXT.md) for the project's vocabulary. Manual smoke-test results are logged under [docs/smoke/](docs/smoke/), latest run linked from that directory's index.
+Early development — core tracking (adaptive template + color trackers), GUI with side panel, overlay/CSV/JSON outputs, kinematics + per-rep VBT metrics, telemetry, CI, a strategy shootout (milestone 14), and theory/VBT grounding (16.1) are done (milestones 1–15). In progress: the **tracking-correctness audit (milestone 17)** — an accuracy-vs-confidence metric that grades the tracker against hand-labelled ground truth (17.1), an anchor-veto fix for identity drift (17.3), and first-class confidence threaded through exports (17.4). See [docs/design/tracking-audit-2026-07-21.md](docs/design/tracking-audit-2026-07-21.md) for the audit writeup. See [PLAN.md](PLAN.md) for the live task board and [CONTEXT.md](CONTEXT.md) for the project's vocabulary. Manual smoke-test results are logged under [docs/smoke/](docs/smoke/), latest run linked from that directory's index.
 
 ## Requirements
 
@@ -49,8 +51,8 @@ See [RUNNING.md](RUNNING.md) for full run/install instructions (dev, end user, `
 ```bash
 git clone https://github.com/amadeu01/image-tracker.git
 cd image-tracker
-cargo test        # 200+ workspace tests
-cargo run -p tracker-app -- path/to/video.mp4   # UI lands in milestone 2
+cargo test        # 473 workspace tests
+cargo run -p tracker-app -- path/to/video.mp4
 ```
 
 ## Architecture
@@ -60,12 +62,19 @@ Cargo workspace, hexagonal-ish:
 ```
 crates/
 ├── tracker-core   # pure domain — zero dependencies, fully unit-tested
-│   ├── geometry   # Point, Frame
-│   ├── patch      # grayscale patch extraction
-│   ├── metric     # CorrelationMetric trait, ZNCC
-│   ├── tracker    # TemplateTracker (search window, best match)
-│   ├── session    # gap coasting, re-seed, interpolation
-│   └── bar_path   # BarPath aggregate, rational-fps Timebase
+│   ├── geometry     # Point, Frame
+│   ├── patch        # grayscale patch extraction
+│   ├── metric       # CorrelationMetric trait, ZNCC
+│   ├── preprocessor # GaussianBlur/Median filters ahead of matching
+│   ├── tracker      # TemplateTracker (search window, best match, anchor veto)
+│   ├── color        # HSV color model for the color tracker
+│   ├── session      # gap coasting, re-seed, interpolation
+│   ├── calibration  # pixel↔metric scale from a known plate length
+│   ├── velocity     # smoothing + finite-difference kinematics
+│   ├── rep          # eccentric/concentric phase segmentation
+│   ├── accuracy     # ground-truth grading (PLAN 17.1)
+│   ├── suggest      # tracker-type suggestion from a seed patch
+│   └── bar_path     # BarPath aggregate, rational-fps Timebase
 └── tracker-app    # adapters — ffmpeg subprocess IO, egui UI, overlay, export
 ```
 
@@ -75,9 +84,28 @@ written up in [docs/theory.md](docs/theory.md). For a per-strategy deep-dive
 (Template/ZNCC, Color model, Gaussian/Median filters — each with an ELI5
 paragraph, the actual math, the Rust implementation walkthrough, and a worked
 numeric example, plus what the "Test strategies" benchmark measures), see
-[theory.md §7, "Strategy deep-dive"](docs/theory.md#7-strategy-deep-dive).
+[theory.md §7, "Strategy deep-dive"](docs/theory.md#7-strategy-deep-dive). For
+the physiology and evidence behind the velocity numbers themselves (why
+velocity, which variable, loss-threshold ranges, where a phone camera sits
+among VBT instruments), see
+[theory.md §9, "The sports science behind the numbers"](docs/theory.md#9-the-sports-science-behind-the-numbers-vbt).
 
 Domain language lives in [CONTEXT.md](CONTEXT.md); architectural decisions in [docs/adr/](docs/adr/).
+
+### Correctness & accuracy
+
+All five of the tracker's own metrics — tracked %, gaps, reseeds, mean
+score, mean jitter — measure its *self-confidence*, not whether it's
+actually on the bar; a confident false lock onto rack steel maximises every
+one of them. The `grade` CLI subcommand instead scores an exported run
+against hand-labelled ground truth (see [groundtruth/README.md](groundtruth/README.md)
+and [PLAN 17.1](PLAN.md)). The image below is from the milestone 17 audit:
+left is pre-veto drift walking the tracker onto the rack; right is the same
+clip after the 17.3 anchor-veto fix holding the bar through the whole set.
+
+<p align="center">
+  <img src="docs/design/17.3-veto-before-after.png" alt="Before/after the 17.3 anchor-veto fix: left drifts onto the rack, right holds the bar" width="720"/>
+</p>
 
 ## Contributing
 

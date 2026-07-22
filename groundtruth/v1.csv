@@ -1,0 +1,14 @@
+video,frame_index,x_px,y_px,status,target
+v1,400,,,occluded,bar_sleeve_end
+v1,550,,,occluded,bar_sleeve_end
+v1,700,317,190,visible,bar_sleeve_end
+v1,850,,,occluded,bar_sleeve_end
+v1,900,299,422,visible,bar_sleeve_end
+v1,1000,,,occluded,bar_sleeve_end
+v1,1150,,,occluded,bar_sleeve_end
+v1,1300,269,14,visible,bar_sleeve_end
+v1,1450,289,427,visible,bar_sleeve_end
+v1,1600,,,occluded,bar_sleeve_end
+v1,1750,,,occluded,bar_sleeve_end
+v1,1850,,,occluded,bar_sleeve_end
+v1,1900,,,occluded,bar_sleeve_end
