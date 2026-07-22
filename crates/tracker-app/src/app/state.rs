@@ -1193,6 +1193,12 @@ impl AppState {
                 seed.frame_index
             ),
         );
+        // dt (17.2) for the tracker's motion model; falls back to a
+        // plausible 30fps if the reported fps is degenerate, same policy as
+        // the CLI `compare` path (compare.rs).
+        let dt = tracker_core::Timebase::new(self.metadata.fps_num, self.metadata.fps_den)
+            .map(|tb| 1.0 / tb.fps())
+            .unwrap_or(1.0 / 30.0);
         let handle = crate::compare::spawn_benchmark(
             self.video_path.clone(),
             self.metadata.display_width(),
@@ -1200,6 +1206,7 @@ impl AppState {
             seed.frame_index,
             seed.position,
             crate::compare::DEFAULT_COMPARE_FRAMES,
+            dt,
             coast_limit,
             tuning,
         );

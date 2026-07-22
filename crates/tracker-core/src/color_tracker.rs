@@ -5,6 +5,7 @@
 
 use crate::color::ColorModel;
 use crate::geometry::{Frame, Point};
+use crate::motion::{distance, gate_radius, Track};
 use crate::preprocessor::PreprocessorChain;
 use crate::tracker::{StepOutcome, Tracker};
 
@@ -13,6 +14,7 @@ use crate::tracker::{StepOutcome, Tracker};
 pub struct ColorTrackerConfig {
     search_radius: u32,
     min_pixels: u32,
+    max_acceleration: f64,
     preprocessor: PreprocessorChain,
 }
 
@@ -34,6 +36,13 @@ impl ColorTrackerConfig {
         self.min_pixels
     }
 
+    /// The physically-plausible acceleration bound (px/s², 17.2) — see
+    /// `TemplateTrackerConfig::max_acceleration`. Applies the same
+    /// prediction-centred-search + gate treatment to the color centroid.
+    pub fn max_acceleration(&self) -> f64 {
+        self.max_acceleration
+    }
+
     /// The `Preprocessor` chain applied (per RGB channel plane) to the
     /// search window before color matching. Empty (identity/no-op) by
     /// default.
@@ -47,6 +56,7 @@ impl ColorTrackerConfig {
 pub struct ColorTrackerConfigBuilder {
     search_radius: u32,
     min_pixels: u32,
+    max_acceleration: f64,
     preprocessor: PreprocessorChain,
 }
 
@@ -55,6 +65,8 @@ impl Default for ColorTrackerConfigBuilder {
         Self {
             search_radius: 25,
             min_pixels: 5,
+            // See `TemplateTrackerConfigBuilder::default` (17.2).
+            max_acceleration: 6000.0,
             preprocessor: PreprocessorChain::new(),
         }
     }
@@ -73,6 +85,13 @@ impl ColorTrackerConfigBuilder {
         self
     }
 
+    /// Sets the acceleration bound (px/s², 17.2) — see
+    /// `TemplateTrackerConfigBuilder::max_acceleration`.
+    pub fn max_acceleration(mut self, max_acceleration: f64) -> Self {
+        self.max_acceleration = max_acceleration;
+        self
+    }
+
     /// Sets the `Preprocessor` chain applied to the search window before
     /// color matching (see CONTEXT.md, "Preprocessor").
     pub fn preprocessor(mut self, chain: PreprocessorChain) -> Self {
@@ -84,6 +103,7 @@ impl ColorTrackerConfigBuilder {
         ColorTrackerConfig {
             search_radius: self.search_radius,
             min_pixels: self.min_pixels,
+            max_acceleration: self.max_acceleration,
             preprocessor: self.preprocessor,
         }
     }
@@ -251,9 +271,10 @@ impl ColorTracker {
     /// RGB channel plane, independently) before matching — the same-space
     /// counterpart to `TemplateTracker::step` filtering each candidate
     /// patch.
-    pub fn step(&mut self, frame: &Frame, last_pos: Point) -> StepOutcome {
-        let cx = last_pos.x.round() as i64;
-        let cy = last_pos.y.round() as i64;
+    pub fn step(&mut self, frame: &Frame, track: &Track, dt: f64) -> StepOutcome {
+        let predicted = track.predicted(dt);
+        let cx = predicted.x.round() as i64;
+        let cy = predicted.y.round() as i64;
         let r = self.config.search_radius as i64;
 
         let min_x = (cx - r).max(0);
@@ -290,6 +311,14 @@ impl ColorTracker {
         }
 
         let position = Point::new(sum_x / count as f64, sum_y / count as f64);
+
+        // Same physically-plausible gate as `TemplateTracker` (17.2, audit
+        // F2): a centroid too far from the constant-velocity prediction is
+        // rejected regardless of how solidly it fills the window.
+        if distance(position, predicted) > gate_radius(track, self.config.max_acceleration, dt) {
+            return StepOutcome::Miss;
+        }
+
         let score = count as f64 / scanned as f64;
         // The color tracker has no separate identity template: its
         // fill-fraction is already an honest confidence, so identity and
@@ -303,8 +332,8 @@ impl ColorTracker {
 }
 
 impl Tracker for ColorTracker {
-    fn step(&mut self, frame: &Frame, last_pos: Point) -> StepOutcome {
-        ColorTracker::step(self, frame, last_pos)
+    fn step(&mut self, frame: &Frame, track: &Track, dt: f64) -> StepOutcome {
+        ColorTracker::step(self, frame, track, dt)
     }
 }
 
@@ -378,9 +407,11 @@ mod tests {
         let frame = frame_with_blob(40, 40, [128, 128, 128], Some((18, 18, 4, [255, 0, 0])));
         let mut tracker = ColorTracker::new(model, plain_config());
 
-        let outcome = tracker.step(&frame, Point::new(20.0, 20.0));
+        let outcome = tracker.step(&frame, &Track::new(Point::new(20.0, 20.0)), 1.0);
         match outcome {
-            StepOutcome::Found { position, score, .. } => {
+            StepOutcome::Found {
+                position, score, ..
+            } => {
                 assert!((position.x - 19.5).abs() < 1e-6);
                 assert!((position.y - 19.5).abs() < 1e-6);
                 assert!(score > 0.0 && score <= 1.0);
@@ -397,7 +428,7 @@ mod tests {
 
         // Last known position is the blob's old spot; search radius (15) is
         // wide enough to still reach the moved blob at (25..29, 10..14).
-        let outcome = tracker.step(&frame, Point::new(20.0, 20.0));
+        let outcome = tracker.step(&frame, &Track::new(Point::new(20.0, 20.0)), 1.0);
         match outcome {
             StepOutcome::Found { position, .. } => {
                 assert!((position.x - 26.5).abs() < 1e-6);
@@ -413,7 +444,7 @@ mod tests {
         let frame = frame_with_blob(40, 40, [128, 128, 128], None);
         let mut tracker = ColorTracker::new(model, plain_config());
 
-        let outcome = tracker.step(&frame, Point::new(20.0, 20.0));
+        let outcome = tracker.step(&frame, &Track::new(Point::new(20.0, 20.0)), 1.0);
         assert_eq!(outcome, StepOutcome::Miss);
     }
 
@@ -424,7 +455,7 @@ mod tests {
         let frame = frame_with_blob(40, 40, [128, 128, 128], Some((20, 20, 1, [255, 0, 0])));
         let mut tracker = ColorTracker::new(model, plain_config());
 
-        let outcome = tracker.step(&frame, Point::new(20.0, 20.0));
+        let outcome = tracker.step(&frame, &Track::new(Point::new(20.0, 20.0)), 1.0);
         assert_eq!(outcome, StepOutcome::Miss);
     }
 
@@ -450,7 +481,7 @@ mod tests {
         let frame = Frame::new(60, 40, rgb).unwrap();
         let mut tracker = ColorTracker::new(model, plain_config());
 
-        let outcome = tracker.step(&frame, Point::new(20.0, 20.0));
+        let outcome = tracker.step(&frame, &Track::new(Point::new(20.0, 20.0)), 1.0);
         match outcome {
             StepOutcome::Found { position, .. } => {
                 // Centroid of the 4x4 in-window blob at (18..22) is (19.5, 19.5).
@@ -502,9 +533,11 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = tracker.step(&frame, Point::new(20.0, 20.0));
+        let outcome = tracker.step(&frame, &Track::new(Point::new(20.0, 20.0)), 1.0);
         match outcome {
-            StepOutcome::Found { position, score, .. } => {
+            StepOutcome::Found {
+                position, score, ..
+            } => {
                 assert!((position.x - 19.5).abs() < 1e-6);
                 assert!((position.y - 19.5).abs() < 1e-6);
                 assert!(score > 0.0);
@@ -519,7 +552,7 @@ mod tests {
         let frame = frame_with_blob(40, 40, [128, 128, 128], Some((25, 10, 4, [255, 0, 0])));
         let mut tracker = ColorTracker::new(model, filtered_config());
 
-        let outcome = tracker.step(&frame, Point::new(20.0, 20.0));
+        let outcome = tracker.step(&frame, &Track::new(Point::new(20.0, 20.0)), 1.0);
         match outcome {
             StepOutcome::Found { position, .. } => {
                 assert!((position.x - 26.5).abs() < 1e-6);

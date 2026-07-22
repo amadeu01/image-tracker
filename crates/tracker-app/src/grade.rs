@@ -217,8 +217,14 @@ pub fn print_report(r: &AccuracyReport, args: &GradeArgs) {
             None => "—".into(),
         }
     );
-    println!("  FALSE CONFIDENCE     {}  (bar absent, confident position reported)", r.false_confidence);
-    println!("  suspect while absent {}  (bar absent, low-confidence position)", r.suspect_while_absent);
+    println!(
+        "  FALSE CONFIDENCE     {}  (bar absent, confident position reported)",
+        r.false_confidence
+    );
+    println!(
+        "  suspect while absent {}  (bar absent, low-confidence position)",
+        r.suspect_while_absent
+    );
     println!("  coasted while absent {}", r.coasted_while_absent);
     println!("  correctly absent     {}", r.correctly_absent);
 }

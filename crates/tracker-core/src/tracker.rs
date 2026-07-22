@@ -4,6 +4,7 @@
 
 use crate::geometry::{Frame, Point};
 use crate::metric::{CorrelationMetric, Zncc};
+use crate::motion::{distance, gate_radius, Track};
 use crate::patch::{extract_patch, Patch};
 use crate::preprocessor::PreprocessorChain;
 
@@ -15,6 +16,7 @@ pub struct TemplateTrackerConfig {
     min_score: f64,
     update_threshold: f64,
     anchor_floor: f64,
+    max_acceleration: f64,
     preprocessor: PreprocessorChain,
 }
 
@@ -58,6 +60,24 @@ impl TemplateTrackerConfig {
         self.anchor_floor
     }
 
+    /// The physically-plausible acceleration bound (px/s², 17.2), used by
+    /// `motion::gate_radius` to reject observations that would require the
+    /// tracked object to have accelerated implausibly hard since the last
+    /// frame. Applies on *every* step, gap open or not (audit F2): the
+    /// mid-gap-only `max_reacquire_distance`/`reacquire_min_score` guards
+    /// in `session.rs` never see silent, gap-free drift, because a drifting
+    /// tracker never misses. This gate does, because it's evaluated inside
+    /// `step` itself rather than by the session's gap bookkeeping.
+    ///
+    /// The default is deliberately generous — it should not reject genuine
+    /// motion on ordinary footage, only implausible teleports — and is
+    /// tunable per the object actually being tracked (see PLAN.md 17.2:
+    /// constant-velocity predictor + gating radius, not a full Kalman
+    /// filter).
+    pub fn max_acceleration(&self) -> f64 {
+        self.max_acceleration
+    }
+
     /// The `Preprocessor` chain applied to the reference patch (at
     /// construction) and to every candidate patch (per step). Empty
     /// (identity/no-op) by default.
@@ -74,6 +94,7 @@ pub struct TemplateTrackerConfigBuilder {
     min_score: f64,
     update_threshold: f64,
     anchor_floor: f64,
+    max_acceleration: f64,
     preprocessor: PreprocessorChain,
 }
 
@@ -85,6 +106,14 @@ impl Default for TemplateTrackerConfigBuilder {
             min_score: 0.5,
             update_threshold: 0.7,
             anchor_floor: 0.3,
+            // Generous starting point (17.2): at a typical 30fps dt this
+            // allows roughly a dozen extra pixels of deviation from the
+            // constant-velocity prediction per frame before rejecting a
+            // candidate outright, which should absorb ordinary barbell
+            // motion changes without absorbing a teleport onto adjacent
+            // clutter. Tune tighter per PLAN.md 17.2 once measured against
+            // real footage.
+            max_acceleration: 6000.0,
             preprocessor: PreprocessorChain::new(),
         }
     }
@@ -121,6 +150,13 @@ impl TemplateTrackerConfigBuilder {
         self
     }
 
+    /// Sets the acceleration bound (px/s², 17.2) the gating radius is
+    /// derived from — see `TemplateTrackerConfig::max_acceleration`.
+    pub fn max_acceleration(mut self, max_acceleration: f64) -> Self {
+        self.max_acceleration = max_acceleration;
+        self
+    }
+
     /// Sets the `Preprocessor` chain applied to the reference patch and
     /// every candidate patch (see CONTEXT.md, "Preprocessor").
     pub fn preprocessor(mut self, chain: PreprocessorChain) -> Self {
@@ -135,6 +171,7 @@ impl TemplateTrackerConfigBuilder {
             min_score: self.min_score,
             update_threshold: self.update_threshold,
             anchor_floor: self.anchor_floor,
+            max_acceleration: self.max_acceleration,
             preprocessor: self.preprocessor,
         }
     }
@@ -173,17 +210,26 @@ pub enum StepOutcome {
     Miss,
 }
 
-/// Anything that, given a frame and the last known position, produces a
+/// Anything that, given a frame and the current motion `Track`, produces a
 /// `StepOutcome` for the current frame (see CONTEXT.md, "Tracker"). Lets
 /// `TrackingSession`'s gap/coast logic (1.6) drive either a `TemplateTracker`
 /// or a `ColorTracker` (4.2) interchangeably.
+///
+/// `track` carries position, velocity and uncertainty (17.2, audit F1); `dt`
+/// is the time in seconds since the last step. Implementations centre their
+/// search window on `track.predicted(dt)` rather than the raw last
+/// position, and reject candidates too far from that prediction to be
+/// physically plausible — see `motion::gate_radius`. This applies on every
+/// step, not just while a gap is open (audit F2): it is the tracker's own
+/// job to refuse an implausible jump, not something bolted on afterward by
+/// the session.
 pub trait Tracker {
-    fn step(&mut self, frame: &Frame, last_pos: Point) -> StepOutcome;
+    fn step(&mut self, frame: &Frame, track: &Track, dt: f64) -> StepOutcome;
 }
 
 impl Tracker for TemplateTracker {
-    fn step(&mut self, frame: &Frame, last_pos: Point) -> StepOutcome {
-        TemplateTracker::step(self, frame, last_pos)
+    fn step(&mut self, frame: &Frame, track: &Track, dt: f64) -> StepOutcome {
+        TemplateTracker::step(self, frame, track, dt)
     }
 }
 
@@ -239,14 +285,19 @@ impl TemplateTracker {
         })
     }
 
-    /// Searches a window centered on `last_pos` in `frame` for the best
-    /// match against `max(anchor_score, adaptive_score)`. Refreshes the
-    /// adaptive template from the winning patch when its effective score
-    /// clears `update_threshold`.
-    pub fn step(&mut self, frame: &Frame, last_pos: Point) -> StepOutcome {
+    /// Searches a window centered on the constant-velocity prediction
+    /// (`track.predicted(dt)`, 17.2) in `frame` for the best match against
+    /// `max(anchor_score, adaptive_score)`. Refreshes the adaptive template
+    /// from the winning patch when its effective score clears
+    /// `update_threshold`. A winning candidate too far from the prediction
+    /// to be physically plausible (`motion::gate_radius`) is rejected as a
+    /// `Miss` regardless of score — audit F2's fix, evaluated here so it
+    /// applies whether or not a gap is currently open.
+    pub fn step(&mut self, frame: &Frame, track: &Track, dt: f64) -> StepOutcome {
         let metric = Zncc;
-        let cx = last_pos.x.round() as i64;
-        let cy = last_pos.y.round() as i64;
+        let predicted = track.predicted(dt);
+        let cx = predicted.x.round() as i64;
+        let cy = predicted.y.round() as i64;
         let r = self.config.search_radius as i64;
 
         // Each eligible candidate carries its winning (effective) score and
@@ -301,7 +352,9 @@ impl TemplateTracker {
 
         match best {
             Some((position, score, anchor_score, candidate))
-                if score >= self.config.min_score =>
+                if score >= self.config.min_score
+                    && distance(position, predicted)
+                        <= gate_radius(track, self.config.max_acceleration, dt) =>
             {
                 // Refresh the adaptive when the effective match is strong
                 // (>= update_threshold). The anchor veto above already
@@ -357,8 +410,6 @@ mod tests {
             .build()
     }
 
-
-
     #[test]
     fn config_builder_has_defaults() {
         let config = TemplateTrackerConfig::builder().build();
@@ -367,6 +418,7 @@ mod tests {
         assert_eq!(config.min_score(), 0.5);
         assert_eq!(config.update_threshold(), 0.7);
         assert_eq!(config.anchor_floor(), 0.3);
+        assert_eq!(config.max_acceleration(), 6000.0);
     }
 
     /// Builds a frame whose left half is one gray value and right half
@@ -396,13 +448,17 @@ mod tests {
             .min_score(0.3)
             .anchor_floor(0.5)
             .build();
-        let mut tracker = TemplateTracker::new(&seed_frame, Point::new(20.0, 20.0), config).unwrap();
+        let mut tracker =
+            TemplateTracker::new(&seed_frame, Point::new(20.0, 20.0), config).unwrap();
 
         // Next frame: the square is gone entirely (uniform field). Nothing
         // resembles the anchor, so every candidate is vetoed → Miss, rather
         // than locking onto whatever scored least-badly.
         let empty = split_frame(40, 40, 40, 20, 20);
-        assert_eq!(tracker.step(&empty, Point::new(20.0, 20.0)), StepOutcome::Miss);
+        assert_eq!(
+            tracker.step(&empty, &Track::new(Point::new(20.0, 20.0)), 1.0),
+            StepOutcome::Miss
+        );
     }
 
     /// 17.3: with a permissive (zero) floor the veto is disabled and the
@@ -417,10 +473,11 @@ mod tests {
             .min_score(0.5)
             .anchor_floor(0.0)
             .build();
-        let mut tracker = TemplateTracker::new(&seed_frame, Point::new(20.0, 20.0), config).unwrap();
+        let mut tracker =
+            TemplateTracker::new(&seed_frame, Point::new(20.0, 20.0), config).unwrap();
         // Same square shifted right by 2px: should be found near (22,20).
         let moved = frame_with_square(40, 40, 20, 18, 5);
-        match tracker.step(&moved, Point::new(20.0, 20.0)) {
+        match tracker.step(&moved, &Track::new(Point::new(20.0, 20.0)), 1.0) {
             StepOutcome::Found { position, .. } => {
                 assert!((position.x - 22.0).abs() <= 1.0, "x was {}", position.x);
             }
@@ -472,10 +529,12 @@ mod tests {
         // Next frame: same square moved by (dx, dy) = (5, -3).
         let moved_frame = frame_with_square(width, height, 15, 7, size);
         let last_pos = seed; // tracker starts searching around the last known position
-        let outcome = tracker.step(&moved_frame, last_pos);
+        let outcome = tracker.step(&moved_frame, &Track::new(last_pos), 1.0);
 
         match outcome {
-            StepOutcome::Found { position, score, .. } => {
+            StepOutcome::Found {
+                position, score, ..
+            } => {
                 assert_eq!(position, Point::new(17.0, 9.0));
                 assert!(score > 0.9, "expected high score, got {score}");
             }
@@ -493,7 +552,7 @@ mod tests {
 
         // Blank frame: no bright square anywhere.
         let blank = frame_with_square(width, height, -100, -100, 0);
-        let outcome = tracker.step(&blank, seed);
+        let outcome = tracker.step(&blank, &Track::new(seed), 1.0);
         assert_eq!(outcome, StepOutcome::Miss);
     }
 
@@ -515,9 +574,11 @@ mod tests {
         // Same frame, same position: search window extends past the
         // frame's negative edge but must not panic, and should still find
         // the object at its known location.
-        let outcome = tracker.step(&ref_frame, seed);
+        let outcome = tracker.step(&ref_frame, &Track::new(seed), 1.0);
         match outcome {
-            StepOutcome::Found { position, score, .. } => {
+            StepOutcome::Found {
+                position, score, ..
+            } => {
                 assert_eq!(position, seed);
                 assert!(score > 0.9);
             }
@@ -602,7 +663,7 @@ mod tests {
         for step in 1..=5 {
             let t = step as f64 / 10.0; // up to t=0.5, anchor still ~0.63
             let frame = frame_with_blended_pattern(width, height, cx, cy, radius, t);
-            match tracker.step(&frame, pos) {
+            match tracker.step(&frame, &Track::new(pos), 1.0) {
                 StepOutcome::Found { position, .. } => assert_eq!(position, pos),
                 StepOutcome::Miss => panic!("dual-template lost the object at t={t}"),
             }
@@ -636,11 +697,14 @@ mod tests {
         for step in 1..=10 {
             let t = step as f64 / 10.0;
             let frame = frame_with_blended_pattern(width, height, cx, cy, radius, t);
-            if tracker.step(&frame, pos) == StepOutcome::Miss {
+            if tracker.step(&frame, &Track::new(pos), 1.0) == StepOutcome::Miss {
                 missed = true;
             }
         }
-        assert!(missed, "veto never engaged despite appearance fully leaving the anchor");
+        assert!(
+            missed,
+            "veto never engaged despite appearance fully leaving the anchor"
+        );
     }
 
     #[test]
@@ -660,14 +724,19 @@ mod tests {
         // (pattern_b, t=1.0) — far below min_score against both anchor and
         // adaptive (which still equals the anchor at this point).
         let occluder = frame_with_blended_pattern(width, height, cx, cy, radius, 1.0);
-        assert_eq!(tracker.step(&occluder, pos), StepOutcome::Miss);
+        assert_eq!(
+            tracker.step(&occluder, &Track::new(pos), 1.0),
+            StepOutcome::Miss
+        );
 
         // The object reappears exactly as it was at the seed. If the miss
         // had corrupted the adaptive template (e.g. adopted the occluder),
         // this would no longer score a near-perfect match.
-        let outcome = tracker.step(&seed_frame, pos);
+        let outcome = tracker.step(&seed_frame, &Track::new(pos), 1.0);
         match outcome {
-            StepOutcome::Found { position, score, .. } => {
+            StepOutcome::Found {
+                position, score, ..
+            } => {
                 assert_eq!(position, pos);
                 assert!(
                     score > 0.99,
@@ -695,7 +764,7 @@ mod tests {
         // but below update_threshold (0.7), a marginal match that should be
         // accepted as Found without refreshing the adaptive template.
         let marginal = frame_with_blended_pattern(width, height, cx, cy, radius, 0.55);
-        let first = tracker.step(&marginal, pos);
+        let first = tracker.step(&marginal, &Track::new(pos), 1.0);
         let first_score = match first {
             StepOutcome::Found { score, .. } => {
                 assert!(score >= config.min_score() && score < config.update_threshold());
@@ -708,7 +777,7 @@ mod tests {
         // adaptive template had been replaced by that marginal patch, this
         // would now self-match at ~1.0. Since neither anchor nor adaptive
         // changed, the score should reproduce the same marginal value.
-        let second = tracker.step(&marginal, pos);
+        let second = tracker.step(&marginal, &Track::new(pos), 1.0);
         match second {
             StepOutcome::Found { score, .. } => {
                 assert!(
@@ -752,7 +821,7 @@ mod tests {
             .build();
         let mut tracker = TemplateTracker::new(&frame, seed, config).unwrap();
 
-        let outcome = tracker.step(&frame, seed);
+        let outcome = tracker.step(&frame, &Track::new(seed), 1.0);
         match outcome {
             StepOutcome::Found { position, .. } => {
                 // Must find the nearby square, not jump to the far one.
@@ -785,9 +854,11 @@ mod tests {
             .build();
         let mut tracker = TemplateTracker::new(&seed_frame, seed, config).unwrap();
 
-        let outcome = tracker.step(&seed_frame, seed);
+        let outcome = tracker.step(&seed_frame, &Track::new(seed), 1.0);
         match outcome {
-            StepOutcome::Found { position, score, .. } => {
+            StepOutcome::Found {
+                position, score, ..
+            } => {
                 assert_eq!(position, seed);
                 assert!(
                     score > 0.99,
@@ -862,8 +933,10 @@ mod tests {
             let mut score_sum = 0.0;
             for (i, &(sx, sy)) in positions.iter().enumerate() {
                 let frame = noisy_frame_with_square(width, height, sx, sy, size, i as u32 + 1);
-                match tracker.step(&frame, last_pos) {
-                    StepOutcome::Found { position, score, .. } => {
+                match tracker.step(&frame, &Track::new(last_pos), 1.0) {
+                    StepOutcome::Found {
+                        position, score, ..
+                    } => {
                         found_count += 1;
                         score_sum += score;
                         last_pos = position;
@@ -885,5 +958,106 @@ mod tests {
              this noisy moving-square sequence: filtered={filtered_score_sum}, \
              unfiltered={unfiltered_score_sum}"
         );
+    }
+
+    // --- 17.2: Track state + constant-velocity motion model ---
+
+    /// Audit F2, the core silent-drift case: a `Found` that jumps far in a
+    /// single frame is rejected by the tracker itself — no open gap
+    /// required. Object teleports from (12,12) to (34,12): well within the
+    /// generous search window (so it's still the best-scoring candidate),
+    /// but far outside the tight acceleration-derived gate for a
+    /// stationary track (zero velocity) over this `dt`.
+    #[test]
+    fn step_rejects_observation_beyond_gate_radius_even_without_a_gap() {
+        let width = 60;
+        let height = 30;
+        let size = 6;
+        let ref_frame = frame_with_square(width, height, 9, 9, size);
+        let seed = Point::new(12.0, 12.0);
+        let config = TemplateTrackerConfig::builder()
+            .patch_radius(3)
+            .search_radius(25) // wide enough that the teleport is still in-window
+            .min_score(0.5)
+            .max_acceleration(10.0) // tiny: gate radius ~= 0 at dt=1.0
+            .build();
+        let mut tracker = TemplateTracker::new(&ref_frame, seed, config).unwrap();
+
+        // The object appears far away next frame — no plausible barbell
+        // acceleration explains this, given the track was stationary.
+        let teleported = frame_with_square(width, height, 31, 9, size);
+        let track = Track::new(seed); // zero velocity: prediction stays at seed
+        let outcome = tracker.step(&teleported, &track, 1.0);
+        assert_eq!(
+            outcome,
+            StepOutcome::Miss,
+            "a same-frame teleport must be gated out even with no open gap (audit F2)"
+        );
+    }
+
+    /// A candidate within the gate is still accepted normally — the gate
+    /// must not reject legitimate small motion.
+    #[test]
+    fn step_accepts_observation_within_gate_radius() {
+        let width = 40;
+        let height = 30;
+        let size = 6;
+        let ref_frame = frame_with_square(width, height, 9, 9, size);
+        let seed = Point::new(12.0, 12.0);
+        let config = TemplateTrackerConfig::builder()
+            .patch_radius(3)
+            .search_radius(10)
+            .min_score(0.5)
+            .max_acceleration(10_000.0) // generous: small shift stays within gate
+            .build();
+        let mut tracker = TemplateTracker::new(&ref_frame, seed, config).unwrap();
+
+        let moved = frame_with_square(width, height, 12, 9, size); // shift by 3px
+        let track = Track::new(seed);
+        match tracker.step(&moved, &track, 1.0) {
+            StepOutcome::Found { position, .. } => {
+                assert_eq!(position, Point::new(15.0, 12.0));
+            }
+            StepOutcome::Miss => panic!("small, plausible motion must not be gated out"),
+        }
+    }
+
+    /// The search window is centred on the *predicted* position
+    /// (`track.predicted(dt)`), not the last raw observation: an object
+    /// moving steadily is found even when a last-pos-centred window (with
+    /// this small a radius) would miss it entirely.
+    #[test]
+    fn step_centers_search_on_predicted_position_not_last_observation() {
+        let width = 60;
+        let height = 30;
+        let size = 6;
+        let ref_frame = frame_with_square(width, height, 9, 9, size);
+        let last_pos = Point::new(12.0, 12.0);
+        let config = TemplateTrackerConfig::builder()
+            .patch_radius(3)
+            .search_radius(4) // too small to reach the new position from last_pos
+            .min_score(0.5)
+            .max_acceleration(10_000.0)
+            .build();
+        let mut tracker = TemplateTracker::new(&ref_frame, last_pos, config).unwrap();
+
+        // Object has been moving at (10, 0) px/s; over dt=1.0s it lands at
+        // (22, 12) — 10px from last_pos, outside a last-pos-centred radius-4
+        // window, but exactly where the constant-velocity prediction says
+        // to look.
+        let track = Track {
+            position: last_pos,
+            velocity: Point::new(10.0, 0.0),
+            uncertainty: 0.0,
+        };
+        let next_frame = frame_with_square(width, height, 19, 9, size);
+        match tracker.step(&next_frame, &track, 1.0) {
+            StepOutcome::Found { position, .. } => {
+                assert_eq!(position, Point::new(22.0, 12.0));
+            }
+            StepOutcome::Miss => {
+                panic!("a last-pos-centred window would miss this; prediction-centred must not")
+            }
+        }
     }
 }

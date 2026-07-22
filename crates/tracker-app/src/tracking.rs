@@ -17,8 +17,8 @@ use std::thread;
 use tracker_core::{
     BarPath, Calibration, ColorModel, ColorModelConfig, ColorTracker, ColorTrackerConfig, Frame,
     FrameSource, Point, PreprocessorChain, RepSegmentationConfig, SessionState,
-    Source as SampleSource, StepOutcome, TemplateTracker, TemplateTrackerConfig, Timebase, Tracker,
-    TrackerKind, TrackerSuggestionConfig, TrackingSession, TrackingSessionConfig,
+    Source as SampleSource, StepOutcome, TemplateTracker, TemplateTrackerConfig, Timebase, Track,
+    Tracker, TrackerKind, TrackerSuggestionConfig, TrackingSession, TrackingSessionConfig,
 };
 
 use crate::ffmpeg_source::FfmpegFrameSource;
@@ -86,10 +86,10 @@ pub enum AnyTracker {
 }
 
 impl Tracker for AnyTracker {
-    fn step(&mut self, frame: &Frame, last_pos: Point) -> StepOutcome {
+    fn step(&mut self, frame: &Frame, track: &Track, dt: f64) -> StepOutcome {
         match self {
-            AnyTracker::Template(t) => t.step(frame, last_pos),
-            AnyTracker::Color(t) => t.step(frame, last_pos),
+            AnyTracker::Template(t) => t.step(frame, track, dt),
+            AnyTracker::Color(t) => t.step(frame, track, dt),
         }
     }
 }
@@ -679,10 +679,21 @@ fn run_tracking_worker(
         state: SessionState::Tracking,
     });
 
+    // dt (17.2): seconds between consecutive frames, fed to every
+    // `TrackingSession::step` so the tracker's motion model can predict and
+    // gate correctly. Falls back to a plausible 30fps if the reported fps
+    // is degenerate (zero numerator/denominator) — the final `Timebase`
+    // construction below still fails the run outright for that case; this
+    // fallback only avoids blocking per-step motion reasoning on it.
+    let dt = Timebase::new(fps_num, fps_den)
+        .map(|tb| 1.0 / tb.fps())
+        .unwrap_or(1.0 / 30.0);
+
     if let Err(e) = run_tracking_loop(
         &mut source,
         &mut session,
         seed_frame_index,
+        dt,
         tx,
         reseed_rx,
         control_rx,
@@ -756,6 +767,7 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
     source: &mut S,
     session: &mut TrackingSession<T>,
     seed_frame_index: u64,
+    dt: f64,
     tx: &Sender<TrackingMessage>,
     reseed_rx: &Receiver<ReseedCommand>,
     control_rx: &Receiver<ControlCommand>,
@@ -796,7 +808,7 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
         }
         match source.next_frame()? {
             Some(frame) => {
-                session.step(&frame);
+                session.step(&frame, dt);
                 if let Some(last) = session.samples().last() {
                     // Report progress at the session's *current* frame
                     // (`frame_index()`, which advances on every step,
@@ -956,7 +968,7 @@ mod tests {
     }
 
     impl Tracker for ScriptedTracker {
-        fn step(&mut self, _frame: &Frame, _last_pos: Point) -> StepOutcome {
+        fn step(&mut self, _frame: &Frame, _track: &Track, _dt: f64) -> StepOutcome {
             let frame = self.frames_seen;
             self.frames_seen += 1;
             match self.miss_range {
@@ -1383,6 +1395,7 @@ mod tests {
             &mut source,
             &mut session,
             seed_frame_index,
+            1.0,
             &tx,
             &reseed_rx,
             &control_rx,
@@ -1455,6 +1468,7 @@ mod tests {
             &mut source,
             &mut session,
             seed_frame_index,
+            1.0,
             &tx,
             &reseed_rx,
             &control_rx,
@@ -1527,6 +1541,7 @@ mod tests {
             &mut source,
             &mut session,
             seed_frame_index,
+            1.0,
             &tx,
             &reseed_rx,
             &control_rx,
@@ -1583,6 +1598,7 @@ mod tests {
             &mut source,
             &mut session,
             seed_frame_index,
+            1.0,
             &tx,
             &reseed_rx,
             &control_rx,
@@ -1636,6 +1652,7 @@ mod tests {
             &mut source,
             &mut session,
             seed_frame_index,
+            1.0,
             &tx,
             &reseed_rx,
             &control_rx,
@@ -1692,6 +1709,7 @@ mod tests {
             &mut source,
             &mut session,
             seed_frame_index,
+            1.0,
             &tx,
             &reseed_rx,
             &control_rx,
@@ -1755,6 +1773,7 @@ mod tests {
             &mut source,
             &mut session,
             seed_frame_index,
+            1.0,
             &tx,
             &reseed_rx,
             &control_rx,

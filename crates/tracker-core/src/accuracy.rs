@@ -131,11 +131,7 @@ impl AccuracyReport {
 /// `within_tolerance`; callers should derive it from the plate diameter
 /// (e.g. 0.1 plate-diameters) rather than hardcoding pixels, so the
 /// threshold means the same thing across videos.
-pub fn grade(
-    samples: &[Sample],
-    labels: &[GroundTruthLabel],
-    tolerance_px: f64,
-) -> AccuracyReport {
+pub fn grade(samples: &[Sample], labels: &[GroundTruthLabel], tolerance_px: f64) -> AccuracyReport {
     grade_with_confidence(samples, labels, tolerance_px, DEFAULT_TRUSTED_CONFIDENCE)
 }
 

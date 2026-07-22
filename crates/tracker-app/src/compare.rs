@@ -31,7 +31,7 @@ use std::thread;
 
 use tracker_core::{
     BarPath, ColorModel, ColorModelConfig, ColorTracker, FrameSource, Point, Preprocessor,
-    PreprocessorChain, Sample, Source, StepOutcome, TemplateTracker, Timebase, Tracker,
+    PreprocessorChain, Sample, Source, StepOutcome, TemplateTracker, Timebase, Track, Tracker,
     TrackerKind, TrackerSuggestionConfig,
 };
 
@@ -331,6 +331,7 @@ pub fn run_strategy(
     seed_frame_index: u64,
     seed_position: Point,
     frames: u64,
+    dt: f64,
     strategy: Strategy,
     base_tuning: &TrackerTuning,
 ) -> Result<StrategyRun, CompareError> {
@@ -383,7 +384,12 @@ pub fn run_strategy(
     // `frames` may be u64::MAX for a `--full` run on a video whose frame
     // count ffprobe couldn't report; cap the pre-allocation, Vec grows fine.
     let mut outcomes = Vec::with_capacity(frames.min(DEFAULT_COMPARE_FRAMES * 40) as usize);
-    let mut last_pos = seed_position;
+    // 17.2: motion state fed to the tracker, advancing by prediction
+    // (`Track::coasted`) through a Miss rather than freezing, and re-derived
+    // from the observation (`Track::observed`) on a Found — mirrors
+    // `TrackingSession::step`'s handling, just without the gap/coast
+    // bookkeeping this standalone benchmark loop doesn't need.
+    let mut track = Track::new(seed_position);
     for _ in 0..frames {
         let frame = match source
             .next_frame()
@@ -392,12 +398,17 @@ pub fn run_strategy(
             Some(f) => f,
             None => break, // segment ran past end of video; report what we have
         };
-        match tracker.step(&frame, last_pos) {
-            StepOutcome::Found { position, score, .. } => {
+        match tracker.step(&frame, &track, dt) {
+            StepOutcome::Found {
+                position, score, ..
+            } => {
                 outcomes.push(FrameOutcome::Found { position, score });
-                last_pos = position;
+                track = track.observed(position, dt);
             }
-            StepOutcome::Miss => outcomes.push(FrameOutcome::Miss),
+            StepOutcome::Miss => {
+                outcomes.push(FrameOutcome::Miss);
+                track = track.coasted(dt, DEFAULT_COAST_UNCERTAINTY_GROWTH);
+            }
         }
     }
 
@@ -429,6 +440,7 @@ pub fn run_benchmark(
     seed_frame_index: u64,
     seed_position: Point,
     frames: u64,
+    dt: f64,
     coast_limit: u32,
     base_tuning: &TrackerTuning,
 ) -> Vec<BenchmarkRow> {
@@ -442,6 +454,7 @@ pub fn run_benchmark(
                 seed_frame_index,
                 seed_position,
                 frames,
+                dt,
                 strategy,
                 base_tuning,
             ) {
@@ -596,6 +609,7 @@ pub fn spawn_benchmark(
     seed_frame_index: u64,
     seed_position: Point,
     frames: u64,
+    dt: f64,
     coast_limit: u32,
     base_tuning: TrackerTuning,
 ) -> BenchmarkHandle {
@@ -617,6 +631,7 @@ pub fn spawn_benchmark(
                 seed_frame_index,
                 seed_position,
                 frames,
+                dt,
                 strategy,
                 &base_tuning,
             ) {
@@ -642,6 +657,18 @@ pub fn spawn_benchmark(
 /// Default segment length (in frames) sampled by `compare` when `--frames`
 /// isn't given -- the "~200-frame segment" PLAN 11.4 asks for.
 pub const DEFAULT_COMPARE_FRAMES: u64 = 200;
+
+/// Default `Track` uncertainty growth rate (px/s of coasting, 17.2) used by
+/// `run_strategy`'s standalone benchmark loop -- mirrors
+/// `TrackingSessionConfig`'s default (see `session.rs`).
+const DEFAULT_COAST_UNCERTAINTY_GROWTH: f64 = 20.0;
+
+/// Fallback dt (seconds/frame) used when a video's reported fps is
+/// degenerate (zero numerator/denominator) -- keeps the benchmark runnable
+/// rather than blocking all motion-model reasoning on ffprobe metadata that
+/// only overlay rendering strictly needs (see the `Timebase` handling
+/// below).
+const FALLBACK_DT: f64 = 1.0 / 30.0;
 
 /// Parsed `compare <video> --seed-frame N --seed X,Y [--frames N] [--full]
 /// [--out path] [--export-overlays] [--out-dir dir]` arguments.
@@ -781,6 +808,14 @@ pub fn run_compare(args: CompareArgs) -> Result<(), CompareError> {
         None
     };
 
+    // dt (17.2) for the tracker's motion model: derived from fps when
+    // available, falling back to `FALLBACK_DT` rather than blocking the
+    // whole benchmark on the same degenerate-fps case the timebase above
+    // already tolerates when overlays aren't requested.
+    let dt = Timebase::new(metadata.fps_num, metadata.fps_den)
+        .map(|tb| 1.0 / tb.fps())
+        .unwrap_or(FALLBACK_DT);
+
     tracing::info!(
         video = %args.video_path.display(),
         seed_frame = args.seed_frame,
@@ -806,6 +841,7 @@ pub fn run_compare(args: CompareArgs) -> Result<(), CompareError> {
             args.seed_frame,
             args.seed,
             frames,
+            dt,
             strategy,
             &base_tuning,
         );

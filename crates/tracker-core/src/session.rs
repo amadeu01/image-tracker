@@ -7,6 +7,7 @@
 //! re-places the Seed.
 
 use crate::geometry::{Frame, Point};
+use crate::motion::Track;
 use crate::tracker::{StepOutcome, Tracker};
 
 /// Configuration for a `TrackingSession`, built via
@@ -16,6 +17,7 @@ pub struct TrackingSessionConfig {
     coast_limit: u32,
     reacquire_min_score: Option<f64>,
     max_reacquire_distance: Option<f64>,
+    coast_uncertainty_growth: f64,
 }
 
 impl TrackingSessionConfig {
@@ -54,6 +56,16 @@ impl TrackingSessionConfig {
     pub fn max_reacquire_distance(&self) -> Option<f64> {
         self.max_reacquire_distance
     }
+
+    /// Growth rate (px of uncertainty per second of coasting, 17.2) applied
+    /// to the `Track`'s uncertainty on every missed frame — see
+    /// `motion::Track::coasted`. Widens the tracker's own gating radius
+    /// (`motion::gate_radius`) the longer the object has gone unseen, so a
+    /// reacquisition after a long coast isn't held to the same tight
+    /// per-frame acceleration bound as a normal step.
+    pub fn coast_uncertainty_growth(&self) -> f64 {
+        self.coast_uncertainty_growth
+    }
 }
 
 /// Builder for `TrackingSessionConfig`.
@@ -62,6 +74,7 @@ pub struct TrackingSessionConfigBuilder {
     coast_limit: Option<u32>,
     reacquire_min_score: Option<f64>,
     max_reacquire_distance: Option<f64>,
+    coast_uncertainty_growth: Option<f64>,
 }
 
 impl TrackingSessionConfigBuilder {
@@ -88,11 +101,20 @@ impl TrackingSessionConfigBuilder {
         self
     }
 
+    /// Sets the per-second uncertainty growth rate applied to the `Track`
+    /// while coasting through misses. Leave unset for the default (20.0
+    /// px/s).
+    pub fn coast_uncertainty_growth(mut self, growth: f64) -> Self {
+        self.coast_uncertainty_growth = Some(growth);
+        self
+    }
+
     pub fn build(self) -> TrackingSessionConfig {
         TrackingSessionConfig {
             coast_limit: self.coast_limit.unwrap_or(5),
             reacquire_min_score: self.reacquire_min_score,
             max_reacquire_distance: self.max_reacquire_distance,
+            coast_uncertainty_growth: self.coast_uncertainty_growth.unwrap_or(20.0),
         }
     }
 }
@@ -159,7 +181,17 @@ pub struct TrackingSession<T: Tracker> {
     tracker: T,
     config: TrackingSessionConfig,
     state: SessionState,
+    /// Position of the last confirmed `Found`/reseed observation — the
+    /// anchor `interpolate_gap` walks from, and what `max_reacquire_distance`
+    /// measures against. Distinct from `track.position`, which is the
+    /// tracker's motion state and keeps advancing (via prediction) through
+    /// a coasted Miss; `last_pos` only moves on a real observation.
     last_pos: Point,
+    /// Motion state (17.2, audit F1/F2) fed to `Tracker::step`: position,
+    /// velocity and uncertainty. Advances by prediction (`Track::coasted`)
+    /// through a Miss rather than freezing, and resets to a fresh
+    /// zero-velocity track on `reseed`.
+    track: Track,
     frame_index: u64,
     samples: Vec<Sample>,
     gaps: Vec<Gap>,
@@ -182,6 +214,7 @@ impl<T: Tracker> TrackingSession<T> {
             config,
             state: SessionState::Tracking,
             last_pos: seed,
+            track: Track::new(seed),
             frame_index: seed_frame_index,
             samples: vec![Sample {
                 frame_index: seed_frame_index,
@@ -226,15 +259,23 @@ impl<T: Tracker> TrackingSession<T> {
         &self.gaps
     }
 
+    /// The current motion state (17.2) fed to the tracker: position,
+    /// velocity and uncertainty. Exposed mainly for tests/diagnostics —
+    /// callers driving a session don't normally need it.
+    pub fn track(&self) -> Track {
+        self.track
+    }
+
     /// Feeds the next frame (assumed to be `frame_index + 1`) to the
-    /// tracker. No-op if the session is currently paused awaiting reseed.
-    pub fn step(&mut self, frame: &Frame) {
+    /// tracker, `dt` seconds after the previous one. No-op if the session
+    /// is currently paused awaiting reseed.
+    pub fn step(&mut self, frame: &Frame, dt: f64) {
         if self.state == SessionState::NeedsReseed {
             return;
         }
 
         let next_index = self.frame_index + 1;
-        let outcome = self.tracker.step(frame, self.last_pos);
+        let outcome = self.tracker.step(frame, &self.track, dt);
 
         // Reacquisition strictness (10.2): mid-gap, a `Found` only counts
         // as reacquiring the object if its score clears
@@ -289,6 +330,7 @@ impl<T: Tracker> TrackingSession<T> {
                     self.interpolate_gap(gap_start, next_index - 1, self.last_pos, position);
                 }
                 self.miss_count = 0;
+                self.track = self.track.observed(position, dt);
                 self.last_pos = position;
                 self.frame_index = next_index;
                 self.samples.push(Sample {
@@ -303,6 +345,10 @@ impl<T: Tracker> TrackingSession<T> {
                     self.open_gap_start = Some(next_index);
                 }
                 self.miss_count += 1;
+                // Coast: predict forward along the velocity estimate rather
+                // than freezing at the last position (audit F1), and widen
+                // the gate a little for however long we've been coasting.
+                self.track = self.track.coasted(dt, self.config.coast_uncertainty_growth);
                 self.frame_index = next_index;
 
                 if self.miss_count > self.config.coast_limit {
@@ -383,6 +429,9 @@ impl<T: Tracker> TrackingSession<T> {
 
         self.state = SessionState::Tracking;
         self.last_pos = point;
+        // A reseed is a fresh human/auto-placed point, with no velocity
+        // history to trust (17.2) — same reasoning as the initial seed.
+        self.track = Track::new(point);
         self.frame_index = effective_frame_index;
         self.open_gap_start = None;
         self.miss_count = 0;
@@ -449,7 +498,7 @@ mod tests {
     fn found_frame_is_recorded_as_tracked() {
         let mut session = make_session(3);
         let frame = frame_with_square(W, H, 10, 10, 4); // object stays put
-        session.step(&frame);
+        session.step(&frame, 1.0);
 
         assert_eq!(session.state(), SessionState::Tracking);
         assert_eq!(session.samples().len(), 2);
@@ -464,12 +513,12 @@ mod tests {
     fn short_gap_is_coasted_and_closed_with_interpolated_samples() {
         let mut session = make_session(3); // coast_limit 3 < hidden frames (2)
                                            // frames 1, 2: object hidden (blank)
-        session.step(&blank_frame(W, H));
-        session.step(&blank_frame(W, H));
+        session.step(&blank_frame(W, H), 1.0);
+        session.step(&blank_frame(W, H), 1.0);
         assert_eq!(session.state(), SessionState::Tracking);
 
         // frame 3: object reappears, moved to (18, 12)
-        session.step(&frame_with_square(W, H, 16, 10, 4));
+        session.step(&frame_with_square(W, H, 16, 10, 4), 1.0);
         assert_eq!(session.state(), SessionState::Tracking);
 
         assert_eq!(session.gaps(), &[Gap { start: 1, end: 2 }]);
@@ -494,15 +543,15 @@ mod tests {
     #[test]
     fn gap_exceeding_coast_limit_pauses_session() {
         let mut session = make_session(2); // limit 2: 3rd consecutive miss trips it
-        session.step(&blank_frame(W, H)); // frame 1: miss 1
+        session.step(&blank_frame(W, H), 1.0); // frame 1: miss 1
         assert_eq!(session.state(), SessionState::Tracking);
-        session.step(&blank_frame(W, H)); // frame 2: miss 2
+        session.step(&blank_frame(W, H), 1.0); // frame 2: miss 2
         assert_eq!(session.state(), SessionState::Tracking);
-        session.step(&blank_frame(W, H)); // frame 3: miss 3 > limit -> pause
+        session.step(&blank_frame(W, H), 1.0); // frame 3: miss 3 > limit -> pause
         assert_eq!(session.state(), SessionState::NeedsReseed);
 
         // Further steps are ignored while paused.
-        session.step(&frame_with_square(W, H, 10, 10, 4));
+        session.step(&frame_with_square(W, H, 10, 10, 4), 1.0);
         assert_eq!(session.state(), SessionState::NeedsReseed);
         assert_eq!(session.samples().len(), 1); // only the initial seed sample
 
@@ -512,8 +561,8 @@ mod tests {
     #[test]
     fn reseed_resumes_tracking_after_pause() {
         let mut session = make_session(1);
-        session.step(&blank_frame(W, H)); // frame 1: miss 1
-        session.step(&blank_frame(W, H)); // frame 2: miss 2 > limit(1) -> pause
+        session.step(&blank_frame(W, H), 1.0); // frame 1: miss 1
+        session.step(&blank_frame(W, H), 1.0); // frame 2: miss 2 > limit(1) -> pause
         assert_eq!(session.state(), SessionState::NeedsReseed);
         assert_eq!(session.gaps(), &[Gap { start: 1, end: 2 }]);
 
@@ -530,7 +579,7 @@ mod tests {
 
         // Tracking continues from the reseeded position.
         let frame = frame_with_square(W, H, 28, 18, 4);
-        session.step(&frame);
+        session.step(&frame, 1.0);
         assert_eq!(session.state(), SessionState::Tracking);
         assert_eq!(session.samples().last().unwrap().frame_index, 6);
         assert_eq!(session.samples().last().unwrap().source, Source::Tracked);
@@ -541,8 +590,8 @@ mod tests {
     #[test]
     fn reseeding_the_same_frame_twice_keeps_samples_strictly_increasing() {
         let mut session = make_session(1);
-        session.step(&blank_frame(W, H)); // frame 1: miss
-        session.step(&blank_frame(W, H)); // frame 2: miss > limit(1) -> pause
+        session.step(&blank_frame(W, H), 1.0); // frame 1: miss
+        session.step(&blank_frame(W, H), 1.0); // frame 2: miss > limit(1) -> pause
         assert_eq!(session.state(), SessionState::NeedsReseed);
 
         session.reseed(5, Point::new(30.0, 20.0));
@@ -597,10 +646,10 @@ mod tests {
         // it rather than the stale last sample (10.9).
         let mut session = make_session(5); // generous coast limit: stays Tracking
         assert_eq!(session.frame_index(), 0);
-        session.step(&blank_frame(W, H)); // frame 1: miss, no new sample
+        session.step(&blank_frame(W, H), 1.0); // frame 1: miss, no new sample
         assert_eq!(session.frame_index(), 1);
         assert_eq!(session.samples().last().unwrap().frame_index, 0);
-        session.step(&blank_frame(W, H)); // frame 2: miss, no new sample
+        session.step(&blank_frame(W, H), 1.0); // frame 2: miss, no new sample
         assert_eq!(session.frame_index(), 2);
         assert_eq!(session.samples().last().unwrap().frame_index, 0);
     }
@@ -613,8 +662,8 @@ mod tests {
         // still reflect the trailing gap up to the last processed frame if
         // the caller inspects it (no crash, no fabricated closure).
         let mut session = make_session(5);
-        session.step(&blank_frame(W, H)); // frame 1: miss
-        session.step(&blank_frame(W, H)); // frame 2: miss
+        session.step(&blank_frame(W, H), 1.0); // frame 1: miss
+        session.step(&blank_frame(W, H), 1.0); // frame 2: miss
         assert_eq!(session.state(), SessionState::Tracking);
         // No closed gap recorded yet: it's still open.
         assert!(session.gaps().is_empty());
@@ -643,7 +692,7 @@ mod tests {
     }
 
     impl Tracker for ScriptedTracker {
-        fn step(&mut self, _frame: &Frame, _last_pos: Point) -> StepOutcome {
+        fn step(&mut self, _frame: &Frame, _track: &Track, _dt: f64) -> StepOutcome {
             self.outcomes.next().unwrap_or(self.last)
         }
     }
@@ -659,6 +708,39 @@ mod tests {
             builder = builder.reacquire_min_score(score);
         }
         TrackingSession::new(tracker, 0, Point::new(5.0, 5.0), builder.build())
+    }
+
+    /// 17.2, audit F1: on a Miss, the session's `Track` coasts forward by
+    /// prediction (`position + velocity*dt`) rather than freezing at the
+    /// last observed position.
+    #[test]
+    fn coast_predicts_forward_through_a_miss_instead_of_freezing() {
+        let mut session = make_scripted_session(
+            5,
+            None,
+            vec![
+                StepOutcome::Found {
+                    position: Point::new(20.0, 10.0), // moved (15, 5) from seed (5, 5)
+                    score: 1.0,
+                    identity_confidence: 1.0,
+                },
+                StepOutcome::Miss,
+            ],
+        );
+        session.step(&blank_frame(W, H), 1.0); // frame 1: Found, establishes velocity (15, 5)/s
+        assert_eq!(session.track().position, Point::new(20.0, 10.0));
+        assert_eq!(session.track().velocity, Point::new(15.0, 5.0));
+
+        session.step(&blank_frame(W, H), 1.0); // frame 2: Miss, dt = 1.0s
+        assert_eq!(
+            session.track().position,
+            Point::new(35.0, 15.0),
+            "coast must predict forward along the velocity estimate, not freeze at (20, 10)"
+        );
+        assert!(
+            session.track().uncertainty > 0.0,
+            "uncertainty should grow while coasting"
+        );
     }
 
     #[test]
@@ -678,8 +760,8 @@ mod tests {
                 },
             ],
         );
-        session.step(&blank_frame(W, H)); // frame 1: miss
-        session.step(&blank_frame(W, H)); // frame 2: weak match, demoted to miss
+        session.step(&blank_frame(W, H), 1.0); // frame 1: miss
+        session.step(&blank_frame(W, H), 1.0); // frame 2: weak match, demoted to miss
         assert_eq!(session.state(), SessionState::Tracking);
         assert!(
             session.gaps().is_empty(),
@@ -707,8 +789,8 @@ mod tests {
                 },
             ],
         );
-        session.step(&blank_frame(W, H)); // frame 1: miss
-        session.step(&blank_frame(W, H)); // frame 2: strong match, reacquires
+        session.step(&blank_frame(W, H), 1.0); // frame 1: miss
+        session.step(&blank_frame(W, H), 1.0); // frame 2: strong match, reacquires
         assert_eq!(session.state(), SessionState::Tracking);
         assert_eq!(session.gaps(), &[Gap { start: 1, end: 1 }]);
         let last = session.samples().last().unwrap();
@@ -730,7 +812,7 @@ mod tests {
                 identity_confidence: 0.55,
             }],
         );
-        session.step(&blank_frame(W, H)); // frame 1: weak Found, but no gap open
+        session.step(&blank_frame(W, H), 1.0); // frame 1: weak Found, but no gap open
         assert_eq!(session.state(), SessionState::Tracking);
         assert!(session.gaps().is_empty());
         let last = session.samples().last().unwrap();
@@ -771,8 +853,8 @@ mod tests {
                 },
             ],
         );
-        session.step(&blank_frame(W, H)); // frame 1: miss
-        session.step(&blank_frame(W, H)); // frame 2: far match, demoted to miss
+        session.step(&blank_frame(W, H), 1.0); // frame 1: miss
+        session.step(&blank_frame(W, H), 1.0); // frame 2: far match, demoted to miss
         assert_eq!(session.state(), SessionState::Tracking);
         assert!(
             session.gaps().is_empty(),
@@ -798,8 +880,8 @@ mod tests {
                 },
             ],
         );
-        session.step(&blank_frame(W, H)); // frame 1: miss
-        session.step(&blank_frame(W, H)); // frame 2: close match, reacquires
+        session.step(&blank_frame(W, H), 1.0); // frame 1: miss
+        session.step(&blank_frame(W, H), 1.0); // frame 2: close match, reacquires
         assert_eq!(session.state(), SessionState::Tracking);
         assert_eq!(session.gaps(), &[Gap { start: 1, end: 1 }]);
         let last = session.samples().last().unwrap();
@@ -821,7 +903,7 @@ mod tests {
             .max_reacquire_distance(50.0)
             .build();
         let mut session = TrackingSession::new(tracker, 0, Point::new(5.0, 5.0), config);
-        session.step(&blank_frame(W, H));
+        session.step(&blank_frame(W, H), 1.0);
         assert_eq!(session.state(), SessionState::Tracking);
         let last = session.samples().last().unwrap();
         assert_eq!(last.position, Point::new(100.0, 100.0));
@@ -845,8 +927,8 @@ mod tests {
                 },
             ],
         );
-        session.step(&blank_frame(W, H));
-        session.step(&blank_frame(W, H));
+        session.step(&blank_frame(W, H), 1.0);
+        session.step(&blank_frame(W, H), 1.0);
         assert_eq!(session.state(), SessionState::Tracking);
         assert_eq!(session.gaps(), &[Gap { start: 1, end: 1 }]);
     }
@@ -868,8 +950,8 @@ mod tests {
                 },
             ],
         );
-        session.step(&blank_frame(W, H)); // frame 1: miss
-        session.step(&blank_frame(W, H)); // frame 2: marginal match, still reacquires
+        session.step(&blank_frame(W, H), 1.0); // frame 1: miss
+        session.step(&blank_frame(W, H), 1.0); // frame 2: marginal match, still reacquires
         assert_eq!(session.state(), SessionState::Tracking);
         assert_eq!(session.gaps(), &[Gap { start: 1, end: 1 }]);
         let last = session.samples().last().unwrap();
