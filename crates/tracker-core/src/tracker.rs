@@ -16,7 +16,7 @@ pub struct TemplateTrackerConfig {
     min_score: f64,
     update_threshold: f64,
     anchor_floor: f64,
-    max_acceleration: f64,
+    max_velocity: f64,
     preprocessor: PreprocessorChain,
 }
 
@@ -60,22 +60,24 @@ impl TemplateTrackerConfig {
         self.anchor_floor
     }
 
-    /// The physically-plausible acceleration bound (px/s², 17.2), used by
-    /// `motion::gate_radius` to reject observations that would require the
-    /// tracked object to have accelerated implausibly hard since the last
-    /// frame. Applies on *every* step, gap open or not (audit F2): the
-    /// mid-gap-only `max_reacquire_distance`/`reacquire_min_score` guards
-    /// in `session.rs` never see silent, gap-free drift, because a drifting
-    /// tracker never misses. This gate does, because it's evaluated inside
-    /// `step` itself rather than by the session's gap bookkeeping.
+    /// The physically-plausible velocity bound (px/s, 17.2) used by
+    /// `motion::gate_radius`: how far the object could travel in one frame
+    /// (`max_velocity * dt`). An observation farther than that from the last
+    /// position is rejected as the same object. Applies on *every* step, gap
+    /// open or not (audit F2): the mid-gap-only
+    /// `max_reacquire_distance`/`reacquire_min_score` guards in `session.rs`
+    /// never see silent, gap-free drift, because a drifting tracker never
+    /// misses. This gate is evaluated inside `step` itself.
     ///
-    /// The default is deliberately generous — it should not reject genuine
-    /// motion on ordinary footage, only implausible teleports — and is
-    /// tunable per the object actually being tracked (see PLAN.md 17.2:
-    /// constant-velocity predictor + gating radius, not a full Kalman
-    /// filter).
-    pub fn max_acceleration(&self) -> f64 {
-        self.max_acceleration
+    /// It is a *velocity* bound, not acceleration-from-rest: a fresh
+    /// seed/reseed has zero estimated velocity, and velocity is only learned
+    /// *after* an observation is accepted, so an accel-only gate off a
+    /// stationary prediction rejects the object's first real motion forever
+    /// (the frame-25 false-loss this replaces). Deliberately generous — it
+    /// rejects gross teleports onto clutter, not slow drift (that's the 17.3
+    /// anchor veto's job). Not a Kalman filter (PLAN.md 17.2).
+    pub fn max_velocity(&self) -> f64 {
+        self.max_velocity
     }
 
     /// The `Preprocessor` chain applied to the reference patch (at
@@ -94,7 +96,7 @@ pub struct TemplateTrackerConfigBuilder {
     min_score: f64,
     update_threshold: f64,
     anchor_floor: f64,
-    max_acceleration: f64,
+    max_velocity: f64,
     preprocessor: PreprocessorChain,
 }
 
@@ -106,14 +108,13 @@ impl Default for TemplateTrackerConfigBuilder {
             min_score: 0.5,
             update_threshold: 0.7,
             anchor_floor: 0.3,
-            // Generous starting point (17.2): at a typical 30fps dt this
-            // allows roughly a dozen extra pixels of deviation from the
-            // constant-velocity prediction per frame before rejecting a
-            // candidate outright, which should absorb ordinary barbell
-            // motion changes without absorbing a teleport onto adjacent
-            // clutter. Tune tighter per PLAN.md 17.2 once measured against
-            // real footage.
-            max_acceleration: 6000.0,
+            // Velocity reachability bound (px/s, 17.2): 3000 px/s admits
+            // ~50px of motion per frame at 60fps and ~100px at 30fps — well
+            // above real barbell motion (a fast descent is ~10-15px/frame at
+            // 60fps in this footage), so it never rejects genuine motion,
+            // only gross teleports onto adjacent clutter. Slow drift is the
+            // 17.3 anchor veto's job, not this gate's.
+            max_velocity: 3000.0,
             preprocessor: PreprocessorChain::new(),
         }
     }
@@ -150,10 +151,10 @@ impl TemplateTrackerConfigBuilder {
         self
     }
 
-    /// Sets the acceleration bound (px/s², 17.2) the gating radius is
-    /// derived from — see `TemplateTrackerConfig::max_acceleration`.
-    pub fn max_acceleration(mut self, max_acceleration: f64) -> Self {
-        self.max_acceleration = max_acceleration;
+    /// Sets the velocity bound (px/s, 17.2) the gating radius is derived
+    /// from — see `TemplateTrackerConfig::max_velocity`.
+    pub fn max_velocity(mut self, max_velocity: f64) -> Self {
+        self.max_velocity = max_velocity;
         self
     }
 
@@ -171,7 +172,7 @@ impl TemplateTrackerConfigBuilder {
             min_score: self.min_score,
             update_threshold: self.update_threshold,
             anchor_floor: self.anchor_floor,
-            max_acceleration: self.max_acceleration,
+            max_velocity: self.max_velocity,
             preprocessor: self.preprocessor,
         }
     }
@@ -353,8 +354,8 @@ impl TemplateTracker {
         match best {
             Some((position, score, anchor_score, candidate))
                 if score >= self.config.min_score
-                    && distance(position, predicted)
-                        <= gate_radius(track, self.config.max_acceleration, dt) =>
+                    && distance(position, track.position)
+                        <= gate_radius(track, self.config.max_velocity, dt) =>
             {
                 // Refresh the adaptive when the effective match is strong
                 // (>= update_threshold). The anchor veto above already
@@ -418,7 +419,7 @@ mod tests {
         assert_eq!(config.min_score(), 0.5);
         assert_eq!(config.update_threshold(), 0.7);
         assert_eq!(config.anchor_floor(), 0.3);
-        assert_eq!(config.max_acceleration(), 6000.0);
+        assert_eq!(config.max_velocity(), 3000.0);
     }
 
     /// Builds a frame whose left half is one gray value and right half
@@ -464,6 +465,37 @@ mod tests {
     /// 17.3: with a permissive (zero) floor the veto is disabled and the
     /// tracker behaves as before — guards against the floor silently
     /// breaking legitimate tracking.
+    /// Regression (frame-25 false loss): a bar already in motion at seed
+    /// time must be tracked from a *fresh* `Track` (zero estimated velocity)
+    /// at a real per-frame `dt`. The old accel-from-rest gate
+    /// (`0.5*a*dt²` off a stationary prediction) evaluated to ~0.8px at 60fps
+    /// and rejected the object's very first motion, so it never bootstrapped
+    /// velocity and reseeded every few frames. The velocity reachability gate
+    /// must admit it.
+    #[test]
+    fn fast_motion_from_a_fresh_seed_is_tracked_not_lost() {
+        let seed_frame = frame_with_square(60, 60, 18, 28, 5);
+        let config = TemplateTrackerConfig::builder()
+            .patch_radius(3)
+            .search_radius(15)
+            .min_score(0.3)
+            .build(); // default max_velocity 3000 px/s
+        let mut tracker =
+            TemplateTracker::new(&seed_frame, Point::new(20.0, 30.0), config).unwrap();
+        // Square jumps 8px right in one 60fps frame — ~480 px/s, well within
+        // a barbell's range but ~10x the *old* gate's 0.8px allowance.
+        let dt = 1.0 / 60.0;
+        let moved = frame_with_square(60, 60, 26, 28, 5);
+        match tracker.step(&moved, &Track::new(Point::new(20.0, 30.0)), dt) {
+            StepOutcome::Found { position, .. } => {
+                assert!((position.x - 28.0).abs() <= 1.0, "x was {}", position.x);
+            }
+            StepOutcome::Miss => {
+                panic!("fresh-seed fast motion must be Found, not a false loss")
+            }
+        }
+    }
+
     #[test]
     fn zero_anchor_floor_preserves_normal_tracking() {
         let seed_frame = frame_with_square(40, 40, 18, 18, 5);
@@ -979,7 +1011,7 @@ mod tests {
             .patch_radius(3)
             .search_radius(25) // wide enough that the teleport is still in-window
             .min_score(0.5)
-            .max_acceleration(10.0) // tiny: gate radius ~= 0 at dt=1.0
+            .max_velocity(10.0) // tiny: gate radius ~= 0 at dt=1.0
             .build();
         let mut tracker = TemplateTracker::new(&ref_frame, seed, config).unwrap();
 
@@ -1008,7 +1040,7 @@ mod tests {
             .patch_radius(3)
             .search_radius(10)
             .min_score(0.5)
-            .max_acceleration(10_000.0) // generous: small shift stays within gate
+            .max_velocity(10_000.0) // generous: small shift stays within gate
             .build();
         let mut tracker = TemplateTracker::new(&ref_frame, seed, config).unwrap();
 
@@ -1037,7 +1069,7 @@ mod tests {
             .patch_radius(3)
             .search_radius(4) // too small to reach the new position from last_pos
             .min_score(0.5)
-            .max_acceleration(10_000.0)
+            .max_velocity(10_000.0)
             .build();
         let mut tracker = TemplateTracker::new(&ref_frame, last_pos, config).unwrap();
 

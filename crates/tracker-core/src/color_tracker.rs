@@ -14,7 +14,7 @@ use crate::tracker::{StepOutcome, Tracker};
 pub struct ColorTrackerConfig {
     search_radius: u32,
     min_pixels: u32,
-    max_acceleration: f64,
+    max_velocity: f64,
     preprocessor: PreprocessorChain,
 }
 
@@ -36,11 +36,11 @@ impl ColorTrackerConfig {
         self.min_pixels
     }
 
-    /// The physically-plausible acceleration bound (px/s², 17.2) — see
-    /// `TemplateTrackerConfig::max_acceleration`. Applies the same
+    /// The velocity reachability bound (px/s, 17.2) — see
+    /// `TemplateTrackerConfig::max_velocity`. Applies the same
     /// prediction-centred-search + gate treatment to the color centroid.
-    pub fn max_acceleration(&self) -> f64 {
-        self.max_acceleration
+    pub fn max_velocity(&self) -> f64 {
+        self.max_velocity
     }
 
     /// The `Preprocessor` chain applied (per RGB channel plane) to the
@@ -56,7 +56,7 @@ impl ColorTrackerConfig {
 pub struct ColorTrackerConfigBuilder {
     search_radius: u32,
     min_pixels: u32,
-    max_acceleration: f64,
+    max_velocity: f64,
     preprocessor: PreprocessorChain,
 }
 
@@ -66,7 +66,7 @@ impl Default for ColorTrackerConfigBuilder {
             search_radius: 25,
             min_pixels: 5,
             // See `TemplateTrackerConfigBuilder::default` (17.2).
-            max_acceleration: 6000.0,
+            max_velocity: 3000.0,
             preprocessor: PreprocessorChain::new(),
         }
     }
@@ -85,10 +85,10 @@ impl ColorTrackerConfigBuilder {
         self
     }
 
-    /// Sets the acceleration bound (px/s², 17.2) — see
-    /// `TemplateTrackerConfigBuilder::max_acceleration`.
-    pub fn max_acceleration(mut self, max_acceleration: f64) -> Self {
-        self.max_acceleration = max_acceleration;
+    /// Sets the velocity bound (px/s, 17.2) — see
+    /// `TemplateTrackerConfigBuilder::max_velocity`.
+    pub fn max_velocity(mut self, max_velocity: f64) -> Self {
+        self.max_velocity = max_velocity;
         self
     }
 
@@ -103,7 +103,7 @@ impl ColorTrackerConfigBuilder {
         ColorTrackerConfig {
             search_radius: self.search_radius,
             min_pixels: self.min_pixels,
-            max_acceleration: self.max_acceleration,
+            max_velocity: self.max_velocity,
             preprocessor: self.preprocessor,
         }
     }
@@ -315,7 +315,7 @@ impl ColorTracker {
         // Same physically-plausible gate as `TemplateTracker` (17.2, audit
         // F2): a centroid too far from the constant-velocity prediction is
         // rejected regardless of how solidly it fills the window.
-        if distance(position, predicted) > gate_radius(track, self.config.max_acceleration, dt) {
+        if distance(position, track.position) > gate_radius(track, self.config.max_velocity, dt) {
             return StepOutcome::Miss;
         }
 

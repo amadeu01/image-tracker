@@ -95,25 +95,32 @@ pub(crate) fn distance(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
 }
 
-/// The physically-plausible gating radius around a constant-velocity
-/// prediction (audit F1/F2): how far an observation may land from
-/// `track.predicted(dt)` and still be accepted as the same object, given a
-/// bound on acceleration (`max_acceleration`, px/s²) a loaded barbell can
-/// plausibly undergo, plus the track's own accumulated uncertainty from
-/// coasting.
+/// The physically-plausible **reachability** radius (audit F1/F2): how far an
+/// observation may land from the last observed position (`track.position`)
+/// and still be accepted as the same object, given a bound on how fast a
+/// loaded barbell can travel (`max_velocity`, px/s), plus the track's own
+/// accumulated uncertainty from coasting.
 ///
-/// `0.5 * max_acceleration * dt²` is the maximum extra displacement
-/// `max_acceleration` sustained over `dt` seconds could add on top of the
-/// constant-velocity prediction (`s = 0.5*a*t²`). This is deliberately not
-/// a covariance-based gate (no Kalman filter, PLAN.md 17.2) — just a bound
-/// derived from the physics of the object being tracked.
+/// `max_velocity * dt` is the farthest the object could have moved in `dt`
+/// seconds. This is deliberately a *velocity* reachability bound, not an
+/// acceleration-from-rest bound: a fresh `Track` (seed/reseed) has zero
+/// estimated velocity, and velocity is only re-derived *after* an observation
+/// is accepted, so an acceleration-only gate (`0.5*a*dt²` off a stationary
+/// prediction) can never bootstrap — it rejects the object's very first real
+/// motion and never learns it was moving (the frame-25 false-loss regression
+/// this replaces). A reachability bound needs no prior velocity estimate.
+///
+/// It is not a covariance-based gate (no Kalman filter, PLAN.md 17.2). It is
+/// intentionally generous: its job is to reject *gross teleports* (a lock
+/// jumping onto rack hardware many px away), not slow appearance drift — that
+/// is the 17.3 anchor veto's job, which catches the 1-2px/frame drift this
+/// gate deliberately lets through.
 ///
 /// Unlike the mid-gap-only guards in `session.rs` (`max_reacquire_distance`,
 /// `reacquire_min_score`), this gate is evaluated by the tracker on *every*
-/// step, gap open or not — it is what makes silent, gap-free drift
-/// rejectable (audit F2).
-pub(crate) fn gate_radius(track: &Track, max_acceleration: f64, dt: f64) -> f64 {
-    0.5 * max_acceleration * dt * dt + track.uncertainty
+/// step, gap open or not (audit F2).
+pub(crate) fn gate_radius(track: &Track, max_velocity: f64, dt: f64) -> f64 {
+    max_velocity * dt + track.uncertainty
 }
 
 #[cfg(test)]
@@ -164,13 +171,25 @@ mod tests {
     }
 
     #[test]
-    fn gate_radius_grows_with_dt_squared_and_uncertainty() {
+    fn gate_radius_is_velocity_reach_plus_uncertainty() {
         let track = Track {
             position: Point::new(0.0, 0.0),
             velocity: Point::new(0.0, 0.0),
             uncertainty: 5.0,
         };
-        // 0.5 * 100 * (1.0)^2 + 5.0 = 55.0
-        assert_eq!(gate_radius(&track, 100.0, 1.0), 55.0);
+        // max_velocity * dt + uncertainty = 100 * 0.5 + 5.0 = 55.0
+        assert_eq!(gate_radius(&track, 100.0, 0.5), 55.0);
+    }
+
+    #[test]
+    fn gate_radius_bootstraps_from_a_fresh_zero_velocity_track() {
+        // Regression: a fresh seed has zero velocity, but the object may
+        // already be moving. The reachability gate must still admit real
+        // per-frame motion — an acceleration-from-rest gate would round to
+        // ~0 here and reject the first observation (frame-25 false loss).
+        let seed = Track::new(Point::new(100.0, 100.0));
+        let dt = 1.0 / 60.0;
+        // A generous barbell speed (3000 px/s) admits tens of px per frame.
+        assert!(gate_radius(&seed, 3000.0, dt) > 40.0);
     }
 }
