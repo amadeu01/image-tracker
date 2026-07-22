@@ -6,6 +6,7 @@
 pub mod accuracy;
 pub mod bar_path;
 pub mod calibration;
+pub mod circle_tracker;
 pub mod color;
 pub mod color_advisor;
 pub mod color_tracker;
@@ -29,6 +30,9 @@ pub mod video_sink;
 pub use accuracy::{grade, AccuracyReport, GroundTruthLabel, LabelStatus};
 pub use bar_path::{BarPath, PathPoint, Timebase, TimebaseError};
 pub use calibration::{Calibration, CalibrationError};
+pub use circle_tracker::{
+    CircleTracker, CircleTrackerConfig, CircleTrackerConfigBuilder, CircleTrackerError,
+};
 pub use color::{rgb_to_hsv, ColorModel, ColorModelConfig, ColorModelError};
 pub use color_advisor::{
     hue_histogram, recommend_marker_hues, HueHistogram, HueHistogramConfig, HueRecommendation,

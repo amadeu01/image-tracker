@@ -145,6 +145,7 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                         TrackerSelection::Auto => "Auto",
                         TrackerSelection::Template => "Template",
                         TrackerSelection::Color => "Color",
+                        TrackerSelection::Circle => "Circle",
                     };
                     egui::ComboBox::from_id_salt("tracker_selection_combo")
                         .selected_text(selected_text)
@@ -167,6 +168,16 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                                 "Color",
                             )
                             .on_hover_text(education::TIP_TRACKER_COLOR);
+                            ui.selectable_value(
+                                &mut state.settings.tracker_selection,
+                                TrackerSelection::Circle,
+                                "Circle",
+                            )
+                            .on_hover_text(
+                                "Fits the plate's rim as a circle (17.5): a geometric fit \
+                                 rather than appearance matching, for a smooth/specular plate \
+                                 that ZNCC/colour can't discriminate reliably. Not chosen by Auto.",
+                            );
                         })
                         .response
                         .on_hover_text(education::TIP_TRACKER_COMBO);

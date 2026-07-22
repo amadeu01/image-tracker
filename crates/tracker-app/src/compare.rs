@@ -30,9 +30,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use tracker_core::{
-    BarPath, ColorModel, ColorModelConfig, ColorTracker, FrameSource, Point, Preprocessor,
-    PreprocessorChain, Sample, Source, StepOutcome, TemplateTracker, Timebase, Track, Tracker,
-    TrackerKind, TrackerSuggestionConfig,
+    BarPath, CircleTracker, ColorModel, ColorModelConfig, ColorTracker, FrameSource, Point,
+    Preprocessor, PreprocessorChain, Sample, Source, StepOutcome, TemplateTracker, Timebase, Track,
+    Tracker, TrackerKind, TrackerSuggestionConfig,
 };
 
 use crate::ffmpeg_source::FfmpegFrameSource;
@@ -94,6 +94,7 @@ impl Strategy {
         let tracker = match self.tracker {
             TrackerSelection::Template => "template",
             TrackerSelection::Color => "color",
+            TrackerSelection::Circle => "circle",
             TrackerSelection::Auto => "auto", // never actually produced by strategy_matrix
         };
         format!("{}/{tracker}", self.filter.label())
@@ -113,6 +114,7 @@ impl Strategy {
         let tracker = match self.tracker {
             TrackerSelection::Template => "template",
             TrackerSelection::Color => "color",
+            TrackerSelection::Circle => "circle",
             TrackerSelection::Auto => "auto", // never produced by strategy_matrix
         };
         format!("{filter}-{tracker}")
@@ -164,11 +166,15 @@ pub fn outcomes_to_bar_path(
     BarPath::new(&samples, &[], timebase, seed_frame)
 }
 
-/// The fixed 3x2 strategy matrix (11.4): {none, gaussian:1.5, median:3} x
-/// {template, color}, in a stable order so table rows/JSON entries/the
+/// The fixed 3x2+1 strategy matrix (11.4, +17.5): {none, gaussian:1.5,
+/// median:3} x {template, color} (6 entries), plus a 7th entry for the
+/// plate-circle tracker (17.5, audit F6) — geometric circle fit rather than
+/// appearance matching, so it doesn't vary by filter the same way (edge
+/// detection has its own smoothing built in); `none` is the one filter
+/// entry it's benchmarked under. Stable order so table rows/JSON entries/the
 /// `recommend` tie-break are all reproducible run to run.
 pub fn strategy_matrix() -> Vec<Strategy> {
-    let mut out = Vec::with_capacity(6);
+    let mut out = Vec::with_capacity(7);
     for filter in FilterKind::ALL {
         out.push(Strategy {
             filter,
@@ -179,6 +185,10 @@ pub fn strategy_matrix() -> Vec<Strategy> {
             tracker: TrackerSelection::Color,
         });
     }
+    out.push(Strategy {
+        filter: FilterKind::None,
+        tracker: TrackerSelection::Circle,
+    });
     out
 }
 
@@ -378,6 +388,14 @@ pub fn run_strategy(
             .map_err(|e| format!("seed patch out of bounds for color model: {e:?}"))?;
             AnyTracker::Color(ColorTracker::new(model, color_tracker_config))
         }
+        TrackerSelection::Circle => AnyTracker::Circle(
+            CircleTracker::new(
+                &seed_frame,
+                seed_position,
+                tracking::default_circle_tracker_config(),
+            )
+            .map_err(|e| format!("no circle found at seed: {e:?}"))?,
+        ),
         TrackerSelection::Auto => unreachable!("strategy_matrix never produces Auto"),
     };
 
@@ -480,6 +498,7 @@ fn score_unit(tracker: TrackerSelection) -> &'static str {
     match tracker {
         TrackerSelection::Template => "correlation",
         TrackerSelection::Color => "fill-fraction",
+        TrackerSelection::Circle => "edge-support",
         TrackerSelection::Auto => "?",
     }
 }
@@ -962,9 +981,9 @@ mod tests {
     // --- strategy_matrix ---
 
     #[test]
-    fn strategy_matrix_has_six_entries_in_fixed_order() {
+    fn strategy_matrix_has_seven_entries_in_fixed_order() {
         let matrix = strategy_matrix();
-        assert_eq!(matrix.len(), 6);
+        assert_eq!(matrix.len(), 7);
         let expected = [
             (FilterKind::None, TrackerSelection::Template),
             (FilterKind::None, TrackerSelection::Color),
@@ -972,6 +991,7 @@ mod tests {
             (FilterKind::Gaussian1_5, TrackerSelection::Color),
             (FilterKind::Median3, TrackerSelection::Template),
             (FilterKind::Median3, TrackerSelection::Color),
+            (FilterKind::None, TrackerSelection::Circle),
         ];
         for (strategy, (filter, tracker)) in matrix.iter().zip(expected.iter()) {
             assert_eq!(strategy.filter, *filter);
@@ -1235,6 +1255,7 @@ mod tests {
             "gaussian1.5-color",
             "median3-template",
             "median3-color",
+            "none-circle",
         ];
         for (strategy, want) in strategy_matrix().iter().zip(expected.iter()) {
             assert_eq!(strategy.slug(), *want);

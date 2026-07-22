@@ -245,6 +245,7 @@ impl TrackingSettings {
             tracking::TrackerSelection::Auto => "auto",
             tracking::TrackerSelection::Template => "template",
             tracking::TrackerSelection::Color => "color",
+            tracking::TrackerSelection::Circle => "circle",
         };
         let mut parts = Vec::new();
         if self.gaussian_enabled {

@@ -37,8 +37,10 @@ pub struct TrackArgs {
     /// fields fall back to `tracking`'s defaults; an absent `--filter`
     /// leaves the chain empty (no filtering, unchanged from before 11.3).
     pub tuning: tracking::TrackerTuning,
-    /// `--tracker auto|template|color` (task 4.3): which tracker to run.
-    /// Defaults to `Auto` (suggest from the seed patch).
+    /// `--tracker auto|template|color|circle` (task 4.3, 17.5): which
+    /// tracker to run. Defaults to `Auto` (suggest from the seed patch);
+    /// `circle` (the plate-circle tracker, audit F6) is never chosen by
+    /// `Auto` and must be selected explicitly.
     pub tracker_selection: tracking::TrackerSelection,
     /// Optional calibration (task 5.4): `--cal x1,y1,x2,y2` (two points)
     /// plus `--cal-length-m <meters>`, the known real-world distance

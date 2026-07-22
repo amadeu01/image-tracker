@@ -15,10 +15,11 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use tracker_core::{
-    BarPath, Calibration, ColorModel, ColorModelConfig, ColorTracker, ColorTrackerConfig, Frame,
-    FrameSource, Point, PreprocessorChain, RepSegmentationConfig, SessionState,
-    Source as SampleSource, StepOutcome, TemplateTracker, TemplateTrackerConfig, Timebase, Track,
-    Tracker, TrackerKind, TrackerSuggestionConfig, TrackingSession, TrackingSessionConfig,
+    BarPath, Calibration, CircleTracker, CircleTrackerConfig, ColorModel, ColorModelConfig,
+    ColorTracker, ColorTrackerConfig, Frame, FrameSource, Point, PreprocessorChain,
+    RepSegmentationConfig, SessionState, Source as SampleSource, StepOutcome, TemplateTracker,
+    TemplateTrackerConfig, Timebase, Track, Tracker, TrackerKind, TrackerSuggestionConfig,
+    TrackingSession, TrackingSessionConfig,
 };
 
 use crate::ffmpeg_source::FfmpegFrameSource;
@@ -60,6 +61,12 @@ pub enum TrackerSelection {
     Auto,
     Template,
     Color,
+    /// The plate-circle tracker (17.5, audit F6): geometric circle fit
+    /// rather than appearance matching. Not reachable via `Auto` yet
+    /// (`suggest_tracker`'s heuristic doesn't know how to recognize "a
+    /// circular edge is present" — deferred, see PLAN 17.5) — must be
+    /// selected explicitly with `--tracker circle`.
+    Circle,
 }
 
 impl std::str::FromStr for TrackerSelection {
@@ -70,19 +77,22 @@ impl std::str::FromStr for TrackerSelection {
             "auto" => Ok(TrackerSelection::Auto),
             "template" => Ok(TrackerSelection::Template),
             "color" => Ok(TrackerSelection::Color),
+            "circle" => Ok(TrackerSelection::Circle),
             other => Err(format!(
-                "bad --tracker (expected auto|template|color): {other}"
+                "bad --tracker (expected auto|template|color|circle): {other}"
             )),
         }
     }
 }
 
-/// Either tracker (4.2/4.3), so a `TrackingSession` can drive whichever one
-/// was resolved for a run without the session itself needing to know which.
+/// Either tracker (4.2/4.3/17.5), so a `TrackingSession` can drive whichever
+/// one was resolved for a run without the session itself needing to know
+/// which.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnyTracker {
     Template(TemplateTracker),
     Color(ColorTracker),
+    Circle(CircleTracker),
 }
 
 impl Tracker for AnyTracker {
@@ -90,6 +100,7 @@ impl Tracker for AnyTracker {
         match self {
             AnyTracker::Template(t) => t.step(frame, track, dt),
             AnyTracker::Color(t) => t.step(frame, track, dt),
+            AnyTracker::Circle(t) => t.step(frame, track, dt),
         }
     }
 }
@@ -154,6 +165,13 @@ pub fn color_tracker_config(tuning: TrackerTuning) -> ColorTrackerConfig {
     ColorTrackerConfig::builder()
         .preprocessor(tuning.preprocessor)
         .build()
+}
+
+/// Builds a `CircleTrackerConfig` (17.5) using its own module defaults — the
+/// circle path has no CLI tuning flags of its own yet, since it doesn't
+/// share a config shape with the appearance-based trackers.
+pub fn default_circle_tracker_config() -> CircleTrackerConfig {
+    CircleTrackerConfig::builder().build()
 }
 
 /// Builds a `TemplateTrackerConfig`, using `tuning`'s overrides where set and
@@ -621,9 +639,42 @@ fn run_tracking_worker(
         }
     };
 
+    // The circle tracker (17.5) is never chosen by `Auto`
+    // (`suggest_tracker`'s heuristic has no circular-edge detector yet, see
+    // `TrackerSelection::Circle`'s doc comment) — built directly here,
+    // bypassing the `TrackerKind` resolution the other two trackers share,
+    // but still feeding into the same session/loop/export path below.
+    if tracker_selection == TrackerSelection::Circle {
+        tracing::info!(kind = "circle", auto = false, "tracker kind resolved");
+        let tracker =
+            match CircleTracker::new(&seed_frame, seed_position, default_circle_tracker_config()) {
+                Ok(t) => AnyTracker::Circle(t),
+                Err(e) => {
+                    tracing::error!(error = ?e, "no circle found at seed");
+                    let _ = tx.send(TrackingMessage::Error(format!(
+                        "no circle found at seed: {e:?}"
+                    )));
+                    return;
+                }
+            };
+        return finish_tracking_run(
+            tracker,
+            source,
+            seed_frame_index,
+            seed_position,
+            fps_num,
+            fps_den,
+            session_config,
+            tx,
+            reseed_rx,
+            control_rx,
+        );
+    }
+
     let resolved_kind = match tracker_selection {
         TrackerSelection::Template => TrackerKind::Template,
         TrackerSelection::Color => TrackerKind::Color,
+        TrackerSelection::Circle => unreachable!("handled above"),
         TrackerSelection::Auto => tracker_core::suggest_tracker(
             &seed_frame,
             seed_position,
@@ -668,6 +719,38 @@ fn run_tracking_worker(
         }
     };
 
+    finish_tracking_run(
+        tracker,
+        source,
+        seed_frame_index,
+        seed_position,
+        fps_num,
+        fps_den,
+        session_config,
+        tx,
+        reseed_rx,
+        control_rx,
+    );
+}
+
+/// Shared tail of `run_tracking_worker`, once a concrete `AnyTracker` has
+/// been resolved and constructed (Template/Color via `TrackerKind`, or
+/// Circle directly, 17.5): builds the `TrackingSession`, drives
+/// `run_tracking_loop` to completion, reaps the ffmpeg child on a clean EOF,
+/// and sends the final `BarPath` as `Done`.
+#[allow(clippy::too_many_arguments)]
+fn finish_tracking_run(
+    tracker: AnyTracker,
+    mut source: FfmpegFrameSource<std::process::ChildStdout>,
+    seed_frame_index: u64,
+    seed_position: Point,
+    fps_num: u64,
+    fps_den: u64,
+    session_config: TrackingSessionConfig,
+    tx: &Sender<TrackingMessage>,
+    reseed_rx: &Receiver<ReseedCommand>,
+    control_rx: &Receiver<ControlCommand>,
+) {
     // Session frame indices are relative to the seed (0 == the seed
     // frame); `seed_frame_index` is added back in when reporting progress
     // and when building the final `BarPath`'s `start_frame`.
