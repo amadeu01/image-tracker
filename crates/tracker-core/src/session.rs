@@ -18,6 +18,7 @@ pub struct TrackingSessionConfig {
     reacquire_min_score: Option<f64>,
     max_reacquire_distance: Option<f64>,
     coast_uncertainty_growth: f64,
+    sustained_suspect_limit: u32,
 }
 
 impl TrackingSessionConfig {
@@ -66,6 +67,29 @@ impl TrackingSessionConfig {
     pub fn coast_uncertainty_growth(&self) -> f64 {
         self.coast_uncertainty_growth
     }
+
+    /// Number of *consecutive* `Found` frames whose identity confidence is
+    /// below `accuracy::DEFAULT_TRUSTED_CONFIDENCE` (17.4's honest-doubt
+    /// threshold — reused here rather than adding a second tunable
+    /// confidence cutoff for the same concept) before the session gives up
+    /// and transitions to the terminal `SessionState::Lost` (17.4b).
+    ///
+    /// This is deliberately a *new* knob, not a retune of `coast_limit`/
+    /// `reacquire_min_score`/etc: those all react to *misses* (the tracker
+    /// admitting it can't find the object), whereas this reacts to
+    /// *sustained low-confidence hits* (the tracker claiming success while
+    /// its own anchor score says the claim is doubtful) — the audit's F5
+    /// "tracked, but wrong" case, which the existing six knobs have no way
+    /// to express at all.
+    ///
+    /// Default 10: long enough that a single noisy anchor score (motion
+    /// blur, brief partial occlusion) doesn't trip it, short enough that a
+    /// real drift-onto-background lock (which holds low identity
+    /// confidence indefinitely once it happens) is caught well before it
+    /// silently reseeds itself into a new stale position at coast_limit.
+    pub fn sustained_suspect_limit(&self) -> u32 {
+        self.sustained_suspect_limit
+    }
 }
 
 /// Builder for `TrackingSessionConfig`.
@@ -75,6 +99,7 @@ pub struct TrackingSessionConfigBuilder {
     reacquire_min_score: Option<f64>,
     max_reacquire_distance: Option<f64>,
     coast_uncertainty_growth: Option<f64>,
+    sustained_suspect_limit: Option<u32>,
 }
 
 impl TrackingSessionConfigBuilder {
@@ -109,12 +134,21 @@ impl TrackingSessionConfigBuilder {
         self
     }
 
+    /// Sets the number of consecutive low-identity-confidence `Found`
+    /// frames before the session transitions to the terminal
+    /// `SessionState::Lost` (17.4b). Leave unset for the default (10).
+    pub fn sustained_suspect_limit(mut self, limit: u32) -> Self {
+        self.sustained_suspect_limit = Some(limit);
+        self
+    }
+
     pub fn build(self) -> TrackingSessionConfig {
         TrackingSessionConfig {
             coast_limit: self.coast_limit.unwrap_or(5),
             reacquire_min_score: self.reacquire_min_score,
             max_reacquire_distance: self.max_reacquire_distance,
             coast_uncertainty_growth: self.coast_uncertainty_growth.unwrap_or(20.0),
+            sustained_suspect_limit: self.sustained_suspect_limit.unwrap_or(10),
         }
     }
 }
@@ -163,11 +197,27 @@ fn distance(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
 }
 
-/// Whether the session is actively tracking or paused awaiting a reseed.
+/// Whether the session is actively tracking, paused awaiting a reseed, or
+/// has given up.
+///
+/// `NeedsReseed` and `Lost` are both "stopped consuming frames" states, but
+/// they mean different things (audit F5/F4, docs/design/tracking-audit-2026-07-21.md):
+/// `NeedsReseed` is a *transient* pause — a run of misses, almost certainly
+/// a real occlusion — that a fresh seed at roughly the same place recovers
+/// from. `Lost` is *terminal*: the tracker kept reporting `Found` (never
+/// missed, never paused) but its own identity confidence (the anchor score
+/// — see `Sample::confidence`) stayed low for `sustained_suspect_limit`
+/// consecutive frames in a row, i.e. it has probably locked onto the wrong
+/// thing and drifting-and-recovering isn't the fix; a fresh seed is
+/// required to trust it again, and headless callers must not manufacture
+/// one from the same (untrustworthy) stale position (17.4b — see
+/// `crates/tracker-app/src/cli.rs`'s headless auto-resume, which stops on
+/// `Lost` rather than reseeding through it as it does for `NeedsReseed`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
     Tracking,
     NeedsReseed,
+    Lost,
 }
 
 /// Coordinates a `TemplateTracker` across a sequence of frames, applying
@@ -198,6 +248,13 @@ pub struct TrackingSession<T: Tracker> {
     /// Frame index the current open gap started at, if any.
     open_gap_start: Option<u64>,
     miss_count: u32,
+    /// Consecutive `Found` frames in a row whose identity confidence was
+    /// below `accuracy::DEFAULT_TRUSTED_CONFIDENCE` (17.4b). Reset by any
+    /// `Found` at/above the threshold or by a `Miss` (a miss is a
+    /// different failure mode, already handled by `miss_count`/
+    /// `NeedsReseed`). Trips `SessionState::Lost` at
+    /// `config.sustained_suspect_limit`.
+    suspect_streak: u32,
 }
 
 impl<T: Tracker> TrackingSession<T> {
@@ -228,6 +285,7 @@ impl<T: Tracker> TrackingSession<T> {
             gaps: Vec::new(),
             open_gap_start: None,
             miss_count: 0,
+            suspect_streak: 0,
         }
     }
 
@@ -270,7 +328,7 @@ impl<T: Tracker> TrackingSession<T> {
     /// tracker, `dt` seconds after the previous one. No-op if the session
     /// is currently paused awaiting reseed.
     pub fn step(&mut self, frame: &Frame, dt: f64) {
-        if self.state == SessionState::NeedsReseed {
+        if self.state == SessionState::NeedsReseed || self.state == SessionState::Lost {
             return;
         }
 
@@ -339,12 +397,29 @@ impl<T: Tracker> TrackingSession<T> {
                     source: Source::Tracked,
                     confidence: Some(identity_confidence),
                 });
+
+                // 17.4b: a `Found` that keeps claiming success while its
+                // own anchor score stays below the honest-doubt threshold
+                // (17.4's `DEFAULT_TRUSTED_CONFIDENCE`) for
+                // `sustained_suspect_limit` frames in a row is a "tracked,
+                // but wrong" run (audit F5), not a transient blip — give up
+                // rather than let it keep exporting confident-looking
+                // samples off the seeded object.
+                if identity_confidence < crate::accuracy::DEFAULT_TRUSTED_CONFIDENCE {
+                    self.suspect_streak += 1;
+                    if self.suspect_streak >= self.config.sustained_suspect_limit {
+                        self.state = SessionState::Lost;
+                    }
+                } else {
+                    self.suspect_streak = 0;
+                }
             }
             StepOutcome::Miss => {
                 if self.open_gap_start.is_none() {
                     self.open_gap_start = Some(next_index);
                 }
                 self.miss_count += 1;
+                self.suspect_streak = 0;
                 // Coast: predict forward along the velocity estimate rather
                 // than freezing at the last position (audit F1), and widen
                 // the gate a little for however long we've been coasting.
@@ -420,7 +495,10 @@ impl<T: Tracker> TrackingSession<T> {
 
         // Replace the trailing (unresolved) gap recorded when we paused,
         // if any, with one closed right before the (effective) reseed
-        // frame.
+        // frame. `Lost` (17.4b) has no gap to close (it was reached via
+        // `Found`s, not misses), but a manual reseed out of it is still
+        // allowed — e.g. a GUI user re-placing the seed after the run
+        // stopped itself — same as `NeedsReseed`.
         if self.state == SessionState::NeedsReseed {
             if let Some(last) = self.gaps.last_mut() {
                 last.end = effective_frame_index.saturating_sub(1);
@@ -435,6 +513,7 @@ impl<T: Tracker> TrackingSession<T> {
         self.frame_index = effective_frame_index;
         self.open_gap_start = None;
         self.miss_count = 0;
+        self.suspect_streak = 0;
         if replacing {
             self.samples.pop();
         }
@@ -957,5 +1036,117 @@ mod tests {
         let last = session.samples().last().unwrap();
         assert_eq!(last.position, Point::new(20.0, 20.0));
         assert_eq!(last.source, Source::Tracked);
+    }
+
+    // -- 17.4b: terminal Lost state ------------------------------------
+
+    fn make_scripted_session_with_suspect_limit(
+        sustained_suspect_limit: u32,
+        outcomes: Vec<StepOutcome>,
+    ) -> TrackingSession<ScriptedTracker> {
+        let tracker = ScriptedTracker::new(outcomes);
+        let config = TrackingSessionConfig::builder()
+            .sustained_suspect_limit(sustained_suspect_limit)
+            .build();
+        TrackingSession::new(tracker, 0, Point::new(5.0, 5.0), config)
+    }
+
+    fn low_confidence_found(x: f64, y: f64) -> StepOutcome {
+        StepOutcome::Found {
+            position: Point::new(x, y),
+            score: 0.99,              // effective match score can stay high (audit F5)
+            identity_confidence: 0.4, // well below DEFAULT_TRUSTED_CONFIDENCE (0.7)
+        }
+    }
+
+    fn high_confidence_found(x: f64, y: f64) -> StepOutcome {
+        StepOutcome::Found {
+            position: Point::new(x, y),
+            score: 0.99,
+            identity_confidence: 0.95,
+        }
+    }
+
+    #[test]
+    fn sustained_low_confidence_found_trips_lost() {
+        // limit 3: the 3rd consecutive low-confidence Found trips it.
+        let mut session = make_scripted_session_with_suspect_limit(
+            3,
+            vec![
+                low_confidence_found(10.0, 10.0),
+                low_confidence_found(11.0, 10.0),
+                low_confidence_found(12.0, 10.0),
+            ],
+        );
+        session.step(&blank_frame(W, H), 1.0);
+        assert_eq!(session.state(), SessionState::Tracking);
+        session.step(&blank_frame(W, H), 1.0);
+        assert_eq!(session.state(), SessionState::Tracking);
+        session.step(&blank_frame(W, H), 1.0);
+        assert_eq!(session.state(), SessionState::Lost);
+
+        // The sample for the frame that tripped it is still recorded
+        // (honest partial path) — Lost doesn't discard it.
+        let last = session.samples().last().unwrap();
+        assert_eq!(last.frame_index, 3);
+        assert_eq!(last.position, Point::new(12.0, 10.0));
+
+        // Further steps are ignored, like NeedsReseed.
+        session.step(&blank_frame(W, H), 1.0);
+        assert_eq!(session.state(), SessionState::Lost);
+        assert_eq!(session.samples().len(), 4);
+    }
+
+    #[test]
+    fn a_single_transient_low_confidence_frame_does_not_trip_lost() {
+        let mut session = make_scripted_session_with_suspect_limit(
+            3,
+            vec![
+                low_confidence_found(10.0, 10.0),
+                high_confidence_found(11.0, 10.0), // recovers -> resets streak
+                low_confidence_found(12.0, 10.0),
+                low_confidence_found(13.0, 10.0),
+            ],
+        );
+        for _ in 0..4 {
+            session.step(&blank_frame(W, H), 1.0);
+        }
+        // Streak reset by the high-confidence frame in the middle, so only
+        // 2 consecutive low-confidence frames at the end: below the
+        // limit(3).
+        assert_eq!(session.state(), SessionState::Tracking);
+    }
+
+    #[test]
+    fn a_miss_between_low_confidence_founds_resets_the_suspect_streak() {
+        // coast_limit's default (5) keeps a single Miss from itself
+        // pausing the session, so this isolates the suspect-streak reset.
+        let mut session = make_scripted_session_with_suspect_limit(
+            2,
+            vec![
+                low_confidence_found(10.0, 10.0),
+                StepOutcome::Miss,
+                low_confidence_found(12.0, 10.0),
+            ],
+        );
+        session.step(&blank_frame(W, H), 1.0); // low-confidence Found: streak 1
+        session.step(&blank_frame(W, H), 1.0); // Miss: resets streak
+        assert_eq!(session.state(), SessionState::Tracking);
+        session.step(&blank_frame(W, H), 1.0); // low-confidence Found: streak 1 again, not 2
+        assert_eq!(session.state(), SessionState::Tracking);
+    }
+
+    #[test]
+    fn reseed_recovers_a_session_from_lost() {
+        let mut session =
+            make_scripted_session_with_suspect_limit(1, vec![low_confidence_found(10.0, 10.0)]);
+        session.step(&blank_frame(W, H), 1.0);
+        assert_eq!(session.state(), SessionState::Lost);
+
+        session.reseed(5, Point::new(30.0, 20.0));
+        assert_eq!(session.state(), SessionState::Tracking);
+        let last = session.samples().last().unwrap();
+        assert_eq!(last.frame_index, 5);
+        assert_eq!(last.position, Point::new(30.0, 20.0));
     }
 }

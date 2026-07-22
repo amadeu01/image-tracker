@@ -867,6 +867,24 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
                         state: session.state(),
                     });
                 }
+                if session.state() == SessionState::Lost {
+                    // 17.4b: terminal, unlike `NeedsReseed` below — do not
+                    // block waiting for a reseed (headless has no human to
+                    // supply one, and the GUI's own reseed UI targets the
+                    // recoverable pause, not this). End the run here so the
+                    // caller converges on `Done` with the partial samples
+                    // collected up to (and including) the frame that
+                    // tripped it — the same honest-partial-path path a
+                    // user's Stop already takes, rather than silently
+                    // decoding the rest of the video with `step` now a
+                    // no-op.
+                    tracing::warn!(
+                        video_frame_index = seed_frame_index + session.frame_index(),
+                        "tracking lost: sustained low identity confidence, ending run \
+                         (not auto-resuming from an untrustworthy position)"
+                    );
+                    return Ok(LoopOutcome::Stopped);
+                }
                 if session.state() == SessionState::NeedsReseed {
                     tracing::warn!(
                         video_frame_index = seed_frame_index + session.frame_index(),
@@ -992,6 +1010,11 @@ mod tests {
         /// return `Miss`; `None` means never miss. `Some((from, u64::MAX))`
         /// means "miss forever from `from` on".
         miss_range: Option<(u64, u64)>,
+        /// Inclusive range (by call count, 0-based) of `step` calls that
+        /// return `Found` with a low identity confidence (17.4b), instead
+        /// of the default 1.0 — enough to drive a `TrackingSession` into
+        /// the terminal `Lost` state via `sustained_suspect_limit`.
+        low_confidence_range: Option<(u64, u64)>,
         frames_seen: u64,
         position: Point,
     }
@@ -1002,11 +1025,17 @@ mod tests {
             self.frames_seen += 1;
             match self.miss_range {
                 Some((from, to)) if frame >= from && frame <= to => StepOutcome::Miss,
-                _ => StepOutcome::Found {
-                    position: self.position,
-                    score: 1.0,
-                    identity_confidence: 1.0,
-                },
+                _ => {
+                    let identity_confidence = match self.low_confidence_range {
+                        Some((from, to)) if frame >= from && frame <= to => 0.4,
+                        _ => 1.0,
+                    };
+                    StepOutcome::Found {
+                        position: self.position,
+                        score: 1.0,
+                        identity_confidence,
+                    }
+                }
             }
         }
     }
@@ -1406,6 +1435,7 @@ mod tests {
         let mut source = frame_source_with(width, height, frame_count);
         let tracker = ScriptedTracker {
             miss_range: None,
+            low_confidence_range: None,
             frames_seen: 0,
             position: Point::new(1.0, 1.0),
         };
@@ -1473,6 +1503,7 @@ mod tests {
         let mut source = frame_source_with(width, height, frame_count);
         let tracker = ScriptedTracker {
             miss_range: None,
+            low_confidence_range: None,
             frames_seen: 0,
             position: Point::new(1.0, 1.0),
         };
@@ -1507,6 +1538,60 @@ mod tests {
         assert!(source.next_frame().unwrap().is_some());
     }
 
+    /// 17.4b: a session that goes `Lost` (sustained low identity confidence,
+    /// not a miss streak) must stop the loop immediately — like a user
+    /// Stop, *not* like `NeedsReseed`'s block-and-wait-for-a-reseed — so the
+    /// caller (CLI headless or GUI) converges on `Done` with the partial
+    /// path instead of decoding the rest of the video for nothing or
+    /// auto-resuming from an untrustworthy position.
+    #[test]
+    fn run_tracking_loop_stops_immediately_when_session_goes_lost() {
+        let (width, height) = (2u32, 2u32);
+        let frame_count = 50u8; // plenty of frames left when Lost trips
+        let mut source = frame_source_with(width, height, frame_count);
+        let tracker = ScriptedTracker {
+            miss_range: None,
+            low_confidence_range: Some((0, u64::MAX)), // low confidence from frame 1 on
+            frames_seen: 0,
+            position: Point::new(1.0, 1.0),
+        };
+        let session_config = TrackingSessionConfig::builder()
+            .sustained_suspect_limit(3)
+            .build();
+        let mut session = TrackingSession::new(tracker, 0, Point::new(1.0, 1.0), session_config);
+        let (tx, rx) = mpsc::channel::<TrackingMessage>();
+        let (_reseed_tx, reseed_rx) = mpsc::channel::<ReseedCommand>();
+        let (_control_tx, control_rx) = mpsc::channel::<ControlCommand>();
+
+        let result = run_tracking_loop(
+            &mut source,
+            &mut session,
+            0,
+            1.0,
+            &tx,
+            &reseed_rx,
+            &control_rx,
+        );
+        assert!(
+            matches!(result, Ok(LoopOutcome::Stopped)),
+            "Lost must report Stopped so the caller skips the EOF reap, same as a user Stop"
+        );
+        assert_eq!(session.state(), SessionState::Lost);
+        // The source still has frames left: the loop genuinely stopped
+        // short rather than decoding the whole video with `step` reduced to
+        // a no-op.
+        assert!(source.next_frame().unwrap().is_some());
+
+        // The last Progress message reflects the terminal Lost state
+        // honestly, rather than silently looking like ordinary tracking.
+        let messages: Vec<_> = rx.try_iter().collect();
+        let last_progress_state = messages.iter().rev().find_map(|m| match m {
+            TrackingMessage::Progress { state, .. } => Some(*state),
+            _ => None,
+        });
+        assert_eq!(last_progress_state, Some(SessionState::Lost));
+    }
+
     /// The bug: a session that pauses (`NeedsReseed`) right as the video
     /// hits real decode EOF must not leave the run silently "running"
     /// forever if nothing ever supplies a reseed (e.g. the caller dropped
@@ -1526,6 +1611,7 @@ mod tests {
         // "ran out of frames" — is what ends the run.
         let tracker = ScriptedTracker {
             miss_range: Some((0, u64::MAX)),
+            low_confidence_range: None,
             frames_seen: 0,
             position: Point::new(1.0, 1.0),
         };
@@ -1595,6 +1681,7 @@ mod tests {
         // the session pauses immediately on that first miss.
         let tracker = ScriptedTracker {
             miss_range: Some((1, 1)),
+            low_confidence_range: None,
             frames_seen: 0,
             position: Point::new(1.0, 1.0),
         };
@@ -1659,6 +1746,7 @@ mod tests {
         let mut source = frame_source_with(width, height, frame_count);
         let tracker = ScriptedTracker {
             miss_range: None,
+            low_confidence_range: None,
             frames_seen: 0,
             position: Point::new(1.0, 1.0),
         };
@@ -1702,6 +1790,7 @@ mod tests {
         let mut source = frame_source_with(width, height, frame_count);
         let tracker = ScriptedTracker {
             miss_range: None,
+            low_confidence_range: None,
             frames_seen: 0,
             position: Point::new(1.0, 1.0),
         };
@@ -1765,6 +1854,7 @@ mod tests {
         // the source's EOF.
         let tracker = ScriptedTracker {
             miss_range: Some((0, u64::MAX)),
+            low_confidence_range: None,
             frames_seen: 0,
             position: Point::new(1.0, 1.0),
         };
@@ -1830,6 +1920,7 @@ mod tests {
         let mut source = frame_source_with(width, height, frame_count);
         let tracker = ScriptedTracker {
             miss_range: None,
+            low_confidence_range: None,
             frames_seen: 0,
             position: Point::new(1.0, 1.0),
         };

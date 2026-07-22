@@ -289,6 +289,28 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
         }
     }
 
+    // 17.4b: `Lost` is terminal — the worker ends the run itself (see
+    // `tracking::run_tracking_loop`) rather than pausing for a reseed, so
+    // by the time we get here the loop above has already fallen through to
+    // `Done` with whatever partial path it collected. Report that
+    // distinctly from a normal reseed-recovery completion: this is the
+    // honest "the run gave up, here's what it saw before that" case the
+    // audit asked for (F4/F5), not "tracked cleanly to the end".
+    if run_state.session_state == Some(tracker_core::SessionState::Lost) {
+        eprintln!(
+            "warning: tracking lost the object at frame {} (sustained low identity confidence) \
+             and stopped rather than auto-resuming from an untrustworthy position; \
+             exporting the partial path collected up to that frame ({reseed_events} reseed \
+             event(s) before that)",
+            run_state.last_frame_index.unwrap_or_default()
+        );
+        tracing::warn!(
+            video_frame_index = run_state.last_frame_index,
+            reseed_events,
+            "run ended: tracking lost, not auto-resumed"
+        );
+    }
+
     if let Some(err) = &run_state.error {
         return Err(format!("tracking error: {err}"));
     }

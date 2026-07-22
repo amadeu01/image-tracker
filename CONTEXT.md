@@ -25,6 +25,9 @@ The mapping from image pixels to real-world meters, derived from one user-marked
 ### Gap
 A run of frames where the Marker could not be detected (occlusion, blur, out of frame). Short gaps are coasted over and interpolated in the Bar Path but flagged; metrics exclude or flag interpolated samples. A gap longer than the coast limit pauses tracking and asks the user to re-place the Seed.
 
+### Lost
+A terminal tracking state, distinct from a Gap's pause: the tracker keeps reporting a position (never misses) but its own identity confidence — the anchor score against the never-changing Seed patch — stays low for a sustained run of consecutive frames, meaning it has likely locked onto the wrong thing rather than merely losing sight of the object. Unlike a Gap's `NeedsReseed` pause, which recovers by re-placing the Seed at roughly the same spot, a headless run does not auto-resume out of Lost — doing so would just reseed from the same untrustworthy position. The run ends there with the honest partial Bar Path collected so far; a human can still manually reseed and continue.
+
 ### Preprocessor
 A noise-reduction filter (e.g. Gaussian blur, median) applied to image regions before matching. Must be applied identically to the Seed's reference patch and to every candidate region — reference and candidates must live in the same filtered space for scores to be comparable.
 
