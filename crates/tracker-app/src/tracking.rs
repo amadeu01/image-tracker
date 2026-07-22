@@ -689,7 +689,7 @@ fn run_tracking_worker(
         .map(|tb| 1.0 / tb.fps())
         .unwrap_or(1.0 / 30.0);
 
-    if let Err(e) = run_tracking_loop(
+    let outcome = match run_tracking_loop(
         &mut source,
         &mut session,
         seed_frame_index,
@@ -698,18 +698,31 @@ fn run_tracking_worker(
         reseed_rx,
         control_rx,
     ) {
-        tracing::error!(error = %e, "decode error during tracking run");
-        let _ = tx.send(TrackingMessage::Error(e.to_string()));
-        return;
-    }
-    // Reap the ffmpeg child now that the loop has hit clean decode EOF, to
-    // surface a non-zero exit as a (late) error. `run_tracking_loop` only
-    // sees the `FrameSource` port, not the ffmpeg-specific reap step, so it
-    // stays generic/testable against in-memory sources.
-    if let Err(e) = source.reap_after_eof() {
-        tracing::error!(error = %e, "ffmpeg exited with an error during tracking run");
-        let _ = tx.send(TrackingMessage::Error(e.to_string()));
-        return;
+        Ok(outcome) => outcome,
+        Err(e) => {
+            tracing::error!(error = %e, "decode error during tracking run");
+            let _ = tx.send(TrackingMessage::Error(e.to_string()));
+            return;
+        }
+    };
+    // Only reap on a clean decode EOF. `reap_after_eof` reads stderr to EOF
+    // then `wait()`s the child; that is safe *only* once ffmpeg has finished
+    // writing (EOF drained the stdout pipe). On an early user Stop the child
+    // is still mid-video with a full, undrained stdout pipe, so reaping here
+    // would deadlock — ffmpeg blocked writing, us blocked in `wait()` — and
+    // the worker would never send `Done`, leaving the GUI stuck in "paused"
+    // with no results (the milestone 17 "object lost" pause made users hit
+    // Finish mid-run, which is how this surfaced). On `Stopped` we skip the
+    // reap and let `Drop` kill+reap the still-running child instead.
+    // `run_tracking_loop` only sees the `FrameSource` port, not the
+    // ffmpeg-specific reap step, so it stays generic/testable against
+    // in-memory sources.
+    if let LoopOutcome::Completed = outcome {
+        if let Err(e) = source.reap_after_eof() {
+            tracing::error!(error = %e, "ffmpeg exited with an error during tracking run");
+            let _ = tx.send(TrackingMessage::Error(e.to_string()));
+            return;
+        }
     }
 
     let timebase = match Timebase::new(fps_num, fps_den) {
@@ -763,6 +776,22 @@ fn run_tracking_worker(
 /// Generic over `FrameSource` (rather than the concrete
 /// `FfmpegFrameSource<ChildStdout>`) so it's unit-testable against an
 /// in-memory source that EOFs, without spawning a real ffmpeg process.
+/// How `run_tracking_loop` ended, so the caller knows whether the ffmpeg
+/// child hit a clean EOF (safe to `reap_after_eof`, which reads stderr to
+/// EOF then `wait()`s) or was cut short by the user (Stop/Finish/Discard, or
+/// the UI dropping its handle). On an early stop the child is still mid-video
+/// with an *undrained* stdout pipe: reaping it would deadlock (ffmpeg blocked
+/// writing to the full pipe, us blocked in `wait()`), so the caller must skip
+/// the reap and let `Drop` kill the child instead. This is what the milestone
+/// 17 "object lost" pause exposed — it made users hit Finish mid-run for the
+/// first time on a long real video.
+enum LoopOutcome {
+    /// `source.next_frame()` returned `None` — the whole video was decoded.
+    Completed,
+    /// The user (or a dropped handle) ended the run before EOF.
+    Stopped,
+}
+
 fn run_tracking_loop<S: FrameSource, T: Tracker>(
     source: &mut S,
     session: &mut TrackingSession<T>,
@@ -771,7 +800,7 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
     tx: &Sender<TrackingMessage>,
     reseed_rx: &Receiver<ReseedCommand>,
     control_rx: &Receiver<ControlCommand>,
-) -> Result<(), S::Error> {
+) -> Result<LoopOutcome, S::Error> {
     loop {
         // Task 10.4: check for a Pause/Stop before touching the next frame,
         // so Stop/Discard never has to wait on a decode or `Tracker::step`
@@ -782,7 +811,7 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
         match control_rx.try_recv() {
             Ok(ControlCommand::Stop) => {
                 tracing::info!("tracking stopped by user; ending with samples collected so far");
-                return Ok(());
+                return Ok(LoopOutcome::Stopped);
             }
             Ok(ControlCommand::Pause) => {
                 tracing::info!("tracking paused by user");
@@ -796,10 +825,10 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
                             tracing::info!(
                                 "tracking stopped by user while paused; ending with samples collected so far"
                             );
-                            return Ok(());
+                            return Ok(LoopOutcome::Stopped);
                         }
                         Ok(ControlCommand::Pause) => continue,
-                        Err(_) => return Ok(()),
+                        Err(_) => return Ok(LoopOutcome::Stopped),
                     }
                 }
             }
@@ -872,7 +901,7 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
                                         "tracking stopped by user while awaiting reseed; \
                                          ending with samples collected so far"
                                     );
-                                    return Ok(());
+                                    return Ok(LoopOutcome::Stopped);
                                 }
                             }
                             // Reseed channel closed while paused: same
@@ -911,7 +940,7 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
                             tracing::info!(
                                 "reseed channel closed while paused; ending run with samples collected so far"
                             );
-                            return Ok(());
+                            return Ok(LoopOutcome::Stopped);
                         }
                     }
                 }
@@ -920,7 +949,7 @@ fn run_tracking_loop<S: FrameSource, T: Tracker>(
             // reached even if the session had just resumed out of
             // `NeedsReseed` on the previous iteration and immediately hits
             // the end of the video).
-            None => return Ok(()),
+            None => return Ok(LoopOutcome::Completed),
         }
     }
 }
@@ -1400,7 +1429,10 @@ mod tests {
             &reseed_rx,
             &control_rx,
         );
-        assert!(result.is_ok());
+        assert!(
+            matches!(result, Ok(LoopOutcome::Completed)),
+            "clean decode EOF must report Completed so the caller reaps ffmpeg"
+        );
 
         let messages: Vec<_> = rx.try_iter().collect();
         assert!(!messages.is_empty());
@@ -1425,6 +1457,54 @@ mod tests {
         // Source is genuinely exhausted: one more read is still a clean
         // `None`, not a hang or a phantom extra frame.
         assert!(source.next_frame().unwrap().is_none());
+    }
+
+    /// Regression: a user Stop before decode EOF must report `Stopped`, not
+    /// `Completed`. The caller reaps ffmpeg only on `Completed`; reaping a
+    /// still-running child (undrained stdout pipe) deadlocks, which left the
+    /// GUI stuck in "paused" with no results after Finish (surfaced once the
+    /// milestone 17 "object lost" pause made Finish-mid-run common). The
+    /// `source` here is *not* exhausted when the loop returns — that is the
+    /// whole point: it stops early, mid-video.
+    #[test]
+    fn run_tracking_loop_reports_stopped_on_early_user_stop() {
+        let (width, height) = (2u32, 2u32);
+        let frame_count = 50u8; // plenty of frames left when we Stop
+        let mut source = frame_source_with(width, height, frame_count);
+        let tracker = ScriptedTracker {
+            miss_range: None,
+            frames_seen: 0,
+            position: Point::new(1.0, 1.0),
+        };
+        let mut session = TrackingSession::new(
+            tracker,
+            0,
+            Point::new(1.0, 1.0),
+            session_config(TrackerTuning::default()),
+        );
+        let (tx, _rx) = mpsc::channel::<TrackingMessage>();
+        let (_reseed_tx, reseed_rx) = mpsc::channel::<ReseedCommand>();
+        let (control_tx, control_rx) = mpsc::channel::<ControlCommand>();
+        // Queue Stop before the loop runs: it is observed on the very first
+        // pre-frame control check, so the loop returns without exhausting
+        // `source`.
+        control_tx.send(ControlCommand::Stop).unwrap();
+
+        let result = run_tracking_loop(
+            &mut source,
+            &mut session,
+            0,
+            1.0,
+            &tx,
+            &reseed_rx,
+            &control_rx,
+        );
+        assert!(
+            matches!(result, Ok(LoopOutcome::Stopped)),
+            "an early user Stop must report Stopped so the caller skips the EOF reap"
+        );
+        // The source still has frames left — the loop genuinely stopped short.
+        assert!(source.next_frame().unwrap().is_some());
     }
 
     /// The bug: a session that pauses (`NeedsReseed`) right as the video
