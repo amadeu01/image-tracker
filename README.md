@@ -113,7 +113,7 @@ Contributions welcome! The project is built strictly test-first:
 
 1. Pick a `todo` task from [PLAN.md](PLAN.md) (tasks are sized S/M — anything bigger gets split first).
 2. TDD it: one failing test → minimal code to green → refactor. Tests target public behavior, never internals.
-3. No `unwrap()` outside tests. `tracker-core` stays dependency-free.
+3. No `unwrap()` outside tests. `tracker-core` stays dependency-free. GUI changes must obey the [GUI threading rules](docs/gui-threading.md) — never block the eframe `update` thread (no synchronous decode/subprocess/dialog in the render loop).
 4. Use the vocabulary from [CONTEXT.md](CONTEXT.md) in names and tests; if you introduce a term, add it there.
 5. Update your task's status row in PLAN.md in the same commit, and open a PR.
 
