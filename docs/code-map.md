@@ -312,6 +312,183 @@ The single most important thing to internalise (milestone 17):
 Two jobs, both kept: self-metrics *steer* the tracker at runtime; ground truth
 *judges* it offline.
 
+### 6.1 The five signals in detail — when called, compared, transformed, checked
+
+Two families. **Measured, live** signals run *inside the per-frame loop* and
+change what the tracker does next. **Derived** signals are *post-hoc arithmetic*
+on the finished output — nobody measures them live.
+
+| Signal | Kind | File | Called from |
+|--------|------|------|-------------|
+| ZNCC peak | measured, live | `metric.rs` | `TemplateTracker::step`, once per candidate |
+| anchor veto | measured, live | `tracker.rs` (17.3) | `TemplateTracker::step`, gates eligibility |
+| motion reachability | measured, live | `motion.rs` (17.2) | `TemplateTracker::step`, gates acceptance |
+| jitter | derived | `compare.rs` | `compute_metrics`, after the run |
+| gaps / reseeds | derived | `compare.rs` / `session.rs` | `compute_metrics` / live gap logic |
+
+---
+
+#### (1) ZNCC peak — "does this spot look like my template?"
+
+**When:** called once for *every* candidate patch in the search window, every
+frame. Window is `(2·search_radius+1)²` positions → hundreds of ZNCC calls per
+frame.
+
+**How the data is transformed** (`metric.rs`, `Zncc::score`): each patch is
+turned into a zero-mean, contrast-normalized vector, then correlated:
+
+```rust
+let mean_a = av.iter().sum::<f64>() / n;      // subtract each patch's brightness
+let mean_b = bv.iter().sum::<f64>() / n;      //   → "zero-mean" (shadow-proof)
+for i in 0..av.len() {
+    let da = av[i] - mean_a;
+    let db = bv[i] - mean_b;
+    num   += da * db;                          // dot product of the two
+    var_a += da * da;                          // each patch's spread
+    var_b += db * db;
+}
+let denom = (var_a * var_b).sqrt();            // normalize by contrast
+if denom == 0.0 { return Some(0.0); }          // guard: constant patch, no NaN
+Some(num / denom)                              // result in [-1, +1]
+```
+
+**How it's checked:** two guards before you ever see a score — mismatched patch
+sizes → `None`; a flat (zero-variance) patch → `0.0`, never a divide-by-zero.
+The score itself is *compared* two ways downstream: it must beat the current
+`best` in the search loop, and the winner must clear `min_score` (default 0.5)
+to count as `Found` at all.
+
+**The trap:** a high peak means "looks like the template," not "is the bar." A
+chrome rack upright scores high too. That's what the next two signals exist to
+catch.
+
+---
+
+#### (2) anchor veto — "is it still the *original* seed, not just last frame?"
+
+**When:** inside the same search loop, computed alongside the ZNCC peak for each
+candidate — but against **two** templates, not one.
+
+**How it works** (`tracker.rs`, `TemplateTracker::step`): the tracker keeps an
+`anchor` (captured once at the seed, never changes) and an `adaptive` (refreshed
+as the bar's appearance changes). A candidate is **eligible only if the anchor
+still recognizes it**:
+
+```rust
+let anchor_score   = metric.score(&self.anchor,   &candidate);  // vs the ORIGINAL seed
+let adaptive_score = metric.score(&self.adaptive, &candidate);  // vs the recent look
+
+// THE VETO: reject outright if the never-changing anchor lost it.
+let Some(anchor_score) = anchor_score.filter(|a| *a >= self.config.anchor_floor)
+    else { continue; };                         // candidate discarded entirely
+
+// Only among anchor-approved candidates does the adaptive get a vote:
+let score = match adaptive_score {
+    Some(b) => anchor_score.max(b),             // adaptive can REFINE, not OVERRIDE
+    None    => anchor_score,
+};
+```
+
+**Why it's checked this way:** without the veto, `max(anchor, adaptive)` would
+let a candidate the anchor *rejects* win on the adaptive's score alone — and
+then the adaptive refreshes from that wrong match, writing the error back into
+itself. A **drift ratchet** with no restoring force (audit F3). The anchor floor
+(default 0.3, deliberately *below* `min_score`) is the ratchet's pawl: the
+adaptive handles legitimate appearance change (a rotated plate), the anchor
+vetoes an identity change (the rack).
+
+---
+
+#### (3) motion reachability — "could the bar physically get there in one frame?"
+
+**When:** checked once, on the *winning* candidate, after the search picks it —
+every frame, gap open or not (audit F2).
+
+**How it's transformed & checked** (`motion.rs`): a `Track` carries position +
+velocity + an uncertainty radius. Two pieces:
+
+```rust
+// the search CENTERS on the prediction, not the last position (audit F1):
+pub fn predicted(&self, dt: f64) -> Point {
+    Point::new(self.position.x + self.velocity.x * dt,   // constant-velocity guess
+               self.position.y + self.velocity.y * dt)
+}
+
+// the reachability RADIUS the winner must fall within:
+pub(crate) fn gate_radius(track: &Track, max_velocity: f64, dt: f64) -> f64 {
+    max_velocity * dt + track.uncertainty     // farthest a bar could move in dt, + coast slack
+}
+```
+
+The acceptance check in `tracker.rs`:
+
+```rust
+Some((position, score, ..))
+    if score >= self.config.min_score
+        && distance(position, track.position) <= gate_radius(track, self.config.max_velocity, dt)
+    => Found { position, .. },
+_   => Miss,     // too far to be physically real → rejected regardless of score
+```
+
+**How the state evolves:** on a `Found`, `Track::observed` re-derives velocity
+from the displacement and resets uncertainty to 0. On a `Miss`, `Track::coasted`
+moves along the prediction and *grows* uncertainty (`growth_per_second · dt`) —
+so the longer the bar is unseen, the wider the gate opens for reacquisition.
+`max_velocity` default is 3000 px/s. Note it's a *velocity* bound, not
+acceleration-from-rest — an accel gate off a stationary seed could never
+bootstrap the first real motion (the frame-25 false-loss regression, 17.2).
+
+---
+
+#### (4) jitter — derived, post-hoc
+
+**When:** not live at all. Computed once, after the whole run, in
+`compare.rs::compute_metrics` — pure arithmetic on the positions the tracker
+already emitted.
+
+```rust
+if let Some(prev) = last_tracked {              // only between CONSECUTIVE TRACKED points
+    let dx = position.x - prev.x;               //   (misses are skipped, not counted as jumps)
+    let dy = position.y - prev.y;
+    jitter_sum += (dx*dx + dy*dy).sqrt();        // Euclidean step distance
+    jitter_count += 1;
+}
+last_tracked = Some(position);
+// ...
+mean_jitter = (jitter_count > 0).then_some(jitter_sum / jitter_count);   // average
+```
+
+**What's checked:** it skips over misses (`last_tracked`, not `last_frame`) so a
+gap doesn't fake a huge jump; `None` when there were no consecutive tracked
+pairs. **Why it can't judge correctness:** low jitter = smooth = a blob gliding
+across a wall scores *great* while tracking nothing (PLAN 20.3).
+
+---
+
+#### (5) gaps / reseeds — derived counting
+
+**When:** two contexts. *Live*, `session.rs` opens a gap on a miss-streak and
+flips to `NeedsReseed` past the coast limit. *Post-hoc*, `compare.rs` recounts
+them from the outcome sequence:
+
+```rust
+FrameOutcome::Miss => {
+    misses += 1;
+    if consecutive_miss == 0 { gaps += 1; }         // a gap = the START of a miss-streak
+    consecutive_miss += 1;
+    if consecutive_miss > coast_limit {             // streak outlasts the coast budget
+        reseeds += 1;                               //   → would force a reseed
+        consecutive_miss = 0;                       //   → reset; a longer loss = a fresh gap
+    }
+}
+FrameOutcome::Found { .. } => { consecutive_miss = 0; }   // streak broken
+```
+
+**Checked:** `gaps` counts *streaks*, not raw misses (one 40-frame occlusion =
+1 gap, not 40); `reseeds` mirrors the CLI's headless auto-resume so the benchmark
+number matches real behavior. Both are honest *descriptions* of what the tracker
+did — never a verdict on whether it was right.
+
 ---
 
 ## 7. Navigation map — "I want to change X, open Y"
