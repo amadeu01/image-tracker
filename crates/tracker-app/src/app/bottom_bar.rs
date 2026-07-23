@@ -37,7 +37,7 @@ pub fn show_status_bar(ctx: &egui::Context, state: Option<&AppState>) {
                     ))
                     .monospace(),
                 );
-                let tracking_active = state.tracking.is_some()
+                let tracking_active = state.is_tracking()
                     || state.tracking_run.error.is_some()
                     || state.bar_path.is_some();
                 if tracking_active {

@@ -1,20 +1,108 @@
 //! Background-job concern (task 20.1 split out of the former flat
-//! `state.rs`): the three handle+`poll_*` pairs `AppState` drives —
-//! tracking (`tracking`/`tracking_run`), auto/rep-clip export (`export`),
-//! and the strategy benchmark (`benchmark`/`benchmark_progress`/
-//! `benchmark_rows`) — plus every `can_*` predicate gating their buttons and
-//! the run-lifecycle controls (Pause/Resume/Finish/Discard).
+//! `state.rs`; task 20.5 replaced the three independent `Option<Handle>`
+//! fields with one [`Job`] enum): the three handle+`poll_*` pairs `AppState`
+//! drives — tracking, auto/rep-clip export, and the strategy benchmark — plus
+//! every `can_*` predicate gating their buttons and the run-lifecycle
+//! controls (Pause/Resume/Finish/Discard).
+//!
+//! ## The `Job` enum (task 20.5)
+//!
+//! Before this task, `AppState` held `tracking: Option<TrackingHandle>`,
+//! `export: Option<ExportHandle>` and `benchmark: Option<BenchmarkHandle>` as
+//! three independent `Option`s — three bits, 2³ = 8 representable states,
+//! but the domain permits only 4: idle, or exactly one of the three running
+//! (auto-export only ever starts once tracking has *finished*, so
+//! "tracking + export" was already unreachable at runtime, but the type
+//! still allowed the other illegal combinations — "export + benchmark",
+//! "tracking + benchmark", "all three" — and every `can_*`/`poll_*` method
+//! had to defensively check "and nothing else is running" by hand). `Job`
+//! makes the mutual exclusion a compile-time fact: there is exactly one
+//! background job field, and its variant *is* which job (if any) is active,
+//! so "start X while Y runs" is a match arm that doesn't exist rather than a
+//! guarded-against field combination.
+//!
+//! `TrackingRunState` (the tracking reducer's accumulated state — last
+//! frame, error, gap count…) stays a top-level `AppState` field rather than
+//! moving inside `Job::Tracking`: unlike the handle, callers read it *after*
+//! the job clears too (`bottom_bar.rs`'s error/paused status line keys off
+//! `tracking_run.error`/`session_state` even once `tracking` — now
+//! `Job::Idle` — has gone quiet, since the reducer is the record of what the
+//! run did, not a proxy for "is it still running"). Same reasoning as
+//! `bar_path`/`results`: it is a *result* that outlives the job, so it lives
+//! next to them, not inside the enum. `benchmark_rows`/`exported_files` are
+//! the same shape of result for the other two jobs and were already
+//! `AppState` fields, unchanged by this task.
 
 use super::review::SessionResults;
 use super::{AppState, EventLevel, Mode};
-use crate::export_job::{self, ExportMessage};
-use crate::tracking::{self, TrackingRunState};
+use crate::compare::{BenchmarkHandle, BenchmarkMessage};
+use crate::export_job::{self, ExportHandle, ExportMessage};
+use crate::tracking::{self, TrackingHandle, TrackingRunState};
+
+/// The one background job `AppState` may be driving at a time (task 20.5).
+/// See the module doc comment for why this replaced three independent
+/// `Option<Handle>` fields, and why `TrackingRunState` is *not* one of this
+/// enum's fields.
+pub enum Job {
+    /// No background job is running.
+    Idle,
+    /// A tracking run is active or paused (by the user, or by the tracker's
+    /// own `NeedsReseed`, which `tracking_run.session_state` — not this
+    /// variant — distinguishes).
+    Tracking {
+        handle: TrackingHandle,
+        paused: bool,
+    },
+    /// The auto-export (or per-rep-clip export) job is writing files.
+    Exporting { handle: ExportHandle },
+    /// The strategy benchmark (task 11.4) is running; `progress` is
+    /// `(strategies_started, total)`, `None` until the first progress
+    /// message arrives.
+    Benchmarking {
+        handle: BenchmarkHandle,
+        progress: Option<(usize, usize)>,
+    },
+}
 
 impl AppState {
+    /// Whether a tracking run is currently active or paused.
+    pub fn is_tracking(&self) -> bool {
+        matches!(self.job, Job::Tracking { .. })
+    }
+
+    /// Whether an export job (auto-export or rep-clip export) is currently
+    /// writing files.
+    pub fn is_exporting(&self) -> bool {
+        matches!(self.job, Job::Exporting { .. })
+    }
+
+    /// Whether the strategy benchmark is currently running.
+    pub fn is_benchmarking(&self) -> bool {
+        matches!(self.job, Job::Benchmarking { .. })
+    }
+
+    /// Whether the user has paused the active tracking run (task 10.4) —
+    /// distinct from `tracking_run.session_state == NeedsReseed`, which is
+    /// the tracker itself pausing because it lost the object. `false`
+    /// outside an active tracking run.
+    pub fn is_paused(&self) -> bool {
+        matches!(self.job, Job::Tracking { paused: true, .. })
+    }
+
+    /// How many of the 6 strategies the active benchmark has started
+    /// (`0..=6`), for the side panel's progress display. `None` outside an
+    /// active benchmark (including before its first progress message).
+    pub fn benchmark_progress(&self) -> Option<(usize, usize)> {
+        match &self.job {
+            Job::Benchmarking { progress, .. } => *progress,
+            _ => None,
+        }
+    }
+
     /// Whether the "Track" action should currently be available: a Seed
     /// must be placed, and no run already active.
     pub fn can_start_tracking(&self) -> bool {
-        self.seed.is_some() && self.tracking.is_none()
+        self.seed.is_some() && !self.is_tracking()
     }
 
     /// Spawns a background tracking run from the current Seed, using this
@@ -55,7 +143,10 @@ impl AppState {
             tracker_selection: self.settings.tracker_selection,
             color_tracker_config: tracking::color_tracker_config(tuning),
         });
-        self.tracking = Some(handle);
+        self.job = Job::Tracking {
+            handle,
+            paused: false,
+        };
         self.tracking_run = TrackingRunState::started();
         self.bar_path = None;
         self.live_reps = None;
@@ -73,7 +164,7 @@ impl AppState {
     /// repaint). Once the run finishes (or errors), stores the completed
     /// `BarPath` (if any) and drops the worker handle.
     pub fn poll_tracking(&mut self) -> bool {
-        let Some(handle) = &self.tracking else {
+        let Job::Tracking { handle, .. } = &self.job else {
             return false;
         };
         let mut any = false;
@@ -139,7 +230,7 @@ impl AppState {
         }
         if finished {
             self.bar_path = self.tracking_run.bar_path.clone();
-            self.tracking = None;
+            self.job = Job::Idle;
             if let Some(e) = &self.tracking_run.error {
                 self.push_event(EventLevel::Error, format!("tracking error: {e}"));
             } else {
@@ -187,7 +278,7 @@ impl AppState {
     /// available: a Seed must be placed, and neither a tracking run nor
     /// another benchmark is already active.
     pub fn can_test_strategies(&self) -> bool {
-        self.seed.is_some() && self.tracking.is_none() && self.benchmark.is_none()
+        self.seed.is_some() && !self.is_tracking() && !self.is_benchmarking()
     }
 
     /// Spawns the background strategy benchmark (task 11.4): the fixed
@@ -235,8 +326,10 @@ impl AppState {
             coast_limit,
             tuning,
         );
-        self.benchmark = Some(handle);
-        self.benchmark_progress = Some((0, 6));
+        self.job = Job::Benchmarking {
+            handle,
+            progress: Some((0, 6)),
+        };
         self.benchmark_rows = None;
     }
 
@@ -245,7 +338,7 @@ impl AppState {
     /// should request a repaint), mirroring `poll_tracking`/`poll_export`'s
     /// shape.
     pub fn poll_benchmark(&mut self) -> bool {
-        let Some(handle) = &self.benchmark else {
+        let Job::Benchmarking { handle, .. } = &self.job else {
             return false;
         };
         let mut any = false;
@@ -256,13 +349,15 @@ impl AppState {
         for msg in messages {
             any = true;
             match msg {
-                crate::compare::BenchmarkMessage::Progress {
+                BenchmarkMessage::Progress {
                     strategy_index,
                     total,
                 } => {
-                    self.benchmark_progress = Some((strategy_index, total));
+                    if let Job::Benchmarking { progress, .. } = &mut self.job {
+                        *progress = Some((strategy_index, total));
+                    }
                 }
-                crate::compare::BenchmarkMessage::Done(rows) => {
+                BenchmarkMessage::Done(rows) => {
                     let winner_label = crate::compare::recommend(
                         &rows.iter().map(|r| r.metrics).collect::<Vec<_>>(),
                     )
@@ -281,13 +376,11 @@ impl AppState {
                     );
                     self.push_event(EventLevel::Info, message);
                     self.benchmark_rows = Some(rows);
-                    self.benchmark = None;
-                    self.benchmark_progress = None;
+                    self.job = Job::Idle;
                 }
-                crate::compare::BenchmarkMessage::Error(e) => {
+                BenchmarkMessage::Error(e) => {
                     self.push_event(EventLevel::Error, format!("strategy benchmark error: {e}"));
-                    self.benchmark = None;
-                    self.benchmark_progress = None;
+                    self.job = Job::Idle;
                 }
             }
         }
@@ -349,7 +442,9 @@ impl AppState {
         };
         self.exported_files.clear();
         self.push_event(EventLevel::Info, "auto-export started".to_string());
-        self.export = Some(export_job::spawn_export(job));
+        self.job = Job::Exporting {
+            handle: export_job::spawn_export(job),
+        };
     }
 
     /// Drains any pending messages from the active export job, applying
@@ -357,7 +452,7 @@ impl AppState {
     /// processed (the caller should request a repaint). Mirrors
     /// `poll_tracking`'s drain-then-react shape.
     pub fn poll_export(&mut self) -> bool {
-        let Some(handle) = &self.export else {
+        let Job::Exporting { handle } = &self.job else {
             return false;
         };
         let mut any = false;
@@ -380,7 +475,7 @@ impl AppState {
             }
         }
         if done {
-            self.export = None;
+            self.job = Job::Idle;
             self.push_event(EventLevel::Info, "exports written".to_string());
         }
         any
@@ -391,7 +486,7 @@ impl AppState {
     /// paused at — the UI only enables the Resume action once that's
     /// true). No-op if there's no active worker or no Seed.
     pub fn resume_tracking(&mut self) {
-        let (Some(handle), Some(seed)) = (&self.tracking, self.seed) else {
+        let (Job::Tracking { handle, .. }, Some(seed)) = (&self.job, self.seed) else {
             return;
         };
         handle.resume(seed.frame_index, seed.position);
@@ -421,8 +516,8 @@ impl AppState {
     /// object-lost `NeedsReseed` state, which already halts consumption on
     /// its own and has its own Resume button in the toolbar).
     pub fn can_pause_tracking(&self) -> bool {
-        self.tracking.is_some()
-            && !self.paused
+        self.is_tracking()
+            && !self.is_paused()
             && self.tracking_run.session_state != Some(tracker_core::SessionState::NeedsReseed)
     }
 
@@ -432,10 +527,10 @@ impl AppState {
         if !self.can_pause_tracking() {
             return;
         }
-        if let Some(handle) = &self.tracking {
+        if let Job::Tracking { handle, paused } = &mut self.job {
             handle.pause();
+            *paused = true;
         }
-        self.paused = true;
         tracing::info!("tracking paused (user)");
         self.push_event(EventLevel::Info, "tracking paused".to_string());
     }
@@ -443,7 +538,7 @@ impl AppState {
     /// Whether Resume (from a user Pause, not a reseed) is currently
     /// available.
     pub fn can_unpause_tracking(&self) -> bool {
-        self.tracking.is_some() && self.paused
+        self.is_tracking() && self.is_paused()
     }
 
     /// Resumes a user-paused run. No-op if `can_unpause_tracking` is false.
@@ -451,10 +546,10 @@ impl AppState {
         if !self.can_unpause_tracking() {
             return;
         }
-        if let Some(handle) = &self.tracking {
+        if let Job::Tracking { handle, paused } = &mut self.job {
             handle.unpause();
+            *paused = false;
         }
-        self.paused = false;
         tracing::info!("tracking resumed (user)");
         self.push_event(EventLevel::Info, "tracking resumed".to_string());
     }
@@ -462,7 +557,7 @@ impl AppState {
     /// Whether Finish (task 15.4 rename of Stop) is currently available:
     /// any active (running, user-paused, or reseed-paused) run.
     pub fn can_stop_tracking(&self) -> bool {
-        self.tracking.is_some()
+        self.is_tracking()
     }
 
     /// Tells the worker to finish now, keeping whatever samples it has
@@ -475,10 +570,10 @@ impl AppState {
         if !self.can_stop_tracking() {
             return;
         }
-        if let Some(handle) = &self.tracking {
+        if let Job::Tracking { handle, paused } = &mut self.job {
             handle.stop();
+            *paused = false;
         }
-        self.paused = false;
         tracing::info!("tracking finish requested (user)");
         self.push_event(
             EventLevel::Info,
@@ -489,31 +584,29 @@ impl AppState {
     /// Whether Discard is currently available: same gate as Finish (any
     /// active run).
     pub fn can_discard_tracking(&self) -> bool {
-        self.tracking.is_some()
+        self.is_tracking()
     }
 
     /// Aborts the active run and throws away anything it collected: unlike
     /// `stop_tracking`, this never lands in Review — the worker is told to
     /// stop (same `ControlCommand::Stop`, so it still terminates promptly
     /// and its `FfmpegFrameSource` still gets dropped/killed) but its
-    /// eventual `Done`/`Error` message is simply never read, since
-    /// `self.tracking` is cleared here rather than left for `poll_tracking`
-    /// to drain. Returns the app to seed placement with the Seed intact —
-    /// the user re-tracks from the same seed rather than re-placing it. No-op
-    /// if `can_discard_tracking` is false.
+    /// eventual `Done`/`Error` message is simply never read, since `self.job`
+    /// is reset to `Job::Idle` here rather than left for `poll_tracking` to
+    /// drain. Returns the app to seed placement with the Seed intact — the
+    /// user re-tracks from the same seed rather than re-placing it. No-op if
+    /// `can_discard_tracking` is false.
     pub fn discard_tracking(&mut self) {
         if !self.can_discard_tracking() {
             return;
         }
-        if let Some(handle) = &self.tracking {
+        if let Job::Tracking { handle, .. } = &self.job {
             handle.stop();
         }
-        self.tracking = None;
+        self.job = Job::Idle;
         self.tracking_run = TrackingRunState::default();
         self.bar_path = None;
         self.results = None;
-        self.export = None;
-        self.paused = false;
         self.live_reps = None;
         self.selected_rep = None;
         self.rep_clip = None;
@@ -566,12 +659,12 @@ mod tests {
         let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
         assert!(!state.can_pause_tracking());
         state.pause_tracking();
-        assert!(!state.paused, "no active run: pause must be a no-op");
+        assert!(!state.is_paused(), "no active run: pause must be a no-op");
 
         let mut state = state_with_active_run();
         assert!(state.can_pause_tracking());
         state.pause_tracking();
-        assert!(state.paused);
+        assert!(state.is_paused());
         assert!(!state.can_pause_tracking(), "already paused");
         assert!(state.can_unpause_tracking());
     }
@@ -590,9 +683,9 @@ mod tests {
     fn unpause_tracking_clears_paused_flag() {
         let mut state = state_with_active_run();
         state.pause_tracking();
-        assert!(state.paused);
+        assert!(state.is_paused());
         state.unpause_tracking();
-        assert!(!state.paused);
+        assert!(!state.is_paused());
         assert!(!state.can_unpause_tracking());
     }
 
@@ -614,7 +707,7 @@ mod tests {
         // Finish is a request to the worker, not an immediate teardown: the
         // handle/tracking_run stay in place until the worker's `Done`
         // arrives via `poll_tracking`, same as a clean-EOF finish.
-        assert!(state.tracking.is_some());
+        assert!(state.is_tracking());
     }
 
     #[test]
@@ -631,11 +724,11 @@ mod tests {
         assert!(state.can_discard_tracking());
         state.discard_tracking();
 
-        assert!(state.tracking.is_none());
+        assert!(!state.is_tracking());
         assert!(!state.tracking_run.running);
         assert!(state.bar_path.is_none());
         assert!(state.results.is_none());
-        assert!(!state.paused);
+        assert!(!state.is_paused());
         assert_eq!(state.mode, Mode::PlacingSeed);
         // The whole point: seed survives so the user re-tracks without
         // re-placing it.
@@ -661,7 +754,10 @@ mod tests {
     #[test]
     fn poll_tracking_updates_live_reps_every_30_processed_frames() {
         let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(200)));
-        state.tracking = Some(dummy_tracking_handle());
+        state.job = Job::Tracking {
+            handle: dummy_tracking_handle(),
+            paused: false,
+        };
         state.tracking_run = TrackingRunState::started();
         assert!(state.live_reps.is_none());
 
@@ -730,5 +826,77 @@ mod tests {
         state.place_seed(tracker_core::Point::new(1.0, 1.0));
         state.start_tracking();
         assert!(state.live_reps.is_none());
+    }
+
+    // -- Task 20.5: `Job` mutual exclusion -----------------------------------
+
+    #[test]
+    fn starting_tracking_while_tracking_is_already_active_is_a_noop() {
+        let mut state = state_with_active_run();
+        assert!(state.is_tracking());
+        // `can_start_tracking` is false while a run is active, so a second
+        // `start_tracking` call must not spawn a second worker / clobber the
+        // existing `Job::Tracking`.
+        state.start_tracking();
+        assert!(state.is_tracking());
+    }
+
+    #[test]
+    fn starting_a_benchmark_while_tracking_is_active_is_rejected() {
+        let mut state = state_with_active_run();
+        assert!(!state.can_test_strategies());
+        state.start_strategy_benchmark();
+        // The `Job` enum makes this structurally impossible to observe as a
+        // "both running" state even if the guard were bypassed: `self.job`
+        // can only ever hold one variant at a time.
+        assert!(state.is_tracking());
+        assert!(!state.is_benchmarking());
+    }
+
+    #[test]
+    fn job_is_idle_by_default_and_exactly_one_variant_active_at_a_time() {
+        let state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        assert!(matches!(state.job, Job::Idle));
+        assert!(!state.is_tracking());
+        assert!(!state.is_exporting());
+        assert!(!state.is_benchmarking());
+    }
+
+    #[test]
+    fn discard_tracking_returns_the_job_to_idle_not_a_dangling_handle() {
+        let mut state = state_with_active_run();
+        state.discard_tracking();
+        assert!(matches!(state.job, Job::Idle));
+    }
+
+    #[test]
+    fn poll_tracking_done_leaves_the_job_exporting_not_still_tracking() {
+        // `poll_tracking`'s finished branch resets `job` to `Idle` before
+        // `start_export` sets it to `Exporting` — if that ordering were
+        // reversed (or skipped), the job would still read as `Tracking`, or
+        // `start_export` would silently clobber a live tracking handle. Both
+        // are exactly the illegal-overlap states `Job` exists to rule out.
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(30)));
+        state.tracking_run = TrackingRunState::started();
+        state.tracking_run.gap_count = 0;
+        let bar_path = one_rep_bar_path();
+        state.tracking_run.bar_path = Some(bar_path.clone());
+        let finished = state
+            .tracking_run
+            .apply(tracking::TrackingMessage::Done(bar_path));
+        assert!(finished);
+        // Mirror `poll_tracking`'s finished branch exactly (same order this
+        // module's `poll_tracking` uses): job -> Idle, then, once results
+        // build successfully, `start_export` flips it to `Exporting`.
+        state.bar_path = state.tracking_run.bar_path.clone();
+        state.job = Job::Idle;
+        assert!(!state.is_tracking(), "job must be Idle, not still Tracking");
+        let results = SessionResults::build(state.bar_path.clone().unwrap(), state.calibration, 0);
+        state.start_export(&results);
+        assert!(state.is_exporting());
+        assert!(
+            !state.is_tracking(),
+            "tracking and exporting are mutually exclusive"
+        );
     }
 }

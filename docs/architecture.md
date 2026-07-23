@@ -209,6 +209,41 @@ Every one is dependency-free and substitutable without editing the module under
 test — which is why 233 of the 513 tests are pure domain tests that run in
 0.1 s with no ffmpeg on the PATH.
 
+### `Job`: illegal states unrepresentable (task 20.5)
+
+`AppState` (app-level session state, not domain — see "Deliberately *not*
+DDD" below) drives exactly one background job at a time: a tracking run, an
+export, or the strategy benchmark. Before task 20.5 that was three
+independent `Option<Handle>` fields (`tracking`/`export`/`benchmark`) — three
+bits, 8 representable states, but the domain permits only 4 (idle, or
+exactly one running); the other 4 (`Job::Tracking` while `Job::Benchmarking`,
+etc.) were illegal states the type allowed and every `can_*`/`poll_*` method
+defensively guarded against by hand. `crates/tracker-app/src/app/state/jobs.rs`
+now models it as one enum instead:
+
+```rust
+enum Job {
+    Idle,
+    Tracking { handle: TrackingHandle, paused: bool },
+    Exporting { handle: ExportHandle },
+    Benchmarking { handle: BenchmarkHandle, progress: Option<(usize, usize)> },
+}
+```
+
+Mutual exclusion is a compile-time fact — there is exactly one `job` field,
+and its variant *is* which job (if any) is active — so "start X while Y
+runs" is a match arm that doesn't exist rather than a guarded-against field
+combination. `TrackingRunState` (the tracking reducer's accumulated
+state — last frame, error, gap count) deliberately stays a top-level
+`AppState` field rather than a `Job::Tracking` payload: several call sites
+(the bottom status bar's error/paused line) read it *after* the job has
+already gone back to `Job::Idle`, so it is a result that outlives the job,
+the same as `bar_path`/`results`/`benchmark_rows`/`exported_files`. See task
+20.5's PLAN.md row for the full before/after and the deferred follow-up
+(20.6: grouping `seed`/`calibration`/`bar_path`/`results` into a
+`TrackingRun` value — surveyed at 113 call sites, too large to fold into the
+same session as the `Job` enum).
+
 ### Deliberately *not* DDD
 
 There is no repository, no unit of work, no domain events, no anti-corruption
@@ -364,6 +399,18 @@ deletion), but `compare.rs`'s benchmark table/JSON now marks both `[GATED]`
 with a reason and excludes them from `recommend`/`recommend_viable`'s
 candidate pool — Color when `suggest_tracker` doesn't return `Color` for the
 seed, Circle unconditionally (a documented negative result). See PLAN 20.3.
+
+### ✅ Resolved (part a): `AppState`'s three job `Option`s allowed illegal overlapping states — PLAN 20.5
+
+`tracking: Option<TrackingHandle>` / `export: Option<ExportHandle>` /
+`benchmark: Option<BenchmarkHandle>` were three independent `Option`s (8
+representable states) for a domain that permits only 4 (idle, or exactly one
+job running); every `can_*`/`poll_*` method defensively checked "and nothing
+else is running" by hand. Replaced with one `Job` enum — see §4's "`Job`:
+illegal states unrepresentable" above. **Part (b) — grouping
+`seed`/`calibration`/`bar_path`/`results` into a `TrackingRun` value —
+deferred to PLAN 20.6**: surveyed at 113 call sites outside `state/`, past
+the task's own threshold for shipping in the same session as part (a).
 
 ### Clean
 

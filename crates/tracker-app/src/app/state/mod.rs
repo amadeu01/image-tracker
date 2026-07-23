@@ -6,7 +6,7 @@
 //! Task 20.1 split this file (2708 lines, `AppState` 27 public fields /
 //! ~48 methods) into a directory by *concern*, not by sub-struct: `AppState`
 //! stays one flat struct here so every existing call site
-//! (`state.tracking`, `state.results`, `state.seed`, …) keeps compiling
+//! (`state.job`, `state.results`, `state.seed`, …) keeps compiling
 //! unchanged — only the `impl AppState` blocks that touch each area moved
 //! into their own file, plus the standalone types those areas own. See each
 //! submodule's doc comment for exactly what it holds; this file keeps the
@@ -30,6 +30,8 @@ mod test_support;
 // level before this split — re-exported here for path stability even though
 // that makes them currently-unused imports from this binary crate's PoV.
 #[allow(unused_imports)]
+pub use jobs::Job;
+#[allow(unused_imports)]
 pub use review::{
     clip_loop_next_frame, format_clip_time, DisplayMode, ResultsQuality, SessionResults,
 };
@@ -39,9 +41,8 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::export_job::ExportHandle;
 use crate::ffprobe::VideoMetadata;
-use crate::tracking::{self, TrackingHandle, TrackingRunState};
+use crate::tracking::{self, TrackingRunState};
 
 /// Severity of an [`AppEvent`], used by the side panel to color the events
 /// list (errors stand out).
@@ -107,7 +108,7 @@ pub enum Phase {
 /// run — there is no separate "apply" step, so changing a value between
 /// runs simply takes effect the next time Track/Re-track is clicked; while
 /// a run is active the panel renders these fields read-only (gated in
-/// `side_panel.rs` on `state.tracking.is_none()`), so "locked while running"
+/// `side_panel.rs` on `!state.is_tracking()`), so "locked while running"
 /// is a rendering concern, not a state one.
 ///
 /// Filter chain order is fixed for v1 (documented here and in the panel):
@@ -272,20 +273,23 @@ pub struct AppState {
     /// (project rule — see PLAN.md 2.6).
     pub status: String,
     // -- jobs.rs: tracking / export / benchmark background workers ------
-    /// The active/paused tracking worker's channel handle, once "Track" has
-    /// been clicked (task 2.6). `None` before a run starts and again once
-    /// it finishes/errors.
-    pub tracking: Option<TrackingHandle>,
-    /// Pure reducer over that worker's progress messages; drives the live
-    /// crosshair and status bar while `tracking` is active, and still holds
-    /// the last-known state (including any error) after it finishes.
+    /// The one background job this `AppState` may be driving at a time
+    /// (task 20.5's `Job` enum — see `jobs.rs`'s module doc comment).
+    /// Replaced three independent `Option<Handle>` fields (`tracking`/
+    /// `export`/`benchmark`) that together encoded 8 states when the domain
+    /// only permits 4 (idle, or exactly one job running); prefer the
+    /// `is_tracking`/`is_exporting`/`is_benchmarking`/`is_paused`/
+    /// `benchmark_progress` accessor methods over matching this field
+    /// directly at call sites outside `state::`.
+    pub job: Job,
+    /// Pure reducer over the tracking worker's progress messages; drives
+    /// the live crosshair and status bar while a run is active, and still
+    /// holds the last-known state (including any error) after it finishes —
+    /// unlike `job`, this is a *result* that outlives the job (same
+    /// reasoning as `bar_path`/`results`), since callers such as the bottom
+    /// status bar read `tracking_run.error`/`session_state` after `job` has
+    /// already gone back to `Job::Idle`.
     pub tracking_run: TrackingRunState,
-    /// Whether the user has paused the active run (task 10.4) — distinct
-    /// from `tracking_run.session_state == NeedsReseed`, which is the
-    /// tracker itself pausing because it lost the object. `false` outside
-    /// an active run and reset whenever a run starts/finishes/is
-    /// discarded.
-    pub paused: bool,
     /// The completed `BarPath`, once a tracking run reaches clean
     /// end-of-video. Consumed by milestone 3 (overlay render / export).
     pub bar_path: Option<tracker_core::BarPath>,
@@ -294,10 +298,6 @@ pub struct AppState {
     /// "New session" reset. The Review step's Results section is built
     /// from this, not from re-deriving anything from `bar_path` itself.
     pub results: Option<SessionResults>,
-    /// The background auto-export job's channel handle, once `results` has
-    /// been computed (task 10.3). `None` before a run finishes and again
-    /// once every export message has been drained.
-    pub export: Option<ExportHandle>,
     /// The tracker `suggest_tracker` recommends for the current Seed (task
     /// 4.3), computed as soon as the Seed is placed so the status bar can
     /// tell the user which tracker Track will use before they click it.
@@ -326,18 +326,11 @@ pub struct AppState {
     /// starting a fresh session on the same video keeps whatever the user
     /// last configured.
     pub settings: TrackingSettings,
-    /// The active background strategy-benchmark worker (task 11.4, "Test
-    /// strategies" button), once started. `None` before it's clicked and
-    /// again once the run finishes/errors.
-    pub benchmark: Option<crate::compare::BenchmarkHandle>,
-    /// How many of the 6 strategies the active benchmark has started
-    /// (`0..=6`), for the side panel's progress display. `None` outside an
-    /// active run.
-    pub benchmark_progress: Option<(usize, usize)>,
-    /// The finished benchmark's rows, once `benchmark` reaches `Done`.
-    /// Persists after the run finishes so the results table/"Apply winner"
-    /// button stay visible until a new benchmark is started or the session
-    /// resets.
+    /// The finished benchmark's rows, once the benchmark job reaches `Done`
+    /// (a *result* that outlives `job`, same reasoning as `bar_path`/
+    /// `results`/`tracking_run`). Persists after the run finishes so the
+    /// results table/"Apply winner" button stay visible until a new
+    /// benchmark is started or the session resets.
     pub benchmark_rows: Option<Vec<crate::compare::BenchmarkRow>>,
     /// Every file the auto-export job has written this session (task 12.6),
     /// in write order. Fed by `poll_export`'s `ExportMessage::Written`
@@ -393,19 +386,15 @@ impl AppState {
             calibration: None,
             last_calibration_segment: None,
             status: String::new(),
-            tracking: None,
+            job: Job::Idle,
             tracking_run: TrackingRunState::default(),
-            paused: false,
             bar_path: None,
             results: None,
-            export: None,
             suggested_tracker: None,
             live_reps: None,
             events: VecDeque::new(),
             start_time: Instant::now(),
             settings: TrackingSettings::default(),
-            benchmark: None,
-            benchmark_progress: None,
             benchmark_rows: None,
             exported_files: Vec::new(),
             display_mode: DisplayMode::Results,
@@ -435,7 +424,7 @@ impl AppState {
     pub fn current_step(&self) -> WorkflowStep {
         if self.bar_path.is_some() {
             WorkflowStep::Review
-        } else if self.tracking.is_some() || self.tracking_run.running {
+        } else if self.is_tracking() || self.tracking_run.running {
             WorkflowStep::Track
         } else if self.seed.is_some() {
             WorkflowStep::Calibrate
@@ -453,7 +442,7 @@ impl AppState {
         if self.results.is_some() {
             return Phase::Review;
         }
-        if self.tracking.is_some() || self.tracking_run.running {
+        if self.is_tracking() || self.tracking_run.running {
             return Phase::TrackingPath {
                 frame: self.tracking_run.last_frame_index.unwrap_or(0),
                 // Last valid 0-based frame index, not the raw frame count:
@@ -627,12 +616,10 @@ impl AppState {
         self.calibration = None;
         self.last_calibration_segment = None;
         self.suggested_tracker = None;
-        self.tracking = None;
+        self.job = Job::Idle;
         self.tracking_run = TrackingRunState::default();
-        self.paused = false;
         self.bar_path = None;
         self.results = None;
-        self.export = None;
         self.live_reps = None;
         self.selected_rep = None;
         self.rep_clip = None;
@@ -659,11 +646,10 @@ impl AppState {
         }
         self.bar_path = None;
         self.results = None;
-        self.export = None;
+        self.job = Job::Idle;
         self.selected_rep = None;
         self.rep_clip = None;
         self.tracking_run = TrackingRunState::default();
-        self.paused = false;
         tracing::info!("re-track started");
         self.push_event(EventLevel::Info, "re-track started".to_string());
         self.start_tracking();
@@ -784,7 +770,7 @@ mod tests {
         assert!(state.last_calibration_segment.is_none());
         assert!(state.bar_path.is_none());
         assert!(state.results.is_none());
-        assert!(state.tracking.is_none());
+        assert!(!state.is_tracking());
         assert_eq!(state.mode, Mode::ViewOnly);
         assert_eq!(state.current_step(), WorkflowStep::PlaceSeed);
         // Same video: `video_path`/`metadata` untouched (no app restart).
@@ -818,7 +804,7 @@ mod tests {
         assert!(state.results.is_none());
         // `start_tracking` was called as part of retrack: a new run is
         // active immediately, no extra click needed.
-        assert!(state.tracking.is_some());
+        assert!(state.is_tracking());
         assert!(state.tracking_run.running);
     }
 
@@ -827,7 +813,7 @@ mod tests {
         let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
         assert!(!state.can_retrack());
         state.retrack();
-        assert!(state.tracking.is_none());
+        assert!(!state.is_tracking());
     }
 
     // -- Task 10.5: open video from UI --------------------------------------

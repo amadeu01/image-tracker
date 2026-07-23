@@ -5,7 +5,7 @@
 //! `show_path`), the Live/Results toolbar pill (`DisplayMode`), and per-rep
 //! clip export.
 
-use super::{AppState, EventLevel};
+use super::{AppState, EventLevel, Job};
 use crate::export_job;
 use crate::tracking;
 
@@ -315,10 +315,10 @@ impl AppState {
 
     /// Whether "Export all rep clips" (task 13.3) is currently available:
     /// results with at least one rep, and no export job (auto-export or a
-    /// previous clip export) still running — both share `self.export`, so
+    /// previous clip export) still running — both share `self.job`, so
     /// one at a time.
     pub fn can_export_rep_clips(&self) -> bool {
-        self.export.is_none()
+        !self.is_exporting()
             && self
                 .results
                 .as_ref()
@@ -368,13 +368,15 @@ impl AppState {
                 format!("rep clip export started ({clip_count} clips)")
             },
         );
-        self.export = Some(export_job::spawn_rep_clip_export(export_job::RepClipJob {
-            video_path: self.video_path.clone(),
-            fps_num: self.metadata.fps_num,
-            fps_den: self.metadata.fps_den,
-            bounds,
-            overlay,
-        }));
+        self.job = Job::Exporting {
+            handle: export_job::spawn_rep_clip_export(export_job::RepClipJob {
+                video_path: self.video_path.clone(),
+                fps_num: self.metadata.fps_num,
+                fps_den: self.metadata.fps_den,
+                bounds,
+                overlay,
+            }),
+        };
     }
 
     /// Sets the Live/Results pill selection (task 13.1's toolbar toggle).
@@ -670,7 +672,7 @@ mod tests {
         let mut state = state_in_review();
         assert!(state.can_export_rep_clips());
         state.start_rep_clip_export();
-        assert!(state.export.is_some(), "clip export job spawned");
+        assert!(state.is_exporting(), "clip export job spawned");
         assert!(
             !state.can_export_rep_clips(),
             "one export at a time (shared handle)"

@@ -439,7 +439,7 @@ impl eframe::App for TrackerApp {
             }
             // While a run/export/benchmark is active, keep repainting so
             // progress keeps flowing even if nothing else prompts a redraw.
-            if state.tracking.is_some() || state.export.is_some() || state.benchmark.is_some() {
+            if state.is_tracking() || state.is_exporting() || state.is_benchmarking() {
                 ctx.request_repaint();
             }
             // Rep clip loop (task 13.3): while a ▶'d clip is armed, step

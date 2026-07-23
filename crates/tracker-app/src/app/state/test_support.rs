@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use super::AppState;
+use super::{AppState, Job};
 use crate::ffprobe::VideoMetadata;
 use crate::tracking::{self, TrackingHandle, TrackingRunState};
 
@@ -150,7 +150,10 @@ pub(super) fn state_with_active_run() -> AppState {
     state.toggle_placing_seed();
     state.set_frame(3);
     state.place_seed(tracker_core::Point::new(5.0, 5.0));
-    state.tracking = Some(dummy_tracking_handle());
+    state.job = Job::Tracking {
+        handle: dummy_tracking_handle(),
+        paused: false,
+    };
     state.tracking_run = TrackingRunState::started();
     state
 }
