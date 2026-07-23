@@ -275,8 +275,33 @@ impl AppState {
     /// is armed and the frame moved — the caller (`TrackerApp::update`)
     /// schedules the next repaint one video-frame-duration later, so the
     /// loop runs at roughly video fps. `false` (no-op) when no clip is
-    /// armed or its bounds can't be resolved.
-    pub fn advance_rep_clip(&mut self) -> bool {
+    /// armed, its bounds can't be resolved, or the wanted frame hasn't
+    /// rendered yet.
+    ///
+    /// `displayed_frame` is the frame index the UI's texture currently
+    /// shows (`TrackerApp::texture_frame`) — this is the task 19.2 fix.
+    /// Before it, this method stepped `current_frame` unconditionally, once
+    /// per UI frame; each step re-armed `request_current_frame`'s
+    /// `decode.want(current_frame)` (async since 18.1: a real ffmpeg
+    /// seek+decode on a worker thread), but a clip loop can request a new
+    /// frame every ~16ms while a decode round-trip takes far longer, so by
+    /// the time a reply landed in `poll_decode` the playhead had already
+    /// moved on and `frame_index == state.current_frame` (`mod.rs`) no
+    /// longer matched — every reply was silently dropped and the texture
+    /// never updated, even though the playhead (and the path overlay drawn
+    /// from it) visibly advanced. Requiring `displayed_frame ==
+    /// self.current_frame` before stepping again means the playhead only
+    /// moves once the async decode has actually caught up and rendered,
+    /// so it free-runs no faster than the worker can supply frames —
+    /// slower playback on a slow decode, but every step is on-screen,
+    /// which is what "I hit play" needs to mean.
+    pub fn advance_rep_clip(&mut self, displayed_frame: Option<u64>) -> bool {
+        if self.rep_clip.is_none() {
+            return false;
+        }
+        if displayed_frame != Some(self.current_frame) {
+            return false; // decode hasn't caught up to the current playhead yet
+        }
         let Some(bounds) = self
             .rep_clip
             .and_then(|i| self.results.as_ref()?.rep_frame_bounds(i))
@@ -560,16 +585,56 @@ mod tests {
     #[test]
     fn advance_rep_clip_cycles_the_playhead_only_while_a_clip_is_armed() {
         let mut state = state_in_review();
-        assert!(!state.advance_rep_clip(), "no clip armed");
+        assert!(!state.advance_rep_clip(Some(0)), "no clip armed");
 
         state.toggle_rep_clip(0);
         let (start, end) = state.results.as_ref().unwrap().rep_frame_bounds(0).unwrap();
         assert_eq!(state.current_frame, start);
-        assert!(state.advance_rep_clip());
+        assert!(state.advance_rep_clip(Some(start)));
         assert_eq!(state.current_frame, start + 1);
         state.set_frame(end as i64);
-        assert!(state.advance_rep_clip());
+        assert!(state.advance_rep_clip(Some(end)));
         assert_eq!(state.current_frame, start, "wraps end -> start");
+    }
+
+    /// Task 19.2's fix: advancing the clip playhead must not outrun the
+    /// async decode worker. `advance_rep_clip` is a no-op — the playhead
+    /// stays put — whenever the displayed texture (`TrackerApp::
+    /// texture_frame`, passed in as `displayed_frame`) doesn't yet match
+    /// the current playhead, i.e. the frame the loop is about to leave
+    /// hasn't actually rendered. This is what makes advancing the clip
+    /// playhead produce (and wait for) a decode reply for the frame it is
+    /// currently on, rather than racing ahead of the worker.
+    #[test]
+    fn advance_rep_clip_waits_for_the_displayed_texture_to_match_the_playhead() {
+        let mut state = state_in_review();
+        state.toggle_rep_clip(0);
+        let (start, _end) = state.results.as_ref().unwrap().rep_frame_bounds(0).unwrap();
+        assert_eq!(state.current_frame, start);
+
+        // No texture uploaded yet at all (decode still in flight for the
+        // very first clip frame): must not advance.
+        assert!(!state.advance_rep_clip(None));
+        assert_eq!(
+            state.current_frame, start,
+            "playhead does not move ahead of decode"
+        );
+
+        // Texture showing some other, stale frame: must not advance.
+        assert!(!state.advance_rep_clip(Some(start + 5)));
+        assert_eq!(state.current_frame, start);
+
+        // Texture caught up to the current playhead: now it may advance.
+        assert!(state.advance_rep_clip(Some(start)));
+        assert_eq!(state.current_frame, start + 1);
+
+        // And immediately stalls again until the *new* frame renders.
+        assert!(!state.advance_rep_clip(Some(start)));
+        assert_eq!(
+            state.current_frame,
+            start + 1,
+            "waits for the new frame's decode"
+        );
     }
 
     #[test]
