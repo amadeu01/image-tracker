@@ -119,24 +119,61 @@ stateDiagram-v2
     [*] --> Tracking: seed placed
     Tracking --> Tracking: Found (accepted)
     Tracking --> Tracking: Miss (short gap, coast + interpolate)
-    Tracking --> NeedsReseed: gap exceeds coast_limit
+    Tracking --> NeedsReseed: gap exceeds coast_limit<br/>(bar MISSING)
     NeedsReseed --> Tracking: reseed (new position supplied)
-    Tracking --> Lost: sustained low-confidence Founds<br/>(only if lost_detection ON)
-    Tracking --> [*]: video EOF → Done(BarPath)
     NeedsReseed --> [*]: user Stop → Done(partial BarPath)
+    Tracking --> [*]: Lost — sustained low-confidence Founds<br/>(bar WRONG; only if lost_detection ON) → Done(partial)
+    Tracking --> [*]: video EOF → Done(BarPath)
 ```
 
-Key design decisions (each has scars behind it):
-- **`NeedsReseed` vs `Lost`** — a *recoverable pause* asks for a new seed and
-  continues; a *terminal* state throws the rest of the set away. The
-  distinction is the whole of PLAN 17.4b.
-- **`Lost` is default OFF.** Confidence of a *correct* track on a shiny plate
-  (~0.3–0.6) and a *false lock* (~0.4–0.46) overlap — confidence can't reliably
-  decide termination, so by default it doesn't. A genuine loss pauses via
-  `NeedsReseed` instead of dead-ending.
-- **Coasting** — a short `Miss` streak doesn't stop the run; the session
-  interpolates across the gap and keeps going, marking those points
-  `Source::Interpolated` (so velocity can exclude them honestly).
+### The two "lost the bar" outcomes — they are opposites, don't conflate them
+
+They fire on *different failures* and do *opposite things*. This is the single
+most common point of confusion (PLAN 17.4b):
+
+| | `NeedsReseed` | `Lost` |
+|---|---|---|
+| **What went wrong** | bar is **missing** (occlusion, blur, left frame) | bar is **wrong** (tracker confidently on the rack/mirror) |
+| **Tracker has a position?** | no — the search found nothing | yes — but its anchor confidence is untrustworthy |
+| **Trigger** | `miss_count > coast_limit` (a gap outlasts the coast budget) | `identity_confidence < lost_confidence` for `sustained_suspect_limit` frames in a row |
+| **What it does** | **pauses**, waits for a reseed, run continues | **terminates** the run, emits the partial `BarPath` |
+| **Ends the run?** | **no** (recoverable) | **yes** (terminal) |
+| **Default** | always on | **OFF** (opt-in) |
+
+So, answering the obvious question directly:
+
+- **`Lost` DOES terminate.** It is *not* the state that keeps asking you to
+  reseed — that's `NeedsReseed`. When Lost fires, the worker ends the run right
+  there (`tracking.rs:953`, "terminal, unlike NeedsReseed below") and hands back
+  whatever bar path it had up to that frame. No reseed prompt.
+- **`NeedsReseed` is the one that pauses and asks**, and never terminates on its
+  own — it waits on the reseed channel (a user Stop is the only thing that ends
+  it, via the same partial-`Done` path).
+
+### What "Lost is default OFF" actually means for a run
+
+Because Lost is the terminal one, a *wrong* Lost trigger is expensive — it kills
+a good run early. And confidence can't reliably tell a correct-but-dim track
+(~0.3–0.6 on a shiny plate) from a genuine false lock (~0.4–0.46) — the bands
+overlap. So Lost is **off by default**:
+
+- **Lost OFF (default):** the run *never* self-terminates on low confidence. The
+  only "lost the bar" path that can fire is `NeedsReseed` → pause + ask. The run
+  ends only on video EOF or a user Stop. This is why a genuine loss "pauses
+  instead of dead-ending."
+- **Lost ON (opt-in, for footage with reliable confidence — e.g. a real colored
+  Marker):** a sustained false lock terminates the run with partial results,
+  rather than letting it keep exporting confident-looking samples off the wrong
+  object (audit F5, "tracked but wrong").
+
+### Coasting (the third, milder failure response)
+
+- **Coasting** — a *short* `Miss` streak (still within `coast_limit`) doesn't
+  stop or pause anything. The session predicts forward along the velocity
+  estimate (`Track::coasted`, widening the search gate as it goes) and, once the
+  bar reappears, interpolates across the gap — marking those filled-in points
+  `Source::Interpolated` so velocity/exports can exclude them honestly. Coasting
+  is what a gap does *before* it grows long enough to become `NeedsReseed`.
 
 ---
 
