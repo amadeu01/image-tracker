@@ -18,7 +18,7 @@ pub fn show_status_bar(ctx: &egui::Context, state: Option<&AppState>) {
     let dark_mode = ctx.style().visuals.dark_mode;
     let border = palette::chrome_palette(dark_mode).border;
     egui::TopBottomPanel::bottom("status_bar")
-        .frame(egui::Frame::side_top_panel(&ctx.style()).stroke(egui::Stroke::new(1.0, border)))
+        .frame(egui::Frame::side_top_panel(&ctx.style()).stroke(egui::Stroke::new(1.0f32, border)))
         .show(ctx, |ui| {
             let Some(state) = state else {
                 ui.label(
@@ -192,7 +192,7 @@ fn show_rep_segments(ui: &mut egui::Ui, state: &mut AppState) {
         rect,
         4.0,
         chrome.app_bg,
-        egui::Stroke::new(1.0, chrome.border),
+        egui::Stroke::new(1.0f32, chrome.border),
     );
 
     // Segment blocks: accent fill at 0.16 alpha, selected at 0.45 + solid
@@ -214,7 +214,7 @@ fn show_rep_segments(ui: &mut egui::Ui, state: &mut AppState) {
         } else {
             chrome.accent.gamma_multiply(0.35)
         };
-        painter.rect(seg_rect, 3.0, fill, egui::Stroke::new(1.0, border));
+        painter.rect(seg_rect, 3.0, fill, egui::Stroke::new(1.0f32, border));
     }
 
     // Playhead: 2px vline at the current frame.

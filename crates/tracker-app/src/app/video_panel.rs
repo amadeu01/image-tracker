@@ -347,8 +347,8 @@ fn draw_patch_region(
         egui::Vec2::new(2.0 * half * scale_x, 2.0 * half * scale_y),
     );
     let outline = egui::Color32::from_black_alpha(180);
-    painter.rect_stroke(rect.expand(1.0), 0.0, egui::Stroke::new(1.0, outline));
-    painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, accent));
+    painter.rect_stroke(rect.expand(1.0), 0.0, egui::Stroke::new(1.0f32, outline));
+    painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0f32, accent));
 }
 
 /// Small "patch NxN px — scroll to resize" label next to the patch region

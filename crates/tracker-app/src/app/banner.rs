@@ -35,7 +35,7 @@ pub fn show(ctx: &egui::Context, state: Option<&AppState>) {
             egui::Frame::default()
                 .fill(bg)
                 .inner_margin(egui::Margin::symmetric(10.0, 5.0))
-                .stroke(egui::Stroke::new(1.0, border)),
+                .stroke(egui::Stroke::new(1.0f32, border)),
         )
         .show_separator_line(false)
         .show(ctx, |ui| {

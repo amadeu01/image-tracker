@@ -236,17 +236,17 @@ pub fn chrome_visuals(dark_mode: bool) -> eframe::egui::Visuals {
     v.faint_bg_color = p.button_bg;
     v.hyperlink_color = p.accent;
     v.selection.bg_fill = p.accent.gamma_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0, p.accent);
+    v.selection.stroke = Stroke::new(1.0f32, p.accent);
 
     let rounding = Rounding::same(4.0);
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = p.app_bg;
     w.noninteractive.weak_bg_fill = p.panel_bg;
-    w.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
+    w.noninteractive.bg_stroke = Stroke::new(1.0f32, p.border);
     w.noninteractive.rounding = rounding;
     w.inactive.bg_fill = p.button_bg;
     w.inactive.weak_bg_fill = p.button_bg;
-    w.inactive.bg_stroke = Stroke::new(1.0, p.button_border);
+    w.inactive.bg_stroke = Stroke::new(1.0f32, p.button_border);
     w.inactive.rounding = rounding;
     // Hover/active: the mock's hover is `#2e2e34` — one step lighter than
     // the resting button; derive both from `button_bg` so light mode gets
@@ -264,15 +264,15 @@ pub fn chrome_visuals(dark_mode: bool) -> eframe::egui::Visuals {
     };
     w.hovered.bg_fill = hovered_bg;
     w.hovered.weak_bg_fill = hovered_bg;
-    w.hovered.bg_stroke = Stroke::new(1.0, p.button_border);
+    w.hovered.bg_stroke = Stroke::new(1.0f32, p.button_border);
     w.hovered.rounding = rounding;
     w.active.bg_fill = active_bg;
     w.active.weak_bg_fill = active_bg;
-    w.active.bg_stroke = Stroke::new(1.0, p.accent);
+    w.active.bg_stroke = Stroke::new(1.0f32, p.accent);
     w.active.rounding = rounding;
     w.open.bg_fill = p.button_bg;
     w.open.weak_bg_fill = p.button_bg;
-    w.open.bg_stroke = Stroke::new(1.0, p.button_border);
+    w.open.bg_stroke = Stroke::new(1.0f32, p.button_border);
     w.open.rounding = rounding;
     v
 }

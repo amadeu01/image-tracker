@@ -196,3 +196,16 @@ EOF
 
 echo
 echo "== report written to $REPORT_FILE =="
+
+# Exit non-zero if any scriptable check failed, so CI (and humans) can gate on
+# this script. GUI checklist items are manual and don't affect the exit code.
+RC=0
+for s in "$CHECK1_STATUS" "$CHECK2_STATUS" "$CHECK3_STATUS" "$CHECK4_STATUS" "$CHECK5_STATUS"; do
+  [ "$s" = "PASS" ] || RC=1
+done
+if [ "$RC" -ne 0 ]; then
+  echo "== SMOKE FAILED: one or more scriptable checks did not pass =="
+else
+  echo "== SMOKE OK: all 5 scriptable checks passed =="
+fi
+exit "$RC"

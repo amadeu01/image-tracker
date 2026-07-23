@@ -43,8 +43,8 @@ jobs:
       - name: cargo build --release
         run: cargo build --workspace --release
 
-  e2e:
-    name: e2e (main only)
+  smoke:
+    name: smoke — accuracy vs ground truth (main only)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: test
@@ -62,51 +62,19 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo build --release
-        run: cargo build --workspace --release
+      # Runs scripts/smoke-report.sh: builds the release binary, then the 5
+      # scriptable checks — CLI usage, v3/v4 headless track ACCURACY graded
+      # against groundtruth/*.csv (>=80%/90% within 0.1 plate-dia), exports
+      # present, banner/log. The script exits non-zero if any check fails.
+      # Accuracy (not CSV row count) is the gate: a row count rewarded the
+      # confident-drift fabrication that once let a tracking regression pass.
+      - name: Run smoke (accuracy checks)
+        run: SMOKE_TESTER="GitHub Actions CI" SMOKE_MODEL="n/a (CI)" ./scripts/smoke-report.sh
 
-      - name: Run e2e track on sample video
-        run: |
-          cargo run --release -p tracker-app -- track \
-            "test_videos/WhatsApp Video 2026-07-08 at 22.55.51.mp4" \
-            --seed-frame 300 --seed 260,120 --out out/ci-e2e
-
-      - name: Assert CSV plausibility
-        run: |
-          set -euo pipefail
-          csv=$(find out/ci-e2e -maxdepth 1 -name '*.csv' | head -n1)
-          if [ -z "$csv" ]; then
-            echo "no CSV output found under out/ci-e2e"
-            exit 1
-          fi
-          echo "checking $csv"
-
-          # data rows = total lines minus header
-          rows=$(($(wc -l < "$csv") - 1))
-          echo "data rows: $rows"
-          if [ "$rows" -lt 2500 ]; then
-            echo "expected >= 2500 data rows, got $rows"
-            exit 1
-          fi
-
-          # count rows whose gap_flag column is true (interpolated samples)
-          header=$(head -n1 "$csv")
-          gap_col=$(echo "$header" | tr ',' '\n' | grep -n '^gap_flag$' | cut -d: -f1)
-          if [ -z "$gap_col" ]; then
-            echo "no gap_flag column found in header: $header"
-            exit 1
-          fi
-          gap_rows=$(tail -n +2 "$csv" | awk -F',' -v col="$gap_col" '$col=="true"' | wc -l)
-          echo "gap_flag=true rows: $gap_rows"
-          if [ "$gap_rows" -gt 10 ]; then
-            echo "expected <= 10 interpolated rows, got $gap_rows"
-            exit 1
-          fi
-
-      - name: Upload e2e outputs
+      - name: Upload smoke report + outputs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-e2e-out
-          path: out/ci-e2e
-          retention-days: 7
+          name: smoke-report
+          path: docs/smoke/*.md
+          retention-days: 14

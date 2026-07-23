@@ -84,7 +84,7 @@ fn section_card<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -
     let chrome = palette::chrome_palette(ui.visuals().dark_mode);
     egui::Frame::none()
         .fill(chrome.panel_bg)
-        .stroke(egui::Stroke::new(1.0, chrome.border))
+        .stroke(egui::Stroke::new(1.0f32, chrome.border))
         .rounding(6.0)
         .inner_margin(egui::Margin::same(14.0))
         .show(ui, |ui| {
@@ -438,7 +438,7 @@ fn results_section(ui: &mut egui::Ui, state: &mut AppState) {
                 let over_color = palette::loss_severity_color(dark_mode, LossSeverity::Over);
                 egui::Frame::none()
                     .fill(over_color.linear_multiply(0.15))
-                    .stroke(egui::Stroke::new(1.0, over_color))
+                    .stroke(egui::Stroke::new(1.0f32, over_color))
                     .rounding(6.0)
                     .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                     .show(ui, |ui| {
@@ -468,7 +468,7 @@ fn results_section(ui: &mut egui::Ui, state: &mut AppState) {
                 let warn_color = palette::status_color(dark_mode, StatusKind::Warn);
                 egui::Frame::none()
                     .fill(warn_color.linear_multiply(0.12))
-                    .stroke(egui::Stroke::new(1.0, warn_color))
+                    .stroke(egui::Stroke::new(1.0f32, warn_color))
                     .rounding(6.0)
                     .inner_margin(egui::Margin::symmetric(10.0, 6.0))
                     .show(ui, |ui| {
@@ -890,7 +890,7 @@ fn velocity_chart(ui: &mut egui::Ui, state: &mut AppState) {
     let mut clicked_rep: Option<usize> = None;
     egui::Frame::none()
         .fill(chrome.panel_bg)
-        .stroke(egui::Stroke::new(1.0, chrome.border))
+        .stroke(egui::Stroke::new(1.0f32, chrome.border))
         .rounding(6.0)
         .inner_margin(egui::Margin::same(10.0))
         .show(ui, |ui| {
@@ -921,7 +921,7 @@ fn velocity_chart(ui: &mut egui::Ui, state: &mut AppState) {
                 return;
             }
             let painter = ui.painter_at(rect);
-            let axis_stroke = egui::Stroke::new(1.0, chrome.border);
+            let axis_stroke = egui::Stroke::new(1.0f32, chrome.border);
             let plot_left = rect.left() + CHART_INSET_LEFT;
             let plot_right = rect.right() - CHART_INSET_RIGHT;
             let plot_top = rect.top() + CHART_INSET_TOP;
@@ -950,7 +950,7 @@ fn velocity_chart(ui: &mut egui::Ui, state: &mut AppState) {
                 let y = chart_y(rect, v, vmin, vmax);
                 painter.add(egui::Shape::dashed_line(
                     &[egui::pos2(plot_left, y), egui::pos2(plot_right, y)],
-                    egui::Stroke::new(1.0, color),
+                    egui::Stroke::new(1.0f32, color),
                     4.0,
                     4.0,
                 ));
@@ -973,7 +973,7 @@ fn velocity_chart(ui: &mut egui::Ui, state: &mut AppState) {
                 };
                 painter.add(egui::Shape::dashed_line(
                     &[p(0), p(n - 1)],
-                    egui::Stroke::new(1.0, chrome.accent.gamma_multiply(0.55)),
+                    egui::Stroke::new(1.0f32, chrome.accent.gamma_multiply(0.55)),
                     2.0,
                     3.0,
                 ));
@@ -988,7 +988,7 @@ fn velocity_chart(ui: &mut egui::Ui, state: &mut AppState) {
             for pair in dots.windows(2) {
                 painter.line_segment(
                     [pair[0], pair[1]],
-                    egui::Stroke::new(1.5, text_color.gamma_multiply(0.8)),
+                    egui::Stroke::new(1.5f32, text_color.gamma_multiply(0.8)),
                 );
             }
 
@@ -1003,7 +1003,7 @@ fn velocity_chart(ui: &mut egui::Ui, state: &mut AppState) {
                 } else {
                     CHART_DOT_R
                 };
-                painter.circle(center, r, color, egui::Stroke::new(2.0, chrome.panel_bg));
+                painter.circle(center, r, color, egui::Stroke::new(2.0f32, chrome.panel_bg));
                 // Rep-number x label (1-based, per the mock).
                 painter.text(
                     egui::pos2(center.x, plot_bottom + 14.0),
@@ -1075,7 +1075,7 @@ fn headline_card(
     let chrome = palette::chrome_palette(ui.visuals().dark_mode);
     egui::Frame::none()
         .fill(chrome.panel_bg)
-        .stroke(egui::Stroke::new(1.0, chrome.border))
+        .stroke(egui::Stroke::new(1.0f32, chrome.border))
         .rounding(6.0)
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .show(ui, |ui| {

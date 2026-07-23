@@ -17,7 +17,7 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
             egui::Frame::default()
                 .fill(chrome.toolbar_bg)
                 .inner_margin(egui::Margin::symmetric(10.0, 7.0))
-                .stroke(egui::Stroke::new(1.0, chrome.border)),
+                .stroke(egui::Stroke::new(1.0f32, chrome.border)),
         )
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
