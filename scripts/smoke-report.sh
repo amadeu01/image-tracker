@@ -13,16 +13,26 @@
 # tracking regression once passed this smoke. Seeds are the ground-truth
 # target (bar sleeve end), so a stray seed can't quietly inflate the score.
 #
-# Idempotent: re-running on the same day overwrites that day's report.
+# Per-run history: each run writes its own timestamped report
+# (YYYY-MM-DD-HHMMSS.md), so nothing is overwritten and every run — including
+# the exact commit it ran against — is preserved.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 DATE="$(date +%Y-%m-%d)"
+STAMP="$(date +%Y-%m-%d-%H%M%S)"
 REPORT_DIR="$REPO_ROOT/docs/smoke"
-REPORT_FILE="$REPORT_DIR/${DATE}.md"
+REPORT_FILE="$REPORT_DIR/${STAMP}.md"
 mkdir -p "$REPORT_DIR"
+
+# Commit the smoke ran against (marked -dirty if the tree has uncommitted
+# changes), so a report is always traceable to exact source.
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+  COMMIT="${COMMIT}-dirty"
+fi
 
 # video : seed-frame : seed (bar sleeve end = the groundtruth target) : truth : min within-0.1-plate-dia %
 V3="test_videos/WhatsApp Video 2026-07-08 at 22.55.51.mp4"
@@ -144,9 +154,10 @@ VERSION="$(cargo metadata --no-deps --format-version=1 2>/dev/null \
 VERSION="${VERSION:-unknown}"
 
 cat > "$REPORT_FILE" <<EOF
-# Smoke report — $DATE
+# Smoke report — $STAMP
 
 - Version: $VERSION
+- Commit: $COMMIT
 - Tester:
 - Platform: $(uname -s) $(uname -m)
 
