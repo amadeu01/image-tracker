@@ -152,12 +152,12 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                     // session got stuck hitting a Finish that only the
                     // running-branch below offered.
                     finish_discard_buttons(ui, state);
-                } else if state.tracking.is_some() {
+                } else if state.is_tracking() {
                     // Task 10.4: session lifecycle controls, shown while a run
                     // is active (running or user-paused) instead of the Track
                     // button — mirrors the reseed-pause branch above, which
                     // swaps Track for its own Resume.
-                    if state.paused {
+                    if state.is_paused() {
                         if ui
                             .button("Resume")
                             .on_hover_text("resume the paused tracking run")

@@ -99,6 +99,23 @@ impl BarPath {
         }
     }
 
+    /// Builds a `BarPath` directly from an already-computed slice of
+    /// `PathPoint`s (e.g. a rep's own frame-bounded segment sliced out of a
+    /// larger path's `points()`), with no gaps recorded. Used by callers
+    /// that need a `BarPath` to hand to `render_overlay`/`render_rep_bottoms`
+    /// scoped to a subset of points — those functions read `points()`/
+    /// `position_at`, not `gaps()`, so an empty gap list is a safe default
+    /// (task 19.3: burning a per-rep overlay into a rep clip, where the
+    /// trailing path must only ever show that rep's own frames).
+    pub fn from_points(points: Vec<PathPoint>, timebase: Timebase, start_frame: u64) -> Self {
+        Self {
+            timebase,
+            start_frame,
+            points,
+            gaps: Vec::new(),
+        }
+    }
+
     /// The timebase this path was built with.
     pub fn timebase(&self) -> Timebase {
         self.timebase
@@ -168,6 +185,32 @@ mod tests {
         let tb = Timebase::new(60_000, 1001).unwrap();
         let expected = 1001.0 / 60_000.0;
         assert!((tb.timestamp(1) - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn from_points_builds_a_bar_path_with_no_gaps_from_a_raw_point_slice() {
+        let tb = Timebase::new(30, 1).unwrap();
+        let points = vec![
+            PathPoint {
+                frame_index: 10,
+                t_seconds: tb.timestamp(10),
+                position: Point::new(1.0, 2.0),
+                source: Source::Tracked,
+                confidence: Some(0.9),
+            },
+            PathPoint {
+                frame_index: 11,
+                t_seconds: tb.timestamp(11),
+                position: Point::new(1.5, 2.5),
+                source: Source::Tracked,
+                confidence: Some(0.9),
+            },
+        ];
+        let path = BarPath::from_points(points.clone(), tb, 10);
+        assert_eq!(path.points(), points.as_slice());
+        assert_eq!(path.start_frame(), 10);
+        assert_eq!(path.timebase(), tb);
+        assert!(path.gaps().is_empty());
     }
 
     fn sample(frame_index: u64, x: f64, y: f64, source: Source) -> Sample {

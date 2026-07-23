@@ -17,6 +17,7 @@
 mod banner;
 mod bottom_bar;
 mod palette;
+mod results;
 mod settings_section;
 mod side_panel;
 mod state;
@@ -196,6 +197,11 @@ impl TrackerApp {
         // same pattern as the stop threshold above.
         if let Some(show) = theme::load_show_path() {
             state.show_path = show;
+        }
+        // Restore the persisted "burn overlay into rep clips" choice (task
+        // 19.3), same pattern as the two loads above.
+        if let Some(burn) = theme::load_burn_overlay_in_rep_clips() {
+            state.settings.burn_overlay_in_rep_clips = burn;
         }
         self.state = Some(state);
         self.decode = Some(decode_worker::spawn_decode_worker(decoder, 16));
@@ -433,19 +439,33 @@ impl eframe::App for TrackerApp {
             }
             // While a run/export/benchmark is active, keep repainting so
             // progress keeps flowing even if nothing else prompts a redraw.
-            if state.tracking.is_some() || state.export.is_some() || state.benchmark.is_some() {
+            if state.is_tracking() || state.is_exporting() || state.is_benchmarking() {
                 ctx.request_repaint();
             }
             // Rep clip loop (task 13.3): while a ▶'d clip is armed, step
             // the playhead one frame per UI frame and schedule the next
             // repaint one video-frame-duration out, so the loop cycles at
-            // roughly video fps through the existing seek decoder
-            // (`ensure_texture` below picks up the new `current_frame`).
-            if state.advance_rep_clip() {
-                let (num, den) = (state.metadata.fps_num.max(1), state.metadata.fps_den.max(1));
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
-                    den as f64 / num as f64,
-                ));
+            // roughly video fps through the async decode worker
+            // (`request_current_frame`/`poll_decode` below pick up the new
+            // `current_frame`). Task 19.2: `advance_rep_clip` only steps
+            // once `self.texture_frame` already matches `current_frame`,
+            // i.e. the frame it's about to leave has actually rendered —
+            // otherwise the loop outruns the async decode and every
+            // texture reply arrives for an already-stale `current_frame`,
+            // which `poll_decode` then silently drops (see that method's
+            // `frame_index == state.current_frame` check), leaving the
+            // video frame frozen under a still-advancing path overlay.
+            // While waiting on a still-in-flight decode, keep repainting
+            // so the wait doesn't stall on some unrelated input event.
+            if state.rep_clip.is_some() {
+                if state.advance_rep_clip(self.texture_frame) {
+                    let (num, den) = (state.metadata.fps_num.max(1), state.metadata.fps_den.max(1));
+                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                        den as f64 / num as f64,
+                    ));
+                } else {
+                    ctx.request_repaint();
+                }
             }
         }
         if self.poll_thumbnails(ctx) {

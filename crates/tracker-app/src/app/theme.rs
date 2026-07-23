@@ -52,6 +52,12 @@ struct AppConfig {
     /// so files written by older builds keep working unchanged.
     #[serde(default)]
     show_path: Option<bool>,
+    /// Whether "Export all rep clips" burns the per-rep overlay into each
+    /// clip (task 19.3). `None` when the user has never toggled it —
+    /// treated as "off" (`TrackingSettings::default`), so older
+    /// `settings.json` files keep parsing unchanged.
+    #[serde(default)]
+    burn_overlay_in_rep_clips: Option<bool>,
 }
 
 fn config_path() -> PathBuf {
@@ -105,6 +111,7 @@ fn load() -> AppConfig {
             dark_mode: Some(legacy.dark_mode),
             stop_threshold_pct: None,
             show_path: None,
+            burn_overlay_in_rep_clips: None,
         },
         Err(_) => AppConfig::default(),
     }
@@ -173,6 +180,22 @@ pub fn save_show_path(show: bool) {
     write(&cfg);
 }
 
+/// Loads the persisted "burn overlay into rep clips" choice (task 19.3), if
+/// the user has ever toggled it. `None` means "use
+/// `TrackingSettings::default`'s off."
+pub fn load_burn_overlay_in_rep_clips() -> Option<bool> {
+    load().burn_overlay_in_rep_clips
+}
+
+/// Persists the "burn overlay into rep clips" choice. Best-effort, same
+/// stance as `save_override`. Preserves the other persisted fields already
+/// on disk.
+pub fn save_burn_overlay_in_rep_clips(burn: bool) {
+    let mut cfg = load();
+    cfg.burn_overlay_in_rep_clips = Some(burn);
+    write(&cfg);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,12 +231,24 @@ mod tests {
             dark_mode: Some(true),
             stop_threshold_pct: Some(15.0),
             show_path: Some(false),
+            burn_overlay_in_rep_clips: Some(true),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.dark_mode, Some(true));
         assert_eq!(back.stop_threshold_pct, Some(15.0));
         assert_eq!(back.show_path, Some(false));
+        assert_eq!(back.burn_overlay_in_rep_clips, Some(true));
+    }
+
+    #[test]
+    fn missing_burn_overlay_in_rep_clips_field_parses_as_none_default_off() {
+        // A settings.json written before 19.3 has no
+        // `burn_overlay_in_rep_clips` key; it must parse (defaulting to
+        // None = "off", matching `TrackingSettings::default`), not error.
+        let back: AppConfig =
+            serde_json::from_str(r#"{"dark_mode":true,"stop_threshold_pct":15.0}"#).unwrap();
+        assert_eq!(back.burn_overlay_in_rep_clips, None);
     }
 
     #[test]

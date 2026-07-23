@@ -34,6 +34,13 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all --check
 
+      # PLAN 20.2: fails the build if a non-test .rs file body exceeds the
+      # size threshold (unless allow-listed), catching file bloat at the PR
+      # that introduces it instead of a later architecture audit. Pure line
+      # counting — no build required, kept ahead of the compile steps.
+      - name: Check file sizes
+        run: ./scripts/check-file-sizes.sh
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

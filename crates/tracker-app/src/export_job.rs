@@ -17,7 +17,7 @@ use tracker_core::{
     RepMetrics, VelocitySample,
 };
 
-use crate::overlay_export::render_overlay_video;
+use crate::overlay_export::{render_overlay_video, render_rep_clip_overlay};
 
 /// One update from the background export thread to the UI thread.
 #[derive(Debug, Clone)]
@@ -169,6 +169,27 @@ pub struct RepClipJob {
     pub fps_den: u64,
     /// Per-rep `(start_frame, end_frame)`, in rep order (index 0 = rep 1).
     pub bounds: Vec<(u64, u64)>,
+    /// Task 19.3: `Some` when the user has `burn_overlay_in_rep_clips` on
+    /// (`TrackingSettings`) — each rep clip then has its own per-rep
+    /// bar-path segment (19.1's scoping) burned in via
+    /// `render_rep_clip_overlay` instead of a plain ffmpeg stream copy.
+    /// `None` reproduces today's behavior exactly (the setting's off
+    /// default).
+    pub overlay: Option<RepClipOverlayInput>,
+}
+
+/// Everything `render_rep_clip_overlay` needs beyond a job's `bounds`: the
+/// video's pixel dimensions (the overlay renderer decodes/encodes raw
+/// frames, unlike the stream-copy path, so it needs them explicitly) and
+/// the full run's `bar_path`/`reps` to scope from.
+#[derive(Debug, Clone)]
+pub struct RepClipOverlayInput {
+    pub width: u32,
+    pub height: u32,
+    pub bar_path: BarPath,
+    /// Full rep list, in rep order (index 0 = rep 1) — parallel to
+    /// `RepClipJob::bounds`, so `reps[i]` is the `Rep` burned into clip `i`.
+    pub reps: Vec<Rep>,
 }
 
 /// Timestamp (seconds) of `frame` under the `fps_num/fps_den` timebase.
@@ -238,31 +259,47 @@ fn run_rep_clip_export(job: RepClipJob, tx: &Sender<ExportMessage>) {
     tracing::info!(
         video = %job.video_path.display(),
         clips = job.bounds.len(),
+        burn_overlay = job.overlay.is_some(),
         "rep clip export started"
     );
+    // `rep.bottom` indexes into the velocity-aligned frame table, which
+    // `render_overlay_video` builds the same way — one entry per
+    // `bar_path.points()`, same order (see its own doc comment). Built once
+    // here rather than per-clip since it's the same table for every rep.
+    let frame_indices: Vec<u64> = job
+        .overlay
+        .as_ref()
+        .map(|o| o.bar_path.points().iter().map(|p| p.frame_index).collect())
+        .unwrap_or_default();
     for (i, &bounds) in job.bounds.iter().enumerate() {
         let out_path = rep_clip_output_path(&job.video_path, i + 1);
-        let (start_s, end_s) = clip_time_range(bounds, job.fps_num, job.fps_den);
-        let args = rep_clip_ffmpeg_args(&job.video_path, &out_path, start_s, end_s);
-        let result = std::process::Command::new("ffmpeg").args(&args).output();
+        let result = match &job.overlay {
+            Some(overlay) => match overlay.reps.get(i) {
+                Some(rep) => render_rep_clip_overlay(
+                    &job.video_path,
+                    &out_path,
+                    overlay.width,
+                    overlay.height,
+                    job.fps_num,
+                    job.fps_den,
+                    &overlay.bar_path,
+                    rep,
+                    &frame_indices,
+                    bounds,
+                ),
+                None => Err(format!("no rep data for clip {}", i + 1)),
+            },
+            None => run_rep_clip_stream_copy(&job, &out_path, bounds),
+        };
         match result {
-            Ok(output) if output.status.success() => {
+            Ok(()) => {
                 tracing::info!(path = %out_path.display(), "rep clip done");
                 let _ = tx.send(ExportMessage::Written(out_path));
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let tail = stderr.lines().last().unwrap_or("unknown ffmpeg error");
-                tracing::warn!(path = %out_path.display(), error = %tail, "rep clip failed");
-                let _ = tx.send(ExportMessage::Error(format!(
-                    "failed to write {}: {tail}",
-                    out_path.display()
-                )));
             }
             Err(e) => {
                 tracing::warn!(path = %out_path.display(), error = %e, "rep clip failed");
                 let _ = tx.send(ExportMessage::Error(format!(
-                    "failed to run ffmpeg for {}: {e}",
+                    "failed to write {}: {e}",
                     out_path.display()
                 )));
             }
@@ -270,6 +307,28 @@ fn run_rep_clip_export(job: RepClipJob, tx: &Sender<ExportMessage>) {
     }
     tracing::info!(video = %job.video_path.display(), "rep clip export done");
     let _ = tx.send(ExportMessage::Done);
+}
+
+/// Today's plain-clip path (task 13.3, unchanged by 19.3): an ffmpeg
+/// input-seeked stream copy, no re-encode.
+fn run_rep_clip_stream_copy(
+    job: &RepClipJob,
+    out_path: &Path,
+    bounds: (u64, u64),
+) -> Result<(), String> {
+    let (start_s, end_s) = clip_time_range(bounds, job.fps_num, job.fps_den);
+    let args = rep_clip_ffmpeg_args(&job.video_path, out_path, start_s, end_s);
+    let output = std::process::Command::new("ffmpeg")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("failed to run ffmpeg for {}: {e}", out_path.display()))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail = stderr.lines().last().unwrap_or("unknown ffmpeg error");
+        Err(tail.to_string())
+    }
 }
 
 #[cfg(test)]

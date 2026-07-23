@@ -128,7 +128,7 @@ pub mod education {
 /// wouldn't affect it, so disabling avoids the false impression that it
 /// would).
 pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
-    let running = state.tracking.is_some();
+    let running = state.is_tracking();
     let header = if running {
         "Tracking settings (locked while running)"
     } else {
@@ -345,7 +345,7 @@ fn strategy_benchmark_section(ui: &mut egui::Ui, state: &mut AppState) {
         {
             state.start_strategy_benchmark();
         }
-        if let Some((done, total)) = state.benchmark_progress {
+        if let Some((done, total)) = state.benchmark_progress() {
             ui.weak(format!("running… {done}/{total}"));
         }
     });
