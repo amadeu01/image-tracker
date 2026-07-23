@@ -20,6 +20,7 @@ pub struct TrackingSessionConfig {
     coast_uncertainty_growth: f64,
     sustained_suspect_limit: u32,
     lost_confidence: f64,
+    lost_detection: bool,
 }
 
 impl TrackingSessionConfig {
@@ -107,6 +108,24 @@ impl TrackingSessionConfig {
     pub fn lost_confidence(&self) -> f64 {
         self.lost_confidence
     }
+
+    /// Whether confidence-based terminal `Lost` detection is active (17.4b).
+    ///
+    /// **Default off.** Measured on the project's test footage (v3/v4,
+    /// specular chrome plates): the identity-confidence bands of a *correct*
+    /// track (anchor ZNCC ~0.3-0.6, low because a smooth plate is a poor ZNCC
+    /// target) and a genuine false lock onto rack hardware (~0.40-0.46, per
+    /// the audit) **overlap** — no `lost_confidence` floor separates them, so
+    /// auto-terminating on confidence kills a 100%-accurate track (v4:
+    /// truncated a mean-3.2px track at frame 327) as readily as it stops a
+    /// real drift. A confidence signal that can't discriminate must not drive
+    /// a terminal, run-ending decision. With this off, a genuine loss still
+    /// pauses via `NeedsReseed` (reseed to continue) — the run is never
+    /// silently ended. Enable it only for footage with a real Marker /
+    /// reliable confidence (CONTEXT.md).
+    pub fn lost_detection(&self) -> bool {
+        self.lost_detection
+    }
 }
 
 /// Builder for `TrackingSessionConfig`.
@@ -118,6 +137,7 @@ pub struct TrackingSessionConfigBuilder {
     coast_uncertainty_growth: Option<f64>,
     sustained_suspect_limit: Option<u32>,
     lost_confidence: Option<f64>,
+    lost_detection: Option<bool>,
 }
 
 impl TrackingSessionConfigBuilder {
@@ -167,6 +187,13 @@ impl TrackingSessionConfigBuilder {
         self
     }
 
+    /// Enables/disables terminal `Lost` detection (17.4b). Leave unset for
+    /// the default (**off** — see `TrackingSessionConfig::lost_detection`).
+    pub fn lost_detection(mut self, enabled: bool) -> Self {
+        self.lost_detection = Some(enabled);
+        self
+    }
+
     pub fn build(self) -> TrackingSessionConfig {
         TrackingSessionConfig {
             coast_limit: self.coast_limit.unwrap_or(5),
@@ -175,6 +202,7 @@ impl TrackingSessionConfigBuilder {
             coast_uncertainty_growth: self.coast_uncertainty_growth.unwrap_or(20.0),
             sustained_suspect_limit: self.sustained_suspect_limit.unwrap_or(10),
             lost_confidence: self.lost_confidence.unwrap_or(0.45),
+            lost_detection: self.lost_detection.unwrap_or(false),
         }
     }
 }
@@ -433,7 +461,7 @@ impl<T: Tracker> TrackingSession<T> {
                 // wrong" run (audit F5), not a transient blip — give up rather
                 // than let it keep exporting confident-looking samples off the
                 // seeded object.
-                if identity_confidence < self.config.lost_confidence {
+                if self.config.lost_detection && identity_confidence < self.config.lost_confidence {
                     self.suspect_streak += 1;
                     if self.suspect_streak >= self.config.sustained_suspect_limit {
                         self.state = SessionState::Lost;
@@ -1075,6 +1103,9 @@ mod tests {
         let tracker = ScriptedTracker::new(outcomes);
         let config = TrackingSessionConfig::builder()
             .sustained_suspect_limit(sustained_suspect_limit)
+            // 17.4b Lost detection is opt-in (default off, see
+            // `lost_detection`'s doc) — these tests exercise it, so enable it.
+            .lost_detection(true)
             .build();
         TrackingSession::new(tracker, 0, Point::new(5.0, 5.0), config)
     }
@@ -1092,6 +1123,28 @@ mod tests {
             position: Point::new(x, y),
             score: 0.99,
             identity_confidence: 0.95,
+        }
+    }
+
+    #[test]
+    fn lost_detection_is_off_by_default_so_low_confidence_never_terminates() {
+        // Default config leaves `lost_detection` off (specular-plate
+        // confidence can't discriminate a good track from a false lock — see
+        // its doc): a long run of low-confidence Founds must keep Tracking,
+        // never terminate the run.
+        let tracker = ScriptedTracker::new(vec![
+            low_confidence_found(10.0, 10.0),
+            low_confidence_found(11.0, 10.0),
+            low_confidence_found(12.0, 10.0),
+            low_confidence_found(13.0, 10.0),
+            low_confidence_found(14.0, 10.0),
+        ]);
+        // default builder: sustained_suspect_limit 10, lost_detection OFF
+        let config = TrackingSessionConfig::builder().build();
+        let mut session = TrackingSession::new(tracker, 0, Point::new(5.0, 5.0), config);
+        for _ in 0..5 {
+            session.step(&blank_frame(W, H), 1.0);
+            assert_eq!(session.state(), SessionState::Tracking);
         }
     }
 

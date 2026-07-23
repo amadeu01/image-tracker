@@ -1640,6 +1640,9 @@ mod tests {
         };
         let session_config = TrackingSessionConfig::builder()
             .sustained_suspect_limit(3)
+            // 17.4b Lost detection is opt-in (default off) — this test drives
+            // the Lost path, so enable it explicitly.
+            .lost_detection(true)
             .build();
         let mut session = TrackingSession::new(tracker, 0, Point::new(1.0, 1.0), session_config);
         let (tx, rx) = mpsc::channel::<TrackingMessage>();
