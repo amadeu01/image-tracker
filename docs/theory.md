@@ -157,6 +157,82 @@ This does *not* cover non-affine appearance change (genuine rotation of a
 3D object revealing a different texture, specular highlights, occlusion) —
 that's what the dual-template design in §3 is for.
 
+### Seeing it — a worked numeric example
+
+Take a tiny 1-D "patch" of 3 luma values, `T = [10, 20, 30]`, and score the
+*same pattern* after four different appearance changes. Every candidate below
+is the identical shape — only brightness/contrast differs — so the honest
+answer we *want* is "still a perfect match". Watch which metric delivers that.
+(All numbers computed exactly; `SSD` lower = better, `NCC`/`ZNCC` higher =
+better, max `1.0`.)
+
+| Candidate `I` | change | SSD | NCC | ZNCC |
+|---------------|--------|----:|----:|-----:|
+| `[10, 20, 30]` | identical | **0.0** ✅ | **1.0000** ✅ | **1.0000** ✅ |
+| `[20, 40, 60]` | gain ×2 (`2T`) | 1400.0 ❌ | **1.0000** ✅ | **1.0000** ✅ |
+| `[50, 60, 70]` | offset +40 (`T+40`) | 4800.0 ❌ | 0.9683 ❌ | **1.0000** ✅ |
+| `[60, 80, 100]` | affine (`2T+40`) | 11000.0 ❌ | 0.9827 ❌ | **1.0000** ✅ |
+| `[45, 60, 75]` | affine (`1.5T+30`) | 4850.0 ❌ | 0.9827 ❌ | **1.0000** ✅ |
+
+Read down the columns:
+- **SSD** is nonzero the moment *anything* changes — it can't even survive a
+  gain. A brighter plate reads as "different object".
+- **NCC** survives pure gain (`2T` → still 1.0) but the offset rows drop below
+  1.0 — adding a constant brightness fools it.
+- **ZNCC** is `1.0000` on every row. Gain *and* offset, both removed. That's
+  the algebra of the previous section, now visible as a column of `1.0`s.
+
+Why ZNCC's offset rows collapse to a perfect match — the mean subtraction does
+it *before* any comparison. For `I = T + 40`:
+
+```
+T       = [10, 20, 30]      T̄ = 20   →  T − T̄ = [-10,  0, +10]
+I=T+40  = [50, 60, 70]      Ī = 60   →  I − Ī = [-10,  0, +10]   ← identical!
+```
+
+The `+40` lives entirely in the mean, so subtracting the mean deletes it. Both
+deviation vectors become the same, and their correlation is exactly 1. Gain
+does the same trick one step later: `2T` gives deviations `[-20, 0, +20]`,
+which the denominator's norm divides back out.
+
+### The three recipes, side by side
+
+Each metric is the previous one plus one normalization step. That's the whole
+story of what makes it robust:
+
+```mermaid
+graph TD
+    P["two patches: template T, candidate I"]
+
+    P --> S1["SSD: sum (T-I)^2"]
+    S1 --> S2["invariant to: NOTHING<br/>any brightness/contrast change breaks it"]
+
+    P --> N1["NCC: divide by each patch's norm<br/>sum(T*I) / sqrt(sumT^2 * sumI^2)"]
+    N1 --> N2["invariant to: GAIN only<br/>offset still breaks it"]
+
+    P --> Z1["ZNCC: subtract each mean FIRST, then divide by norm<br/>correlate (T-Tbar) with (I-Ibar)"]
+    Z1 --> Z2["invariant to: GAIN + OFFSET<br/>= any positive affine change of luma"]
+
+    classDef bad fill:#ffe3e3,stroke:#c92a2a
+    classDef mid fill:#fff3bf,stroke:#e67700
+    classDef good fill:#d3f9d8,stroke:#2b8a3e
+    class S2 bad
+    class N2 mid
+    class Z2 good
+```
+
+The two normalization knobs map one-to-one onto the two parts of a
+brightness/contrast change:
+
+| Step | Removes | Handles |
+|------|---------|---------|
+| subtract the mean (the **Z**ero-mean) | additive offset `b` | lighting getting brighter/dimmer overall |
+| divide by the norm (the **N**ormalized) | multiplicative gain `a` | contrast stretching as the plate rotates |
+
+ZNCC does both, which is exactly why a plate end-face stays a `1.0` match
+through a rep even as the lighting on it changes — the whole reason this repo
+picks it over the two cheaper options.
+
 ### Where ZNCC comes from (origins)
 
 ZNCC isn't a computer-vision invention — it's three older ideas stacked:
