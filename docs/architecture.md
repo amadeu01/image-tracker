@@ -322,34 +322,30 @@ a video file.
 From the Brooks-Lint architecture audit, 2026-07-23. Each item follows
 Symptom → Consequence → Remedy, and each has a PLAN.md task.
 
-### 🔴 `AppState` is a god object — PLAN 19.5
+### ✅ Resolved: `AppState` was a god object — PLAN 19.5, closed by 20.1
 
-`app/state.rs` is 2708 lines; `AppState` declares 27 public fields spanning
-seven unrelated concerns; `impl AppState` is 1034 lines across ~48 methods, of
-which `poll_tracking` alone is 114. *Consequence:* every new Results or live
-feature widens the same struct, so unrelated workstreams serialise on one file
-and the state machine exceeds what anyone can hold in working memory — which is
-the shape of the open 19.2 bug. *Remedy:* split by concern into
-`state/jobs.rs` (the three handle/poll pairs), `state/review.rs`
-(`SessionResults`, rep selection, clip playback) and `state/session.rs` (seed,
-calibration, frame position), keeping `AppState` as a thin composition root.
-Do it **before** the features that land in it.
+`app/state.rs` (2708 lines) is now `app/state/{mod,jobs,review,session}.rs`
+(963/734/615/369 lines, plus a 156-line shared `test_support.rs`) — split by
+concern into `state/jobs.rs` (the three
+handle/poll pairs), `state/review.rs` (`SessionResults`, rep selection, clip
+playback) and `state/session.rs` (seed, calibration, frame position), with
+`mod.rs` keeping `AppState` itself plus the cross-cutting status/banner/
+session-lifecycle methods. Pure move + re-export (call sites unchanged); see
+PLAN 20.1's Observations for the split-shape rationale.
 
-### 🟡 Divergent change in `state.rs` — PLAN 19.5
+### ✅ Resolved: divergent change in `state.rs` — PLAN 19.5, closed by 20.1
 
-The same file is edited for tracking, export, benchmarking, calibration and
-Review UX. *Consequence:* `git bisect` and code review both lose resolution
-when a benchmark regression ships in the same file region as a UI tweak.
-*Remedy:* as above — the three `poll_*` pairs are the cleanest seam because
-each already owns a distinct handle type.
+Same remedy as above: the three `poll_*` pairs (tracking/export/benchmark)
+are now three separate files, so a benchmark regression and a Review UI
+tweak no longer touch the same file region.
 
-### 🟡 `side_panel.rs` mixes three abstraction levels — PLAN 19.5
+### ✅ Resolved: `side_panel.rs` mixed three abstraction levels — PLAN 19.5, closed by 20.1
 
 1338 lines holding education copy, status sections, the rep table, a
 hand-painted velocity chart with nine layout constants, and file/event
-sections. Grown by 19.4, about to be grown by 19.3. *Remedy:* extract
-`app/results/{rep_table,velocity_chart,education}.rs`; `side_panel.rs` keeps
-only section orchestration.
+sections is now 570 lines of section orchestration; the rep table, velocity
+chart + headline cards, and education copy moved to
+`app/results/{rep_table,velocity_chart,education}.rs`.
 
 ### 🟡 Two more files past the size threshold — PLAN 19.6
 
@@ -358,16 +354,13 @@ only section orchestration.
 *Remedy:* not a refactor this milestone — a CI guardrail failing any non-test
 `.rs` body over ~800 lines, so this stops being rediscovered by audit.
 
-### 🟢 Two disproven tracker strategies still in the compare matrix — PLAN 17.6
+### ✅ Resolved: two disproven tracker strategies in the compare matrix — PLAN 17.6, closed by 20.3
 
-`color_tracker.rs` (577 lines) carries the indistinct-colour note on all four
-test videos and posts 0.27 mean fill-fraction on v3 with up to 39 reseeds;
-`circle_tracker.rs` (635 lines) graded 17 % / 0 % against the template
-tracker's 85 % / 100 %. *Consequence:* 1212 maintained lines whose current
-function is producing misleading benchmark rows — Color's deceptively low
-jitter (a blob centroid wandering smoothly) actively flatters a failing
-tracker. *Remedy:* gate Color behind a positive `suggest_tracker` result;
-keep Circle gated as an honest, documented negative result.
+`color_tracker.rs`/`circle_tracker.rs` stay (this was a gating change, not a
+deletion), but `compare.rs`'s benchmark table/JSON now marks both `[GATED]`
+with a reason and excludes them from `recommend`/`recommend_viable`'s
+candidate pool — Color when `suggest_tracker` doesn't return `Color` for the
+seed, Circle unconditionally (a documented negative result). See PLAN 20.3.
 
 ### Clean
 
