@@ -117,13 +117,13 @@ pub enum SessionState {
 ```mermaid
 stateDiagram-v2
     [*] --> Tracking: seed placed
-    Tracking --> Tracking: Found (accepted)
-    Tracking --> Tracking: Miss (short gap, coast + interpolate)
-    Tracking --> NeedsReseed: gap exceeds coast_limit<br/>(bar MISSING)
-    NeedsReseed --> Tracking: reseed (new position supplied)
-    NeedsReseed --> [*]: user Stop → Done(partial BarPath)
-    Tracking --> [*]: Lost — sustained low-confidence Founds<br/>(bar WRONG; only if lost_detection ON) → Done(partial)
-    Tracking --> [*]: video EOF → Done(BarPath)
+    Tracking --> Tracking: Found accepted
+    Tracking --> Tracking: Miss - short gap, coast + interpolate
+    Tracking --> NeedsReseed: gap exceeds coast_limit - bar MISSING
+    NeedsReseed --> Tracking: reseed - new position supplied
+    NeedsReseed --> [*]: user Stop - Done with partial BarPath
+    Tracking --> [*]: Lost - sustained low confidence, bar WRONG, opt-in
+    Tracking --> [*]: video EOF - Done with full BarPath
 ```
 
 ### The two "lost the bar" outcomes — they are opposites, don't conflate them
