@@ -21,6 +21,60 @@ use super::state::{AppState, EventLevel};
 /// the panel stays user-resizable.
 const PANEL_WIDTH: f32 = 460.0;
 
+/// Metrics education for the Results section (task 19.4), mirroring 14.2's
+/// `settings_section::education` pattern: every user-facing explanation
+/// lives here as a named const, so its prose is directly unit-testable
+/// rather than inline string literals scattered through the render code.
+/// Grounded in docs/theory.md §9 (the VBT background) — `TIP_VEL_LOSS` and
+/// `EXPLAIN_VELOCITY_LOSS` paraphrase §9.1's velocity-loss definition and
+/// §9.3's evidence review, not invented numbers. §9.3's own caveat — "20%
+/// is a defensible default, not a truth" — is why the interpretation hint
+/// is worded as a coaching cue ("often used to…"), never a verdict.
+pub mod education {
+    // -- Rep-table column header tooltips -------------------------------
+    pub const TIP_DEPTH: &str = "Vertical travel of the eccentric (descent) phase — how deep the \
+         rep went, in px (or m once calibrated).";
+    pub const TIP_PEAK_V: &str =
+        "The fastest instantaneous bar speed during the concentric (lift) \
+         phase, in px/s (or m/s once calibrated). Noisier than Mean V — a \
+         single fast sample can spike it.";
+    pub const TIP_MEAN_V: &str =
+        "Mean concentric velocity (MV): concentric displacement ÷ duration. \
+         The velocity-based-training literature's recommended default for \
+         load profiling (theory.md §9.2) — steadier than Peak V.";
+    pub const TIP_LOSS: &str =
+        "Velocity loss: this rep's Mean V vs rep 1's, as a percentage drop. \
+         Rep 1 shows \"—\" (nothing to compare it to yet).";
+    pub const TIP_TIME: &str = "This rep's eccentric-start to concentric-end time range, \
+         formatted M:SS.s from the video's frame rate.";
+
+    // -- Headline-card tooltips ------------------------------------------
+    pub const TIP_REPS: &str = "Number of reps this run detected (see the rep table below for \
+         each one's depth/velocity/loss).";
+    pub const TIP_SET_TIME: &str =
+        "Wall-clock duration of the set, from the first rep's eccentric \
+         start to the last rep's concentric end.";
+    pub const TIP_VEL_LOSS: &str = "The worst (largest) per-rep velocity loss seen this set — the \
+         same value the \"Stop set recommended\" banner and the chart's \
+         dashed threshold lines are read against. See §9.1/§9.3.";
+
+    // -- Velocity-loss interpretation hint (chart + VEL. LOSS tile) ------
+    /// Worded as guidance, not a verdict: theory.md §9.3 reviews the
+    /// evidence as directional (low VL better preserves speed/power
+    /// qualities, high VL favors hypertrophy, strength gains are largely
+    /// insensitive to threshold) and explicitly calls 20% "a defensible
+    /// default, not a truth" — so this text offers a coaching cue rather
+    /// than prescribing a number.
+    pub const EXPLAIN_VELOCITY_LOSS: &str =
+        "The dashed lines mark 10/20/30% velocity loss vs rep 1's mean \
+         concentric velocity. Lower loss (≈10-20%) tends to better \
+         preserve speed/power qualities; higher loss (>25-30%) is more \
+         associated with hypertrophy-style training; strength gains \
+         themselves are fairly insensitive to which threshold you pick. \
+         20% is a commonly used default, not a rule — see theory.md §9.3 \
+         for the evidence and its caveats.";
+}
+
 /// Card chrome for one side-panel section (task 13.7, the design's
 /// `#1f1f24` / `#2c2c31` / radius-6 / 14px-padding cards): every section
 /// (guide, status, settings, results, events) renders inside one of these
@@ -348,12 +402,18 @@ fn results_section(ui: &mut egui::Ui, state: &mut AppState) {
 
             // -- Headline cards: REPS / SET TIME / VEL. LOSS -------------
             ui.horizontal(|ui| {
-                headline_card(ui, "REPS", results.reps.len().to_string(), None);
+                headline_card(
+                    ui,
+                    "REPS",
+                    results.reps.len().to_string(),
+                    None,
+                    education::TIP_REPS,
+                );
                 let set_time = results
                     .set_duration_seconds()
                     .map(|s| format!("{s:.1}s"))
                     .unwrap_or_else(|| "—".to_string());
-                headline_card(ui, "SET TIME", set_time, None);
+                headline_card(ui, "SET TIME", set_time, None, education::TIP_SET_TIME);
                 let (loss_text, loss_color) = if max_loss.is_finite() {
                     let severity = palette::loss_severity(max_loss, threshold);
                     (
@@ -363,7 +423,13 @@ fn results_section(ui: &mut egui::Ui, state: &mut AppState) {
                 } else {
                     ("—".to_string(), None)
                 };
-                headline_card(ui, "VEL. LOSS", loss_text, loss_color);
+                headline_card(
+                    ui,
+                    "VEL. LOSS",
+                    loss_text,
+                    loss_color,
+                    education::TIP_VEL_LOSS,
+                );
             });
 
             // -- "Stop set recommended" banner ---------------------------
@@ -548,14 +614,23 @@ fn rep_table(ui: &mut egui::Ui, state: &mut AppState) {
     let weak_color = ui.visuals().weak_text_color();
     let text_color = ui.visuals().text_color();
 
-    // Header row: uppercase weak labels at the same fixed offsets.
+    // Header row: uppercase weak labels at the same fixed offsets, each
+    // hoverable for its 19.4 education tooltip. Column width for hit-testing
+    // is "to the next column's x" (last column runs to the row's right
+    // edge) — the header has no separate widget per cell, so `ui.interact`
+    // is used directly on a rect carved out of the header row.
+    let headers: [(&str, &str); 6] = [
+        ("#", "Rep number (1-based)."),
+        ("DEPTH", education::TIP_DEPTH),
+        ("PEAK V", education::TIP_PEAK_V),
+        ("MEAN V", education::TIP_MEAN_V),
+        ("LOSS", education::TIP_LOSS),
+        ("TIME", education::TIP_TIME),
+    ];
     let (header_rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 16.0), egui::Sense::hover());
     let header_painter = ui.painter_at(header_rect);
-    for (label, x) in ["#", "DEPTH", "PEAK V", "MEAN V", "LOSS", "TIME"]
-        .iter()
-        .zip(REP_COL_X)
-    {
+    for (i, ((label, tooltip), x)) in headers.iter().zip(REP_COL_X).enumerate() {
         header_painter.text(
             egui::pos2(header_rect.left() + x, header_rect.center().y),
             egui::Align2::LEFT_CENTER,
@@ -563,6 +638,17 @@ fn rep_table(ui: &mut egui::Ui, state: &mut AppState) {
             egui::FontId::monospace(9.0),
             weak_color,
         );
+        let next_x = REP_COL_X.get(i + 1).copied().unwrap_or(header_rect.width());
+        let cell_rect = egui::Rect::from_min_max(
+            egui::pos2(header_rect.left() + x, header_rect.top()),
+            egui::pos2(header_rect.left() + next_x, header_rect.bottom()),
+        );
+        ui.interact(
+            cell_rect,
+            ui.id().with(("rep_table_header", i)),
+            egui::Sense::hover(),
+        )
+        .on_hover_text(*tooltip);
     }
 
     let mut action: Option<RepTableAction> = None;
@@ -821,7 +907,8 @@ fn velocity_chart(ui: &mut egui::Ui, state: &mut AppState) {
                         egui::RichText::new("dashed: 10 / 20 / 30% loss")
                             .size(10.0)
                             .color(weak_color),
-                    );
+                    )
+                    .on_hover_text(education::EXPLAIN_VELOCITY_LOSS);
                 });
             });
             ui.add_space(4.0);
@@ -981,6 +1068,7 @@ fn headline_card(
     label: &str,
     value: String,
     value_color: Option<egui::Color32>,
+    tooltip: &str,
 ) {
     // Same chrome as `section_card` (13.7's harmonisation), tighter margin —
     // these sit nested inside the Results section card.
@@ -1007,7 +1095,9 @@ fn headline_card(
                 }
                 ui.label(text);
             });
-        });
+        })
+        .response
+        .on_hover_text(tooltip);
 }
 
 /// "Files" list (task 12.6): every export written this session, kept
@@ -1179,5 +1269,70 @@ mod tests {
         let (lo, hi) = chart_value_range(&[f64::NAN, 0.8, 0.6], &[]);
         assert!(lo < 0.6 && hi > 0.6 && hi < 1.0);
         assert_eq!(chart_value_range(&[], &[]), (0.0, 1.0));
+    }
+
+    // -- 19.4 metrics education copy ------------------------------------
+
+    use education::*;
+
+    const ALL_COPY: &[(&str, &str)] = &[
+        ("TIP_DEPTH", TIP_DEPTH),
+        ("TIP_PEAK_V", TIP_PEAK_V),
+        ("TIP_MEAN_V", TIP_MEAN_V),
+        ("TIP_LOSS", TIP_LOSS),
+        ("TIP_TIME", TIP_TIME),
+        ("TIP_REPS", TIP_REPS),
+        ("TIP_SET_TIME", TIP_SET_TIME),
+        ("TIP_VEL_LOSS", TIP_VEL_LOSS),
+        ("EXPLAIN_VELOCITY_LOSS", EXPLAIN_VELOCITY_LOSS),
+    ];
+
+    #[test]
+    fn every_education_copy_const_is_substantial_prose() {
+        for (name, text) in ALL_COPY {
+            assert!(
+                text.trim().len() >= 40,
+                "{name} should be a real explanation, got: {text:?}"
+            );
+            assert!(
+                !text.contains("  "),
+                "{name} has a doubled space (string-continuation slip): {text:?}"
+            );
+        }
+    }
+
+    /// The velocity-loss interpretation hint must cite theory.md §9.3 (the
+    /// evidence review its coaching-cue framing is grounded in) and mention
+    /// the load-bearing terms so a reader can find the depth and isn't left
+    /// guessing what the dashed lines mean.
+    #[test]
+    fn velocity_loss_hint_cites_theory_and_the_chart_lines() {
+        assert!(EXPLAIN_VELOCITY_LOSS.contains("§9.3"));
+        assert!(EXPLAIN_VELOCITY_LOSS.contains("10"));
+        assert!(EXPLAIN_VELOCITY_LOSS.contains("20"));
+        assert!(EXPLAIN_VELOCITY_LOSS.contains("30"));
+        assert!(EXPLAIN_VELOCITY_LOSS.to_lowercase().contains("default"));
+    }
+
+    /// It must read as guidance, not a verdict — theory.md §9.3's own
+    /// caveat is that 20% is a default, not a truth; the copy must not
+    /// assert loss "is bad" or otherwise prescribe.
+    #[test]
+    fn velocity_loss_hint_is_a_coaching_cue_not_a_prescription() {
+        let lower = EXPLAIN_VELOCITY_LOSS.to_lowercase();
+        assert!(!lower.contains("is bad"));
+        assert!(!lower.contains("must stop"));
+        assert!(!lower.contains("you should"));
+    }
+
+    #[test]
+    fn tip_mean_v_names_it_as_the_recommended_default() {
+        assert!(TIP_MEAN_V.contains("Mean V") || TIP_MEAN_V.contains("MV"));
+        assert!(TIP_MEAN_V.contains("§9.2"));
+    }
+
+    #[test]
+    fn tip_vel_loss_cites_theory() {
+        assert!(TIP_VEL_LOSS.contains("§9.1") || TIP_VEL_LOSS.contains("§9.3"));
     }
 }
