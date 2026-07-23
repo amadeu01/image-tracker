@@ -2,9 +2,14 @@
 
 How image-tracker is organised, why the boundaries sit where they do, and the
 rules that keep them there. Companion documents: [CONTEXT.md](../CONTEXT.md)
-(the ubiquitous language), [docs/theory.md](theory.md) (the maths and the
-sports science), [docs/adr/](adr/) (decision records),
+(the ubiquitous language), [docs/code-map.md](code-map.md) (the guided
+code-reading tour — mental model, GUI↔core boundary, the algorithm box by box,
+and an "open Y to change X" table), [docs/theory.md](theory.md) (the maths and
+the sports science), [docs/adr/](adr/) (decision records),
 [docs/gui-threading.md](gui-threading.md) (the render-loop rules).
+
+> **New to the code?** Read [docs/code-map.md](code-map.md) first — it's the
+> navigation layer. This file is the *rules*; that one is the *tour*.
 
 Last verified against the tree by the Brooks-Lint architecture audit of
 **2026-07-23** (health score 69/100). The "Known structural debt" section at

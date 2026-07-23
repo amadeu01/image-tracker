@@ -101,6 +101,12 @@ applied (and deliberately *not* applied), naming conventions that encode the
 concurrency model, and the live structural-debt list from the latest
 architecture audit.
 
+🧭 **[docs/code-map.md](docs/code-map.md)** is the guided tour for reading the
+code — the mental model, how the GUI talks to the core over a channel, the
+tracking state machine, the algorithm box by box (search → ZNCC → trust → bar
+path → velocity → reps), and an "I want to change X, open Y" navigation table.
+Start here if you're new.
+
 The reasoning behind the pipeline — decode/grayscale/matching/gap/smoothing/velocity/rep
 stages, why ZNCC and dual-template tracking, noise sources and filter theory — is
 written up in [docs/theory.md](docs/theory.md). For a per-strategy deep-dive
