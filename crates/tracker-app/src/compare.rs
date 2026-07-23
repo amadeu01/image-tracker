@@ -316,15 +316,81 @@ pub fn recommend(results: &[StrategyMetrics]) -> Option<usize> {
     Some(best)
 }
 
+/// (20.3, promoting 17.6) Whether `tracker` is presented as a viable
+/// candidate in the `compare` benchmark's table/JSON/recommendation, and why
+/// not when it isn't. Both disproven trackers from milestone 17 stay in
+/// `strategy_matrix()` -- `compare`'s whole purpose is comparing strategies
+/// explicitly, including ones a user has opted into via `--tracker`/the
+/// settings dropdown (`TrackerSelection`) -- but neither may look like a
+/// viable default: this is presentation gating, not deletion or removal of
+/// capability.
+///
+/// - `Circle` is always gated: a documented negative result (PLAN 17.5),
+///   17%/0% accuracy vs Template's 85%/100% on the graded videos. No signal
+///   in the seed/frame makes it situationally trustworthy the way Color's
+///   colour-distinctness does, so unlike Color there's no conditional case
+///   to check -- it's gated unconditionally.
+/// - `Color` is gated exactly when `suggestion` (the seed patch's
+///   `suggest_tracker` result, already computed by the caller) is not
+///   `TrackerKind::Color` -- i.e. the same "is this seed patch a real,
+///   colour-distinct Marker" signal `TrackerSelection::Auto` already defers
+///   to in `tracking.rs`. Reusing it here (rather than inventing a new
+///   threshold) is deliberate: milestone 17 framed itself as "no
+///   threshold-tuning", and `suggest_tracker`'s
+///   saturation/background-match thresholds already encode exactly the
+///   "distinct colour / real Marker" condition PLAN 20.3 asks for.
+/// - `Template`/`Auto` are never gated.
+pub fn gate_reason(tracker: TrackerSelection, suggestion: Option<TrackerKind>) -> Option<String> {
+    match tracker {
+        TrackerSelection::Circle => Some(
+            "Circle is a documented negative result (PLAN 17.5): 17%/0% accuracy vs Template's \
+             85%/100% on the graded test videos. Kept for its research value, not recommended as \
+             a default."
+                .to_string(),
+        ),
+        TrackerSelection::Color if suggestion != Some(TrackerKind::Color) => Some(
+            "seed color is not distinct from the background per suggest_tracker (would \
+             recommend Template instead); Color is not recommended for this seed."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+/// (20.3) Like `recommend`, but never picks a gated row (`gate_reason`):
+/// disproven strategies must never be recommended as if they were viable,
+/// no matter how good their raw numbers look (that's precisely Color's
+/// deceptively-smooth-jitter failure mode this task exists to close).
+/// Ties among the remaining viable rows still break the same way `recommend`
+/// does. Returns `None` when every row is gated (nothing viable to
+/// recommend), not the best of the gated rows.
+pub fn recommend_viable(rows: &[BenchmarkRow]) -> Option<usize> {
+    let viable_indices: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.gated_reason.is_none())
+        .map(|(i, _)| i)
+        .collect();
+    if viable_indices.is_empty() {
+        return None;
+    }
+    let viable_metrics: Vec<StrategyMetrics> =
+        viable_indices.iter().map(|&i| rows[i].metrics).collect();
+    recommend(&viable_metrics).map(|local| viable_indices[local])
+}
+
 /// One strategy's full run: its `FrameOutcome`s plus an optional advisory
 /// note (11.4: color strategies where the seed's color is not distinct from
 /// the background per `suggest_tracker`'s own heuristic still run -- the
-/// note just tells the reader why a low `tracked_pct` might be expected).
+/// note just tells the reader why a low `tracked_pct` might be expected)
+/// and, separately (20.3), whether/why this strategy is gated out of the
+/// benchmark's "viable candidate" set (`gate_reason`).
 #[derive(Debug, Clone)]
 pub struct StrategyRun {
     pub strategy: Strategy,
     pub outcomes: Vec<FrameOutcome>,
     pub note: Option<String>,
+    pub gated_reason: Option<String>,
 }
 
 /// Runs one strategy over `frames` frames starting at `seed_frame_index`,
@@ -355,13 +421,15 @@ pub fn run_strategy(
         .ok_or_else(|| "video ended before reaching the seed frame".to_string())?;
 
     let mut note = None;
+    let mut suggestion = None;
     if strategy.tracker == TrackerSelection::Color {
-        let suggestion = tracker_core::suggest_tracker(
+        let suggested = tracker_core::suggest_tracker(
             &seed_frame,
             seed_position,
             TrackerSuggestionConfig::default(),
         );
-        if suggestion == TrackerKind::Template {
+        suggestion = Some(suggested);
+        if suggested == TrackerKind::Template {
             note = Some(
                 "seed color is not distinct from the background per suggest_tracker \
                  (would recommend Template); running Color anyway for comparison"
@@ -369,6 +437,7 @@ pub fn run_strategy(
             );
         }
     }
+    let gated_reason = gate_reason(strategy.tracker, suggestion);
 
     let tracker_config = tracking::tracker_config(tuning.clone());
     let color_tracker_config = tracking::color_tracker_config(tuning);
@@ -434,15 +503,18 @@ pub fn run_strategy(
         strategy,
         outcomes,
         note,
+        gated_reason,
     })
 }
 
-/// One row of the finished benchmark: a strategy, its metrics, and any note.
+/// One row of the finished benchmark: a strategy, its metrics, any note, and
+/// (20.3) whether it's gated out of the "viable candidate" set and why.
 #[derive(Debug, Clone)]
 pub struct BenchmarkRow {
     pub strategy: Strategy,
     pub metrics: StrategyMetrics,
     pub note: Option<String>,
+    pub gated_reason: Option<String>,
 }
 
 /// Runs every strategy in `strategy_matrix()` over the segment and returns
@@ -480,11 +552,13 @@ pub fn run_benchmark(
                     strategy,
                     metrics: compute_metrics(&run.outcomes, coast_limit),
                     note: run.note,
+                    gated_reason: run.gated_reason,
                 },
                 Err(e) => BenchmarkRow {
                     strategy,
                     metrics: compute_metrics(&[], coast_limit),
                     note: Some(format!("strategy failed: {e}")),
+                    gated_reason: gate_reason(strategy.tracker, None),
                 },
             }
         })
@@ -504,10 +578,12 @@ fn score_unit(tracker: TrackerSelection) -> &'static str {
 }
 
 /// Renders an aligned stdout table plus a recommendation line, given the
-/// already-computed rows.
+/// already-computed rows. (20.3) Gated rows (`gate_reason`) are marked
+/// `[GATED]` in the strategy column and can never win the recommendation
+/// (`recommend_viable`) -- Color/Circle rows stay visible for comparison,
+/// but never read as an endorsed choice.
 pub fn format_table(rows: &[BenchmarkRow]) -> String {
-    let metrics: Vec<StrategyMetrics> = rows.iter().map(|r| r.metrics).collect();
-    let winner = recommend(&metrics);
+    let winner = recommend_viable(rows);
 
     let mut out = String::new();
     out.push_str(&format!(
@@ -525,33 +601,37 @@ pub fn format_table(rows: &[BenchmarkRow]) -> String {
             .map(|j| format!("{j:.2}"))
             .unwrap_or_else(|| "-".to_string());
         let marker = if winner == Some(i) { " *" } else { "" };
+        let label = if row.gated_reason.is_some() {
+            format!("[GATED] {}", row.strategy.label())
+        } else {
+            row.strategy.label()
+        };
         out.push_str(&format!(
             "{:<18} {:>9.1}% {:>7} {:>5} {:>8} {:>16} {:>10}{marker}\n",
-            row.strategy.label(),
-            m.tracked_pct,
-            m.misses,
-            m.gaps,
-            m.reseeds,
-            score,
-            jitter
+            label, m.tracked_pct, m.misses, m.gaps, m.reseeds, score, jitter
         ));
+        if let Some(reason) = &row.gated_reason {
+            out.push_str(&format!("  gated: {reason}\n"));
+        }
         if let Some(note) = &row.note {
             out.push_str(&format!("  note: {note}\n"));
         }
     }
     if let Some(w) = winner {
         out.push_str(&format!(
-            "\nrecommendation: {} (highest tracked%, tie-break: lowest jitter)\n",
+            "\nrecommendation: {} (highest tracked%, tie-break: lowest jitter, gated \
+             strategies excluded)\n",
             rows[w].strategy.label()
         ));
+    } else if !rows.is_empty() {
+        out.push_str("\nrecommendation: none (every strategy is gated)\n");
     }
     out
 }
 
 /// Machine-readable JSON export of the benchmark (11.4's `--out`).
 pub fn to_json(rows: &[BenchmarkRow]) -> String {
-    let metrics: Vec<StrategyMetrics> = rows.iter().map(|r| r.metrics).collect();
-    let winner = recommend(&metrics);
+    let winner = recommend_viable(rows);
 
     let entries: Vec<String> = rows
         .iter()
@@ -560,7 +640,8 @@ pub fn to_json(rows: &[BenchmarkRow]) -> String {
             format!(
                 "{{\"strategy\":\"{}\",\"filter\":\"{}\",\"tracker\":\"{}\",\
                  \"frames_total\":{},\"tracked_pct\":{},\"misses\":{},\"gaps\":{},\
-                 \"reseeds\":{},\"mean_score\":{},\"score_unit\":\"{}\",\"mean_jitter_px\":{},\"note\":{}}}",
+                 \"reseeds\":{},\"mean_score\":{},\"score_unit\":\"{}\",\"mean_jitter_px\":{},\"note\":{},\
+                 \"gated\":{},\"gated_reason\":{}}}",
                 row.strategy.label(),
                 row.strategy.filter.label(),
                 score_unit(row.strategy.tracker),
@@ -577,6 +658,11 @@ pub fn to_json(rows: &[BenchmarkRow]) -> String {
                     .map(|j| j.to_string())
                     .unwrap_or_else(|| "null".to_string()),
                 row.note
+                    .as_ref()
+                    .map(|n| format!("\"{}\"", n.replace('"', "'")))
+                    .unwrap_or_else(|| "null".to_string()),
+                row.gated_reason.is_some(),
+                row.gated_reason
                     .as_ref()
                     .map(|n| format!("\"{}\"", n.replace('"', "'")))
                     .unwrap_or_else(|| "null".to_string()),
@@ -658,11 +744,13 @@ pub fn spawn_benchmark(
                     strategy,
                     metrics: compute_metrics(&run.outcomes, coast_limit),
                     note: run.note,
+                    gated_reason: run.gated_reason,
                 },
                 Err(e) => BenchmarkRow {
                     strategy,
                     metrics: compute_metrics(&[], coast_limit),
                     note: Some(format!("strategy failed: {e}")),
+                    gated_reason: gate_reason(strategy.tracker, None),
                 },
             };
             rows.push(row);
@@ -931,19 +1019,20 @@ pub fn run_compare(args: CompareArgs) -> Result<(), CompareError> {
                     strategy,
                     metrics: compute_metrics(&run.outcomes, coast_limit),
                     note,
+                    gated_reason: run.gated_reason,
                 }
             }
             Err(e) => BenchmarkRow {
                 strategy,
                 metrics: compute_metrics(&[], coast_limit),
                 note: Some(format!("strategy failed: {e}")),
+                gated_reason: gate_reason(strategy.tracker, None),
             },
         };
         rows.push(row);
     }
 
-    let winner_label = recommend(&rows.iter().map(|r| r.metrics).collect::<Vec<_>>())
-        .map(|i| rows[i].strategy.label());
+    let winner_label = recommend_viable(&rows).map(|i| rows[i].strategy.label());
     tracing::info!(
         strategy_count = rows.len(),
         winner = winner_label.as_deref(),
@@ -1165,6 +1254,72 @@ mod tests {
         assert_eq!(recommend(&[]), None);
     }
 
+    // --- gate_reason / recommend_viable (20.3) ---
+
+    #[test]
+    fn circle_is_always_gated_regardless_of_suggestion() {
+        assert!(gate_reason(TrackerSelection::Circle, Some(TrackerKind::Color)).is_some());
+        assert!(gate_reason(TrackerSelection::Circle, None).is_some());
+    }
+
+    #[test]
+    fn color_is_not_gated_when_suggest_tracker_recommends_color() {
+        assert_eq!(
+            gate_reason(TrackerSelection::Color, Some(TrackerKind::Color)),
+            None
+        );
+    }
+
+    #[test]
+    fn color_is_gated_when_suggest_tracker_does_not_recommend_color() {
+        assert!(gate_reason(TrackerSelection::Color, Some(TrackerKind::Template)).is_some());
+        assert!(gate_reason(TrackerSelection::Color, None).is_some());
+    }
+
+    #[test]
+    fn template_and_auto_are_never_gated() {
+        assert_eq!(gate_reason(TrackerSelection::Template, None), None);
+        assert_eq!(gate_reason(TrackerSelection::Auto, None), None);
+    }
+
+    #[test]
+    fn recommend_viable_skips_a_gated_strategy_even_with_the_best_raw_numbers() {
+        let rows = vec![
+            row(
+                Strategy {
+                    filter: FilterKind::None,
+                    tracker: TrackerSelection::Template,
+                },
+                80.0,
+                Some(2.0),
+            ),
+            gated_row(
+                Strategy {
+                    filter: FilterKind::None,
+                    tracker: TrackerSelection::Color,
+                },
+                99.0,
+                Some(0.1),
+                "indistinct color",
+            ),
+        ];
+        assert_eq!(recommend_viable(&rows), Some(0));
+    }
+
+    #[test]
+    fn recommend_viable_is_none_when_every_row_is_gated() {
+        let rows = vec![gated_row(
+            Strategy {
+                filter: FilterKind::None,
+                tracker: TrackerSelection::Circle,
+            },
+            100.0,
+            Some(0.0),
+            "documented negative result",
+        )];
+        assert_eq!(recommend_viable(&rows), None);
+    }
+
     // --- table/JSON formatting ---
 
     fn row(strategy: Strategy, tracked_pct: f64, jitter: Option<f64>) -> BenchmarkRow {
@@ -1172,6 +1327,21 @@ mod tests {
             strategy,
             metrics: metrics(tracked_pct, jitter),
             note: None,
+            gated_reason: None,
+        }
+    }
+
+    fn gated_row(
+        strategy: Strategy,
+        tracked_pct: f64,
+        jitter: Option<f64>,
+        reason: &str,
+    ) -> BenchmarkRow {
+        BenchmarkRow {
+            strategy,
+            metrics: metrics(tracked_pct, jitter),
+            note: None,
+            gated_reason: Some(reason.to_string()),
         }
     }
 
@@ -1223,6 +1393,77 @@ mod tests {
         assert!(json.contains("\"none/template\""));
         assert!(json.contains("\"median:3/color\""));
         assert!(json.contains("\"recommendation\":\"median:3/color\""));
+    }
+
+    #[test]
+    fn format_table_marks_a_gated_row_and_never_recommends_it() {
+        let rows = vec![
+            row(
+                Strategy {
+                    filter: FilterKind::None,
+                    tracker: TrackerSelection::Template,
+                },
+                80.0,
+                Some(2.0),
+            ),
+            gated_row(
+                Strategy {
+                    filter: FilterKind::None,
+                    tracker: TrackerSelection::Color,
+                },
+                99.0,
+                Some(0.1),
+                "indistinct color",
+            ),
+        ];
+        let table = format_table(&rows);
+        assert!(table.contains("[GATED] none/color"));
+        assert!(table.contains("gated: indistinct color"));
+        assert!(table.contains("recommendation: none/template"));
+        assert!(!table.contains("recommendation: none/color"));
+    }
+
+    #[test]
+    fn format_table_says_no_recommendation_when_every_row_is_gated() {
+        let rows = vec![gated_row(
+            Strategy {
+                filter: FilterKind::None,
+                tracker: TrackerSelection::Circle,
+            },
+            100.0,
+            Some(0.0),
+            "documented negative result",
+        )];
+        let table = format_table(&rows);
+        assert!(table.contains("recommendation: none (every strategy is gated)"));
+    }
+
+    #[test]
+    fn to_json_marks_gated_rows_and_excludes_them_from_recommendation() {
+        let rows = vec![
+            row(
+                Strategy {
+                    filter: FilterKind::None,
+                    tracker: TrackerSelection::Template,
+                },
+                80.0,
+                Some(2.0),
+            ),
+            gated_row(
+                Strategy {
+                    filter: FilterKind::None,
+                    tracker: TrackerSelection::Color,
+                },
+                99.0,
+                Some(0.1),
+                "indistinct color",
+            ),
+        ];
+        let json = to_json(&rows);
+        assert!(json.contains("\"gated\":false"));
+        assert!(json.contains("\"gated\":true"));
+        assert!(json.contains("\"gated_reason\":\"indistinct color\""));
+        assert!(json.contains("\"recommendation\":\"none/template\""));
     }
 
     // --- slugs (14.1) ---
