@@ -398,6 +398,40 @@ impl SessionResults {
         let end = velocity.get(rep.concentric_end)?.frame_index;
         Some((start, end))
     }
+
+    /// The bar-path points to draw over the video (task 19.1): by default,
+    /// only `selected_rep`'s frame segment (per `rep_frame_bounds`), so
+    /// selecting a rep in the table/graph shows just that rep's line
+    /// instead of the whole-set polyline overlapping every rep into an
+    /// unreadable scribble (the user finding that motivated this task).
+    /// `show_path` (15.2's transport-row toggle) is repurposed as the
+    /// opt-in "whole set" view: when true, the full polyline is returned
+    /// regardless of selection. With no rep selected and `show_path` off,
+    /// the full path is still returned — a "no reps yet"/"nothing picked"
+    /// state must show *something* rather than a blank overlay, and that
+    /// matches the pre-19.1 behavior in the no-selection case.
+    /// `bar_path.points()` is sorted by ascending `frame_index` (one entry
+    /// per tracked/interpolated video frame), so the segment is a
+    /// contiguous sub-slice found via `partition_point` — no allocation.
+    pub fn path_points_to_draw(
+        &self,
+        selected_rep: Option<usize>,
+        show_path: bool,
+    ) -> &[tracker_core::PathPoint] {
+        let points = self.bar_path.points();
+        if show_path {
+            return points;
+        }
+        let Some(index) = selected_rep else {
+            return points;
+        };
+        let Some((start, end)) = self.rep_frame_bounds(index) else {
+            return points;
+        };
+        let lo = points.partition_point(|p| p.frame_index < start);
+        let hi = points.partition_point(|p| p.frame_index <= end);
+        &points[lo..hi]
+    }
 }
 
 /// UI/session state, independent of egui so the index-clamping logic can be
@@ -516,14 +550,17 @@ pub struct AppState {
     /// selects (and clears any clip); only ▶ arms a clip. Nothing sets this
     /// yet — 13.3 owns that.
     pub rep_clip: Option<usize>,
-    /// Whether the bar-path overlay (the Review polyline + its
-    /// current-position marker) is drawn over the video (task 15.2).
-    /// Defaults to `true`; toggled from the transport row in
+    /// Whether the bar-path overlay draws the *whole-set* polyline instead
+    /// of just `selected_rep`'s segment (task 15.2, repurposed by 19.1).
+    /// Defaults to `false` — 19.1's per-rep-by-default view, since the
+    /// whole-set polyline over several reps overlaps into an unreadable
+    /// scribble (the motivating user finding); flipping this on is the
+    /// opt-in whole-set view. Toggled from the transport row in
     /// `bottom_bar.rs` and persisted via `theme::save_show_path` /
     /// restored in `TrackerApp::load_video` (same seam as
     /// `stop_threshold_pct`, keeping `AppState::new` IO-free). The *live*
     /// tracking crosshair and the Seed marker deliberately ignore this —
-    /// lock-on feedback stays visible even with the path hidden.
+    /// lock-on feedback stays visible regardless.
     pub show_path: bool,
 }
 
@@ -556,7 +593,7 @@ impl AppState {
             display_mode: DisplayMode::Results,
             selected_rep: None,
             rep_clip: None,
-            show_path: true,
+            show_path: false,
         }
     }
 
@@ -1640,18 +1677,23 @@ mod tests {
     }
 
     #[test]
-    fn show_path_defaults_to_true() {
+    fn show_path_defaults_to_false_ie_per_rep_view_by_default() {
+        // 19.1: the whole-set polyline is opt-in; default is the per-rep
+        // segment view.
         let state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
-        assert!(state.show_path, "path overlay must be visible by default");
+        assert!(
+            !state.show_path,
+            "whole-set path overlay must be opt-in, not on by default"
+        );
     }
 
     #[test]
     fn show_path_toggles_off_and_back_on() {
         let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
         state.show_path = !state.show_path;
-        assert!(!state.show_path);
-        state.show_path = !state.show_path;
         assert!(state.show_path);
+        state.show_path = !state.show_path;
+        assert!(!state.show_path);
     }
 
     #[test]
@@ -2003,6 +2045,82 @@ mod tests {
         let results =
             SessionResults::build(tracker_core::BarPath::new(&samples, &[], tb, 0), None, 0);
         assert_eq!(results.rep_frame_bounds(0), None);
+    }
+
+    /// Two clean reps (each a descent/ascent like `one_rep_bar_path`)
+    /// separated by a short flat/idle rest — `segment_reps` needs a real
+    /// rest between reps' concentric-end and the next rep's
+    /// eccentric-start (`rep.rs`'s "Idle is free-form" gate) to avoid
+    /// folding an immediate re-descent into one continuous phase — enough
+    /// for two distinct reps to be detected, for the 19.1 path-filtering
+    /// tests.
+    fn two_rep_bar_path() -> tracker_core::BarPath {
+        let tb = tracker_core::Timebase::new(30, 1).unwrap();
+        let mut samples = Vec::new();
+        let mut frame = 0u64;
+        for _ in 0..2 {
+            for i in 0..=10u64 {
+                samples.push(sample(
+                    frame,
+                    0.0,
+                    i as f64 * 10.0,
+                    tracker_core::Source::Tracked,
+                ));
+                frame += 1;
+            }
+            for i in 11..=20u64 {
+                samples.push(sample(
+                    frame,
+                    0.0,
+                    (20 - i) as f64 * 10.0,
+                    tracker_core::Source::Tracked,
+                ));
+                frame += 1;
+            }
+            // Rest at the top (y=0) for a few frames so segment_reps sees
+            // a genuine Idle gap between reps rather than one continuous
+            // descent/ascent alternation.
+            for _ in 0..10u64 {
+                samples.push(sample(frame, 0.0, 0.0, tracker_core::Source::Tracked));
+                frame += 1;
+            }
+        }
+        tracker_core::BarPath::new(&samples, &[], tb, 0)
+    }
+
+    #[test]
+    fn path_points_to_draw_show_path_returns_the_whole_polyline() {
+        let results = SessionResults::build(two_rep_bar_path(), None, 0);
+        assert_eq!(results.reps.len(), 2, "fixture must yield two reps");
+        let all = results.bar_path.points();
+        assert_eq!(results.path_points_to_draw(Some(0), true), all);
+        assert_eq!(results.path_points_to_draw(None, true), all);
+    }
+
+    #[test]
+    fn path_points_to_draw_filters_to_the_selected_reps_frames() {
+        let results = SessionResults::build(two_rep_bar_path(), None, 0);
+        assert_eq!(results.reps.len(), 2, "fixture must yield two reps");
+        let (start, end) = results.rep_frame_bounds(1).expect("rep 1 exists");
+
+        let segment = results.path_points_to_draw(Some(1), false);
+        assert!(!segment.is_empty());
+        assert!(segment
+            .iter()
+            .all(|p| p.frame_index >= start && p.frame_index <= end));
+        assert_eq!(segment.first().unwrap().frame_index, start);
+        assert_eq!(segment.last().unwrap().frame_index, end);
+
+        // Rep 0's segment is disjoint from rep 1's.
+        let rep0 = results.path_points_to_draw(Some(0), false);
+        assert!(rep0.iter().all(|p| p.frame_index < start));
+    }
+
+    #[test]
+    fn path_points_to_draw_with_no_selection_falls_back_to_the_whole_path() {
+        let results = SessionResults::build(two_rep_bar_path(), None, 0);
+        let all = results.bar_path.points();
+        assert_eq!(results.path_points_to_draw(None, false), all);
     }
 
     #[test]

@@ -224,19 +224,19 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         // CONTEXT.md's "Gap" term is visible on the path itself, not just
         // in the Results section's quality line.
         //
-        // 15.2: the whole overlay (polyline + its white current-position
-        // crosshair) is gated on `show_path` — the transport-row toggle.
+        // 19.1: by default only the *selected rep*'s segment is drawn —
+        // the whole-set polyline over several reps overlapped into an
+        // unreadable scribble that hid the bar (user finding). 15.2's
+        // `show_path` toggle is repurposed as the opt-in "whole set" view:
+        // on, it draws the full polyline; off (default), it draws just
+        // `selected_rep`'s frames via `SessionResults::path_points_to_draw`.
         // The *live* tracking crosshair above and the Seed marker are
         // deliberately not gated: lock-on feedback stays visible even with
         // the path hidden.
-        if state.show_path {
-            if let Some(results) = &state.results {
-                draw_bar_path(
-                    ui.painter(),
-                    image_rect,
-                    tex_size,
-                    results.bar_path.points(),
-                );
+        if let Some(results) = &state.results {
+            let points = results.path_points_to_draw(state.selected_rep, state.show_path);
+            if !points.is_empty() {
+                draw_bar_path(ui.painter(), image_rect, tex_size, points);
                 if let Some(point) = results.bar_path.position_at(state.current_frame) {
                     draw_crosshair(
                         ui.painter(),

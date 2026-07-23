@@ -134,14 +134,20 @@ pub fn show_scrub_bar(ctx: &egui::Context, state: Option<&mut AppState>) {
             {
                 state.next_frame();
             }
-            // Bar-path overlay visibility toggle (task 15.2). Lives in the
+            // Bar-path overlay scope toggle (task 15.2, repurposed by
+            // 19.1). Off (default): only the selected rep's path segment
+            // is drawn over the video. On: the whole-set polyline is drawn
+            // — opt-in, since overlapping every rep's line reads as an
+            // unreadable scribble that hides the bar. Lives in the
             // transport row so it's reachable both live and in review; the
             // click persists immediately (same save-on-change stance as the
             // stop-threshold DragValue).
             let mut show = state.show_path;
             if ui
-                .toggle_value(&mut show, "👁 Path")
-                .on_hover_text("show/hide the bar path overlay on the video")
+                .toggle_value(&mut show, "👁 Full Path")
+                .on_hover_text(
+                    "off: show only the selected rep's path; on: show the whole set's path",
+                )
                 .changed()
             {
                 state.show_path = show;
