@@ -34,6 +34,12 @@ if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; th
   COMMIT="${COMMIT}-dirty"
 fi
 
+# Who/what ran this. Set SMOKE_TESTER / SMOKE_MODEL to attribute the run —
+# the run-smoke-test skill sets these for an agent run; a human run falls back
+# to the git author name and an unspecified model.
+TESTER="${SMOKE_TESTER:-$(git config user.name 2>/dev/null || echo unknown)}"
+MODEL="${SMOKE_MODEL:-n/a (human run)}"
+
 # video : seed-frame : seed (bar sleeve end = the groundtruth target) : truth : min within-0.1-plate-dia %
 V3="test_videos/WhatsApp Video 2026-07-08 at 22.55.51.mp4"
 V4="test_videos/WhatsApp Video 2026-07-08 at 22.56.32.mp4"
@@ -158,7 +164,8 @@ cat > "$REPORT_FILE" <<EOF
 
 - Version: $VERSION
 - Commit: $COMMIT
-- Tester:
+- Tester: $TESTER
+- Model: $MODEL
 - Platform: $(uname -s) $(uname -m)
 
 ## Scriptable checks (auto-filled by \`scripts/smoke-report.sh\`)
