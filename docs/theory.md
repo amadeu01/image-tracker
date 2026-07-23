@@ -195,6 +195,75 @@ deviation vectors become the same, and their correlation is exactly 1. Gain
 does the same trick one step later: `2T` gives deviations `[-20, 0, +20]`,
 which the denominator's norm divides back out.
 
+### "Is ZNCC always 1.0?" — no, and this is the important half
+
+The table above shows `1.0000` on every row **on purpose, but it only proves
+one thing**: every candidate there was the *same shape* re-lit, and a match
+metric *should* return 1 for those. It does **not** mean ZNCC always says
+"match". ZNCC returns 1.0 **only when the pattern actually matches** (up to
+brightness/contrast). Change the *shape* and it drops — all the way to −1:
+
+| Candidate `I` vs `T=[10,20,30]` | what it is | SSD | NCC | ZNCC |
+|---------------------------------|-----------|----:|----:|-----:|
+| `[12, 19, 32]` | same rising shape + noise | 9.0 | 0.9979 | **0.9853** — still clearly a match |
+| `[20, 20, 20]` | flat (no pattern at all) | 200.0 | 0.9258 | **0.0000** — uncorrelated |
+| `[30, 10, 30]` | V-shape (wrong pattern) | 500.0 | 0.8584 | **0.0000** — uncorrelated |
+| `[25, 10, 15]` | unrelated | 550.0 | 0.7804 | **−0.6547** — anti-correlated |
+| `[30, 20, 10]` | exactly reversed (`T` flipped) | 800.0 | 0.7143 | **−1.0000** — perfect opposite |
+
+Two things jump out:
+- **ZNCC uses its full range.** `+1` = same pattern, `0` = no relationship,
+  `−1` = inverted pattern. That range is what lets the tracker *reject* a wrong
+  spot — a candidate scoring 0.0 or negative isn't the bar.
+- **Look at NCC vs ZNCC on the "flat" and "reversed" rows.** NCC still reports
+  0.93 and 0.71 — *dangerously high* for patches that are nothing like `T` —
+  because without mean-subtraction the shared brightness inflates the score.
+  ZNCC correctly reports 0.0 and −1.0. This is the same failure that lets a
+  featureless bright wall fool a gain-only metric; it's why the tracker's
+  `min_score` threshold (0.5) is meaningful for ZNCC but would be near-useless
+  for NCC.
+
+So the earlier all-`1.0` column and this mixed column together are the point:
+**ZNCC is invariant to lighting (top table) *and* discriminating about shape
+(this table).** A metric that had only the first property would match
+everything; only the second would break under lighting. ZNCC has both.
+
+### A 2D example — closer to real pixels
+
+Real patches are 2D grids, not rows of 3. The math is identical — flatten the
+grid row-major and run the exact same formula — but a 3×3 makes it look like
+pixels. Template `T` is a bright blob (bright center, dim edges):
+
+```
+T (3x3 luma):          mean T̄ = 17.8
+  10  20  10
+  20  40  20
+  10  20  10
+```
+
+Score it against three candidates:
+
+```
+(a) affine re-lit  I = 2T+30      (b) an EDGE (wrong shape)     (c) blob + noise
+     50  70  50                        10  10  10                   12  18  11
+     70 110  70   ← same blob,         40  40  40  ← bright at      22  38  19  ← blob,
+     50  70  50     just brighter      80  80  80    bottom, dark      9  21  10    slightly off
+                    /higher contrast                 at top
+```
+
+| Candidate | SSD | NCC | ZNCC | verdict |
+|-----------|----:|----:|-----:|---------|
+| (a) affine re-lit | 21300.0 | 0.9794 | **1.0000** | same blob → perfect match ✅ |
+| (b) edge | 14300.0 | 0.7270 | **−0.0564** | different shape → not the bar ✅ |
+| (c) blob + noise | 20.0 | 0.9973 | **0.9883** | same blob, noisy → still a match ✅ |
+
+Same story as 1D, now in 2D: the affine re-lit blob is a perfect `1.0` despite
+every pixel changing value; the edge — which shares the *same average
+brightness* and so fools SSD/NCC less obviously — is correctly near `0` for
+ZNCC; real-world noise only nudges the score down a hair. This 3×3 is exactly
+what `metric.rs` does on the real `patch_radius`-sized patches, just with
+`(2r+1)²` pixels instead of 9.
+
 ### The three recipes, side by side
 
 Each metric is the previous one plus one normalization step. That's the whole
