@@ -51,32 +51,55 @@ See [RUNNING.md](RUNNING.md) for full run/install instructions (dev, end user, `
 ```bash
 git clone https://github.com/amadeu01/image-tracker.git
 cd image-tracker
-cargo test        # 473 workspace tests
+cargo test        # 513 workspace tests
 cargo run -p tracker-app -- path/to/video.mp4
 ```
 
 ## Architecture
 
-Cargo workspace, hexagonal-ish:
+Cargo workspace, ports-and-adapters with a light DDD core:
 
 ```
 crates/
-├── tracker-core   # pure domain — zero dependencies, fully unit-tested
-│   ├── geometry     # Point, Frame
+├── tracker-core   # pure domain — ZERO dependencies, fully unit-tested
+│   ├── geometry     # Point, Frame                      ← value objects
 │   ├── patch        # grayscale patch extraction
-│   ├── metric       # CorrelationMetric trait, ZNCC
+│   ├── metric       # CorrelationMetric trait, ZNCC     ← port
 │   ├── preprocessor # GaussianBlur/Median filters ahead of matching
-│   ├── tracker      # TemplateTracker (search window, best match, anchor veto)
+│   ├── tracker      # Tracker trait + TemplateTracker   ← port + impl
 │   ├── color        # HSV color model for the color tracker
-│   ├── session      # gap coasting, re-seed, interpolation
+│   ├── session      # TrackingSession state machine: gap coasting, reseed, Lost
 │   ├── calibration  # pixel↔metric scale from a known plate length
 │   ├── velocity     # smoothing + finite-difference kinematics
 │   ├── rep          # eccentric/concentric phase segmentation
 │   ├── accuracy     # ground-truth grading (PLAN 17.1)
 │   ├── suggest      # tracker-type suggestion from a seed patch
-│   └── bar_path     # BarPath aggregate, rational-fps Timebase
-└── tracker-app    # adapters — ffmpeg subprocess IO, egui UI, overlay, export
+│   ├── frame_source # FrameSource / VideoSink traits    ← ports
+│   └── bar_path     # BarPath AGGREGATE, rational-fps Timebase
+└── tracker-app    # adapters — ffmpeg subprocess IO, egui UI, workers, CLI
+    ├── app/         # egui presentation, one module per panel
+    ├── *_worker.rs  # dedicated threads owning a resource (decode, thumbnails)
+    ├── *_job.rs     # one-shot background work (export)
+    └── ffmpeg_*.rs  # subprocess adapters behind the core's ports
 ```
+
+**The one rule: dependencies point inward.** `tracker-core`'s
+`[dependencies]` table is empty and stays empty, so the compiler makes it
+impossible for domain code to reach for `egui`, `serde` or the filesystem.
+Everything crosses the boundary through four dependency-free traits —
+`FrameSource`, `VideoSink`, `CorrelationMetric`, `Tracker` — which is why 233
+of the workspace's tests are pure domain tests that run in 0.1 s with no
+`ffmpeg` on the `PATH`.
+
+`BarPath` is the single aggregate root, and it is the seam of the whole system:
+everything left of it is tracking, everything right of it (reps, velocities,
+overlay, CSV/JSON, the accuracy grade) is a pure function of it.
+
+📐 **[docs/architecture.md](docs/architecture.md)** has the full picture — module
+dependency graph and data-flow diagrams (Mermaid), the layer table, how DDD is
+applied (and deliberately *not* applied), naming conventions that encode the
+concurrency model, and the live structural-debt list from the latest
+architecture audit.
 
 The reasoning behind the pipeline — decode/grayscale/matching/gap/smoothing/velocity/rep
 stages, why ZNCC and dual-template tracking, noise sources and filter theory — is
@@ -90,7 +113,11 @@ velocity, which variable, loss-threshold ranges, where a phone camera sits
 among VBT instruments), see
 [theory.md §9, "The sports science behind the numbers"](docs/theory.md#9-the-sports-science-behind-the-numbers-vbt).
 
-Domain language lives in [CONTEXT.md](CONTEXT.md); architectural decisions in [docs/adr/](docs/adr/).
+Domain language lives in [CONTEXT.md](CONTEXT.md) — every term there appears
+verbatim as a Rust type, field or test name, and adding a concept means adding
+it to CONTEXT.md in the same commit. Architectural decisions are recorded in
+[docs/adr/](docs/adr/); the render-loop rules in
+[docs/gui-threading.md](docs/gui-threading.md).
 
 ### Correctness & accuracy
 
@@ -114,7 +141,8 @@ Contributions welcome! The project is built strictly test-first:
 1. Pick a `todo` task from [PLAN.md](PLAN.md) (tasks are sized S/M — anything bigger gets split first).
 2. TDD it: one failing test → minimal code to green → refactor. Tests target public behavior, never internals.
 3. No `unwrap()` outside tests. `tracker-core` stays dependency-free. GUI changes must obey the [GUI threading rules](docs/gui-threading.md) — never block the eframe `update` thread (no synchronous decode/subprocess/dialog in the render loop).
-4. Use the vocabulary from [CONTEXT.md](CONTEXT.md) in names and tests; if you introduce a term, add it there.
+4. Use the vocabulary from [CONTEXT.md](CONTEXT.md) in names and tests; if you introduce a term, add it there. Know which layer you're in — [docs/architecture.md](docs/architecture.md) §3 has the dependency rule and §5 the file/naming conventions.
+5. Changing tracking behaviour? Prove it by **grading against ground truth**, not by watching a self-reported metric improve — see [docs/architecture.md §5](docs/architecture.md#5-how-the-code-is-organised).
 5. Update your task's status row in PLAN.md in the same commit, and open a PR.
 
 Found a bug or have a video the tracker chokes on? Open an issue with the clip (or a few frames) attached.
