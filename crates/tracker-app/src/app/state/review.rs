@@ -345,16 +345,35 @@ impl AppState {
             return;
         }
         let clip_count = bounds.len();
-        tracing::info!(clips = clip_count, "rep clip export started");
+        let burn_overlay = self.settings.burn_overlay_in_rep_clips;
+        // Task 19.3: when the user has the checkbox on, each clip carries
+        // its own per-rep bar-path segment burned in — the same
+        // `bar_path`/`reps` the Results section is already built from, so
+        // the burned overlay can never disagree with what the table shows.
+        // Cloned up front (rather than after `push_event`, below) since
+        // `push_event` needs `&mut self` and `results` still borrows
+        // `self.results` immutably.
+        let overlay = burn_overlay.then(|| export_job::RepClipOverlayInput {
+            width: self.metadata.width,
+            height: self.metadata.height,
+            bar_path: results.bar_path.clone(),
+            reps: results.reps.clone(),
+        });
+        tracing::info!(clips = clip_count, burn_overlay, "rep clip export started");
         self.push_event(
             EventLevel::Info,
-            format!("rep clip export started ({clip_count} clips)"),
+            if burn_overlay {
+                format!("rep clip export started ({clip_count} clips, bar-path overlay)")
+            } else {
+                format!("rep clip export started ({clip_count} clips)")
+            },
         );
         self.export = Some(export_job::spawn_rep_clip_export(export_job::RepClipJob {
             video_path: self.video_path.clone(),
             fps_num: self.metadata.fps_num,
             fps_den: self.metadata.fps_den,
             bounds,
+            overlay,
         }));
     }
 

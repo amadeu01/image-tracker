@@ -198,6 +198,11 @@ impl TrackerApp {
         if let Some(show) = theme::load_show_path() {
             state.show_path = show;
         }
+        // Restore the persisted "burn overlay into rep clips" choice (task
+        // 19.3), same pattern as the two loads above.
+        if let Some(burn) = theme::load_burn_overlay_in_rep_clips() {
+            state.settings.burn_overlay_in_rep_clips = burn;
+        }
         self.state = Some(state);
         self.decode = Some(decode_worker::spawn_decode_worker(decoder, 16));
         self.frames.clear();

@@ -137,6 +137,17 @@ pub struct TrackingSettings {
     /// `theme::load_stop_threshold`/`save_stop_threshold`, same as the
     /// theme override — it's a user preference, not run output.
     pub stop_threshold_pct: f64,
+    /// Whether "Export all rep clips" (13.3) burns the per-rep bar-path
+    /// overlay (19.1's scoping) into each rep clip rather than writing plain
+    /// stream-copied MP4s (task 19.3). Default off — burning re-encodes via
+    /// `render_rep_clip_overlay` (slower than the plain stream copy) rather
+    /// than the instant `-c copy` cut, so it's an opt-in, not a surprise
+    /// slowdown on the existing "just cut my clips" flow. Remembered across
+    /// exports in the session and persisted the same way as the other user
+    /// preferences on this struct (`theme::load_burn_overlay_in_rep_clips`/
+    /// `save_burn_overlay_in_rep_clips`), not a one-off prompt, per the
+    /// task's "remember the choice" requirement.
+    pub burn_overlay_in_rep_clips: bool,
 }
 
 /// Default stop-set velocity-loss threshold (%, task 13.5's design spec).
@@ -172,6 +183,7 @@ impl Default for TrackingSettings {
             coast_limit: tracking::DEFAULT_COAST_LIMIT,
             reacquire_min_score: tracking::DEFAULT_REACQUIRE_MIN_SCORE,
             stop_threshold_pct: DEFAULT_STOP_THRESHOLD_PCT,
+            burn_overlay_in_rep_clips: false,
         }
     }
 }

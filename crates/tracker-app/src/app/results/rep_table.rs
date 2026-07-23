@@ -209,6 +209,26 @@ pub fn rep_table(ui: &mut egui::Ui, state: &mut AppState) {
     }
 
     ui.add_space(6.0);
+    // Task 19.3: remembered checkbox, default off — burning re-encodes
+    // (slower than the plain stream copy), so it's opt-in rather than a
+    // silent slowdown on the existing "just cut my clips" flow. Changing it
+    // persists immediately (`theme::save_burn_overlay_in_rep_clips`), same
+    // pattern as the "Full Path" toggle (15.2) and the stop threshold
+    // (13.5), so the choice survives both later exports this session and a
+    // restart.
+    if ui
+        .checkbox(
+            &mut state.settings.burn_overlay_in_rep_clips,
+            "Burn bar-path overlay into clips",
+        )
+        .on_hover_text(
+            "when on, each exported clip has its own rep's bar-path drawn in \
+             (slower — re-encodes instead of a plain stream copy)",
+        )
+        .changed()
+    {
+        crate::app::theme::save_burn_overlay_in_rep_clips(state.settings.burn_overlay_in_rep_clips);
+    }
     if ui
         .add_enabled(
             state.can_export_rep_clips(),
@@ -216,7 +236,7 @@ pub fn rep_table(ui: &mut egui::Ui, state: &mut AppState) {
         )
         .on_hover_text(
             "write one <video>.repNN.mp4 per rep next to the video \
-             (ffmpeg stream copy, in the background)",
+             (ffmpeg, in the background)",
         )
         .clicked()
     {
