@@ -157,7 +157,79 @@ This does *not* cover non-affine appearance change (genuine rotation of a
 3D object revealing a different texture, specular highlights, occlusion) —
 that's what the dual-template design in §3 is for.
 
+### Where ZNCC comes from (origins)
+
+ZNCC isn't a computer-vision invention — it's three older ideas stacked:
+
+1. **Pearson's correlation coefficient (statistics, 1890s).** ZNCC of two
+   patches is *exactly* the Pearson product-moment correlation `r` between
+   their pixel vectors: subtract each vector's mean, take the dot product,
+   divide by the product of the norms. Everything ZNCC "does" (range `[-1,1]`,
+   invariance to affine rescaling of either variable) is a property of `r`
+   that predates images entirely. If you know `r` from statistics, you already
+   know ZNCC — it's `r` applied to flattened patches.
+2. **The matched filter (signal processing, 1940s).** Cross-correlation as a
+   *detector* — slide a known template over a signal, the correlation peaks
+   where the template is present — is the matched filter, the provably optimal
+   linear detector for a known shape in additive white noise (North, 1943;
+   popularised in Turin's 1960 "An introduction to matched filters"). Template
+   matching over an image is that idea in 2-D.
+3. **Normalization for real imagery (image processing, 1970s–90s).** Plain
+   cross-correlation fails under lighting change; dividing by the local norm
+   (NCC) fixes gain, subtracting the local mean (the "zero-mean" / "Z") fixes
+   offset. Lewis's 1995 "Fast Normalized Cross-Correlation" is the standard
+   modern write-up and the basis for how it's computed efficiently.
+
+So the lineage is **Pearson `r` → matched filter → mean-and-norm normalization
+for photographs.** That's why it shows up under different names across fields:
+`TM_CCOEFF_NORMED` in OpenCV, "ZNCC" in stereo/digital-image-correlation,
+"Pearson correlation" in statistics — same formula.
+
+### The `Zncc` code, line by line
+
+`metric.rs`'s `Zncc::score(a, b)` is the formula above, transcribed directly:
+
+```rust
+if a.side() != b.side() { return None; }        // undefined for mismatched sizes → None, not a lie
+let (av, bv) = (a.values(), b.values());         // flatten both patches to luma vectors
+let n = av.len() as f64;
+if n == 0.0 { return Some(0.0); }                // empty patch guard
+
+let mean_a = av.iter().map(|&v| v as f64).sum::<f64>() / n;   // T̄  — the "zero-mean" step…
+let mean_b = bv.iter().map(|&v| v as f64).sum::<f64>() / n;   // Ī  — …removes brightness offset b
+
+let (mut num, mut var_a, mut var_b) = (0.0, 0.0, 0.0);
+for i in 0..av.len() {
+    let da = av[i] as f64 - mean_a;              // T(i) − T̄
+    let db = bv[i] as f64 - mean_b;              // I(i) − Ī
+    num   += da * db;                            // Σ (T−T̄)(I−Ī)   — the correlation numerator
+    var_a += da * da;                            // Σ (T−T̄)²
+    var_b += db * db;                            // Σ (I−Ī)²
+}
+
+let denom = (var_a * var_b).sqrt();              // sqrt(Σ(T−T̄)² · Σ(I−Ī)²) — the "normalized" step
+if denom == 0.0 { return Some(0.0); }            // a flat patch has zero variance → define as 0.0, never NaN
+Some(num / denom)                                // Pearson r ∈ [-1, 1]
+```
+
+Design choices worth noting:
+- **Single pass for the sums of products, two passes overall** (means first,
+  then deviations). Not the integral-image fast path from Lewis 1995 — the
+  search window here is small (a few hundred candidates), so the simple form
+  is clearer and fast enough; the optimisation matters when correlating over a
+  whole image.
+- **Total functions.** Every degenerate input has a defined answer
+  (`None` for size mismatch, `0.0` for empty or zero-variance) — no panics, no
+  `NaN` leaking into the tracker's `best`-score comparison. Tests:
+  `zncc_of_patch_with_itself_is_one`, `zncc_of_constant_patch_is_zero_not_nan`,
+  `zncc_is_invariant_to_brightness_and_contrast_change`.
+- **Operates on preprocessed luma**, not raw RGB — the patch has already been
+  grayscaled and (optionally) blurred through the same-space chain (§5.4), so
+  `values()` is a single channel.
+
 ### References
+
+**Articles / papers**
 
 - J. P. Lewis, ["Fast Normalized Cross-Correlation"](https://scribblethink.org/Work/nvisionInterface/nip.pdf),
   Vision Interface, 1995, pp. 120–123. The standard reference for computing
@@ -180,6 +252,36 @@ that's what the dual-template design in §3 is for.
   sits among feature-based and transform-domain registration methods.
   (Verified via ACM Digital Library and a hosted PDF at
   [sci.utah.edu](https://www.sci.utah.edu/~gerig/CS6640-F2010/p325-brown.pdf).)
+
+**Textbooks — to go deeper**
+
+- R. Szeliski, *Computer Vision: Algorithms and Applications*, 2nd ed.,
+  Springer, 2022 — the section on translational alignment / area-based
+  matching covers SSD, NCC and normalized correlation as image-alignment
+  criteria (the exact context this repo uses them in). Freely available from
+  the author: [szeliski.org/Book](https://szeliski.org/Book/). **Best single
+  starting point** if you read one thing.
+- R. C. Gonzalez & R. E. Woods, *Digital Image Processing*, 4th ed.,
+  Pearson, 2018 — the object-recognition / matching-by-correlation material
+  derives the normalized correlation coefficient and its brightness/contrast
+  invariance from first principles; good if you want the DSP-flavoured
+  treatment.
+- D. Forsyth & J. Ponce, *Computer Vision: A Modern Approach*, 2nd ed.,
+  Pearson, 2011 — filters and correlation as template detection; situates
+  correlation matching against feature-based methods.
+- G. Bradski & A. Kaehler, *Learning OpenCV*, O'Reilly — the practical
+  counterpart: OpenCV's `matchTemplate` with `TM_CCOEFF_NORMED` **is** ZNCC.
+  Useful to connect this repo's `metric.rs` to the library most people meet
+  the method through.
+
+**Connecting the names:** OpenCV `TM_CCOEFF_NORMED` = ZNCC = Pearson `r` over
+patch pixels = the "zero-mean normalized" row of the SSD/NCC/ZNCC table above.
+If a source uses any of those names, it's the same formula in `metric.rs`.
+
+For the tracking-specific deep-dive (how ZNCC is used inside
+`TemplateTracker::step`, the anchor/adaptive dual template, and a worked
+numeric example) see [§7.1 Template tracking (ZNCC)](#71-template-tracking-zncc).
+For the code-navigation view see [docs/code-map.md §6.1](code-map.md).
 
 ## 3. Seed → template ("pinpointing")
 

@@ -399,6 +399,11 @@ to count as `Found` at all.
 chrome rack upright scores high too. That's what the next two signals exist to
 catch.
 
+**Go deeper:** [theory.md §2](theory.md#2-template-matching-theory) has the full
+ZNCC treatment — SSD vs NCC vs ZNCC, the affine-invariance proof, where it comes
+from (Pearson `r` → matched filter → normalized correlation), a line-by-line
+walkthrough of this same code, and textbook/article references.
+
 ---
 
 #### (2) anchor veto — "is it still the *original* seed, not just last frame?"
