@@ -347,12 +347,15 @@ sections is now 570 lines of section orchestration; the rep table, velocity
 chart + headline cards, and education copy moved to
 `app/results/{rep_table,velocity_chart,education}.rs`.
 
-### 🟡 Two more files past the size threshold — PLAN 19.6
+### ✅ Resolved: two more files past the size threshold — PLAN 19.6, guardrail landed 20.2
 
-`tracking.rs` (2043 lines) and `compare.rs` (1399) are on the same trajectory
-`state.rs` took; the audit that flagged `app.rs` at 872 lines was right early.
-*Remedy:* not a refactor this milestone — a CI guardrail failing any non-test
-`.rs` body over ~800 lines, so this stops being rediscovered by audit.
+`tracking.rs` (2043 lines, 1076-line body) and `compare.rs` (1640 lines,
+1066-line body) are on the same trajectory `state.rs` took; the audit that
+flagged `app.rs` at 872 lines was right early. Rather than refactor two
+stable, well-tested files this milestone, `scripts/check-file-sizes.sh` now
+fails CI on any non-test `.rs` body over 800 lines, with these two as an
+explicit, commented allow-list entry — so this stops being rediscovered by a
+manual audit and instead gets caught at the PR that introduces new bloat.
 
 ### ✅ Resolved: two disproven tracker strategies in the compare matrix — PLAN 17.6, closed by 20.3
 
