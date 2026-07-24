@@ -1493,10 +1493,17 @@ never assumed to help.
 
 [Ncorr][ncorr] is an open-source 2-D **subset-based DIC** package from
 experimental mechanics. DIC measures how a *material* deforms by tracking a
-speckle pattern between a **reference** image and a **deformed** image. It is
-worth understanding because its core matching step is *the same idea we use*,
-and its more advanced stages are exactly the things we deliberately **don't**
-do — which is itself informative.
+speckle pattern between a **reference** image and a **deformed** image.
+
+> **Read this first, so the rest lands right: we _use_ DIC — its matching
+> core — and skip its deformation/strain back half.** DIC-the-paper is a
+> *pipeline*, and only step 2 below (the ZNCC/NCC match) is the "compare two
+> images" part. That step *is* our tracker (`tracker.rs` + `metric.rs`). Steps
+> 3–6 (sub-pixel refinement, subset warps, full-field propagation, strain) are
+> a different problem — how a material *deforms* — and those are what we
+> deliberately don't do, not DIC as a whole. Same matching primitive, opposite
+> ends of the problem: DIC asks *"how did this material stretch?"*, we ask
+> *"where did this rigid object go over time?"* (see §10.7).
 
 DIC's pipeline, from the paper (equations and figure numbers cited so you can
 follow along in the PDF):
@@ -1593,3 +1600,128 @@ A. Antoniou, "Ncorr: Open-Source 2D Digital Image Correlation Matlab Software,"
 doi:[10.1007/s11340-015-0009-1](https://doi.org/10.1007/s11340-015-0009-1).
 
 [ncorr]: https://www.ncorr.com/index.php/dic-algorithms "Ncorr: Open-Source 2D DIC (Blaber et al., Exp. Mech. 2015)"
+
+## 11. The motion model — separating WHERE-to-look from WHAT-it-looks-like
+
+Two of the terse rows in the DIC table (§10.6) and the decision ledger
+([code-map §10](code-map.md#10-why-this-and-not-that--the-decision-ledger))
+carry more than their one line lets on:
+
+> - *How the search is seeded → Motion model's constant-velocity prediction (`motion.rs`)*
+> - *Subset deformation → No — translation only; appearance change handled by the adaptive template instead*
+
+Both are really one design idea: **the tracker splits "where did the bar go?"
+into two independent questions, and answers them with two different mechanisms.**
+
+| Question | Answered by | Lives in |
+|---|---|---|
+| **WHERE** should I look this frame? | the motion model (a moving guess) | `motion.rs` (`Track`) |
+| **WHAT** does the bar look like right now? | ZNCC vs the dual template (anchor + adaptive) | `metric.rs` + `tracker.rs` (§2, §3) |
+
+Keeping them separate is why a *cheap* tracker works: the motion model narrows
+*where* to search to a tiny window, and inside that window the templates decide
+*which pixel* is the bar. Neither has to do the other's job.
+
+> **ELI5.** Two helpers. One says *"the bar was falling, so look a bit lower
+> than last time"* — that's the guess of **where**. The other holds the little
+> photo of the sticker and says *"yes, that's the one"* — that's **what**. The
+> first never looks at the picture; the second never thinks about motion.
+
+### 11.1 WHERE: the constant-velocity prediction
+
+`Track` (`motion.rs`) is deliberately tiny — three numbers: `position`,
+`velocity` (px/**second**, so it composes with `dt` at any frame rate), and a
+single scalar `uncertainty`. It is **not a Kalman filter** (PLAN 17.2):
+`uncertainty` is a growing radius, not a covariance matrix. Four operations:
+
+```rust
+predicted(dt)  -> position + velocity*dt     // the guess the search centers on
+observed(p,dt) -> velocity = (p - position)/dt;  uncertainty = 0   // a real hit
+coasted(dt,g)  -> position = predicted(dt);  uncertainty += g*dt   // a miss: coast + widen
+new(p)         -> velocity = 0;  uncertainty = 0                    // seed / reseed
+```
+
+Three decisions worth understanding:
+
+1. **Center the search on `predicted()`, not the last position (audit F1).**
+   A bar at peak descent moves tens of px/frame. Centering the window on where
+   it *was* makes the window lag a fast bar — the true match creeps toward the
+   window edge and eventually falls out. Centering on `position + velocity·dt`
+   keeps the plate near the middle of the window even at full speed. It's the
+   same "start from a cheap prediction" trick as RG-DIC's neighbour-guess
+   (§10.6), applied across *time* instead of *space*.
+2. **On a `Miss`, coast forward — don't freeze (audit F1).** `coasted` moves
+   the predicted position *along the velocity* and grows `uncertainty` by
+   `growth_per_second·dt`. So during a short occlusion ([Gap](../CONTEXT.md#gap))
+   the search keeps gliding the way the bar was going, and the acceptance gate
+   opens wider the longer it's blind — then snaps back to zero uncertainty on
+   the next real `observed()`. This is what lets a [Gap](../CONTEXT.md#gap) be
+   coasted-and-interpolated instead of instantly lost.
+3. **The acceptance gate is a *velocity* reachability bound, not
+   acceleration-from-rest.** `gate_radius = max_velocity·dt + uncertainty`
+   (`max_velocity` default 3000 px/s) — the farthest a loaded bar could travel
+   in one frame, plus coast slack. A winning candidate outside that radius is
+   rejected as a *teleport* (a lock jumping onto rack hardware) no matter how
+   high its ZNCC. Why velocity and not acceleration: a fresh seed has **zero**
+   estimated velocity (velocity is only derived *after* the first accepted hit),
+   so an acceleration-from-rest gate (`½·a·dt²` off a stationary prediction)
+   would round to ~0 px and reject the bar's very first real motion — the
+   "frame-25 false-loss" regression this design replaced. A reachability bound
+   needs no prior velocity to bootstrap.
+
+```mermaid
+graph TD
+    Prev["Track: position + velocity + uncertainty"]
+    Prev -->|"predicted(dt) = pos + vel*dt"| Center["search window CENTER<br/>(where to look this frame)"]
+    Center --> Search["ZNCC arg-max in +/- search_radius box<br/>(what it looks like: metric.rs + templates)"]
+    Search -->|"best within gate_radius, score >= min_score"| Hit["Found -> observed(p,dt)<br/>velocity re-derived, uncertainty = 0"]
+    Search -->|"miss, or teleport beyond gate"| MissN["Miss -> coasted(dt,g)<br/>glide along velocity, uncertainty += g*dt"]
+    Hit --> Prev
+    MissN --> Prev
+    classDef where fill:#e7f5ff,stroke:#1971c2
+    classDef what fill:#fff3bf,stroke:#e67700
+    class Center,Prev where
+    class Search what
+```
+
+### 11.2 WHAT: translation only — appearance change is the template's job
+
+The motion model only ever moves a *point* — it predicts a translated
+`(x, y)`. It has **no notion of the bar's appearance changing**: no rotation
+angle, no scale, no shear, no per-pixel warp. That is the "translation only"
+in the DIC table.
+
+This is exactly where image-tracker and DIC diverge (§10.6). DIC's IC-GN fits a
+6-parameter warp per subset — `u, v` **plus** the four gradients
+`∂u/∂x, ∂u/∂y, ∂v/∂x, ∂v/∂y` — because a *deforming material* changes shape,
+and DIC must model that shape change to keep correlating and to compute strain.
+
+A barbell plate does change appearance through a rep — it **rotates**, catches
+**specular highlights**, dims and brightens. But it is **rigid**: it does not
+*deform*. So instead of solving for a warp every frame, image-tracker handles
+appearance change the cheap way — with the **adaptive template** (§3):
+
+- **Lighting/contrast change** → handled for free by [ZNCC](#2-template-matching-theory)'s
+  affine invariance (§2). No model update needed at all.
+- **Gradual rotation / new texture** → the **adaptive** template refreshes from
+  the winning patch whenever the score clears `update_threshold` (0.7), so the
+  reference keeps up with the plate's slowly-changing look.
+- **Never drifting onto the wrong object** → the **anchor** template (the
+  original seed, never updated) vetoes any candidate it no longer recognizes,
+  so the adaptive copy can't ratchet onto the rack (the
+  [drift-ratchet](code-map.md#2-anchor-veto--is-it-still-the-original-seed-not-just-last-frame)).
+
+So the division of labour is clean:
+
+| Change in the bar | DIC's answer | image-tracker's answer |
+|---|---|---|
+| **Position** (it moved) | solve `u, v` | motion model translates the search window (§11.1) |
+| **Brightness / contrast** | (normalized correlation) | ZNCC invariance — nothing to do (§2) |
+| **Rotation / gradual new look** | solve warp gradients | adaptive template refresh (§3) |
+| **Genuine deformation (stretch/shear)** | solve full warp + strain | **N/A — a plate is rigid; we never need this** |
+
+The honest one-liner: **we never fit a warp because the thing we track doesn't
+deform. We only ever need to *translate* a search window (motion model) and
+*recognize* a rigid object whose lighting and viewing angle drift (dual
+template) — two cheap mechanisms in place of DIC's one expensive per-frame
+optimization.**
