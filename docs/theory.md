@@ -220,7 +220,7 @@ Two things jump out:
   because without mean-subtraction the shared brightness inflates the score.
   ZNCC correctly reports 0.0 and −1.0. This is the same failure that lets a
   featureless bright wall fool a gain-only metric; it's why the tracker's
-  `min_score` threshold (0.5) is meaningful for ZNCC but would be near-useless
+  `min_score` threshold (0.4) is meaningful for ZNCC but would be near-useless
   for NCC.
 
 So the earlier all-`1.0` column and this mixed column together are the point:
@@ -1327,3 +1327,266 @@ acceleration, should be read as indicative only.
   and re-rack motion is not reported as a rep, which would corrupt the
   rep-1 baseline every VL percentage is measured against.
 - Milestone 13.5 — stop-set threshold UI.
+
+## 10. How we compare frames — and how that relates to Digital Image Correlation (DIC)
+
+This section answers a specific set of questions about the *mechanics* of
+comparing one frame to the next: do we go pixel-by-pixel, do we subtract one
+image from another, how do we decide the bar moved and where it moved to, do we
+always look at the same place, and what happens when the camera shakes. It
+answers them twice — once in plain language, once in engineering terms — and
+then places our method next to **Digital Image Correlation (DIC)**, the
+academic technique the [Ncorr paper][ncorr] documents, because DIC is the
+closest well-studied relative of what we do and the comparison is clarifying.
+
+### 10.0 ELI5 — how the computer "finds the bar" again in the next photo
+
+> **Imagine a "spot the sticker" game.** You point at a sticker on the barbell
+> in one photo. The computer cuts out a tiny square picture *of just that
+> sticker* — call it the **cutout**. In the next photo, the computer doesn't
+> stare at the whole picture. It guesses roughly where the sticker went (the
+> bar was moving down, so look a little lower), then it slides the cutout
+> around that small area, one step at a time, and at every step asks: *"how
+> much does what's under the cutout look like my sticker?"* It keeps the single
+> spot that looks most like it. That winning spot is where the bar is now.
+>
+> Two clever bits: (1) it doesn't care if the gym lights got brighter — it
+> compares *patterns*, not raw brightness (that's [ZNCC](#2-template-matching-theory),
+> §2). (2) it keeps *two* cutouts: the original one you pointed at (so it can
+> never wander onto the wrong thing forever) and a slowly-updated one (so it
+> keeps up as the plate rotates). See the [Seed](../CONTEXT.md#seed) and
+> [Marker](../CONTEXT.md#marker) terms.
+
+Everything below is that paragraph, made precise.
+
+### 10.1 Do we compare pixel-by-pixel? Do we subtract one frame from another?
+
+**Pixel-by-pixel: yes, within a small patch — but as a *correlation*, not a
+difference.** The unit of comparison is never a whole frame. It is a
+`(2·patch_radius+1)²` square of luma values — the **patch** — extracted around a
+candidate point (`extract_patch`, `patch.rs`, §1). Two patches of equal size
+are compared pixel-for-pixel by [ZNCC](#2-template-matching-theory)
+(`metric.rs`), which walks both patches' pixels in lockstep and accumulates a
+correlation score in `[-1, +1]`. So "pixel by pixel" is true at the patch
+level; it is emphatically *not* true at the frame level — we never scan every
+pixel of the frame.
+
+**Subtracting one frame from another to discard what's equal: no. We do not do
+frame differencing at all.** That technique — subtract frame *N* from frame
+*N−1*, keep the pixels that changed, ignore the rest — is *background
+subtraction / motion detection*, a different family of algorithm. It tells you
+*that* something moved in a region; it does not tell you *which* object, or
+*where a specific tracked point went*. It also breaks the moment the camera
+moves (then *every* pixel "changed"). We need the trajectory of one identified
+object, so we use **template matching** instead: carry a reference picture of
+the object and re-find it by similarity each frame.
+
+There is one subtraction inside our method, but it is not image-vs-image — it
+is the **zero-mean** step *inside* ZNCC: each patch has *its own* mean
+brightness subtracted from *itself* before correlating (§2). That is what makes
+the match immune to lighting changes; it is per-patch normalization, not
+"frame A minus frame B."
+
+> **ELI5.** We don't lay two photos on top of each other and rub out the parts
+> that match. We carry a little cut-out of the thing we're following and go
+> *"where's Waldo?"* in the next photo.
+
+```mermaid
+graph TD
+    Q["Two consecutive frames - how compare?"]
+    Q --> A["Frame differencing<br/>(subtract N from N-1, keep what changed)"]
+    Q --> B["Template matching<br/>(slide a saved patch, score similarity)"]
+    A --> A2["Tells you SOMETHING moved in a region.<br/>Breaks when the camera moves.<br/>NOT what this repo does."]
+    B --> B2["Tells you WHERE one identified object went.<br/>Survives lighting change (ZNCC).<br/>This IS what tracker.rs does."]
+    classDef no fill:#ffe3e3,stroke:#c92a2a
+    classDef yes fill:#d3f9d8,stroke:#2b8a3e
+    class A2 no
+    class B2 yes
+```
+
+### 10.2 How do we compare "the region" to decide the bar moved, and find its new position?
+
+The two questions are one operation. We never separately ask "did it move?" and
+"where to?" — finding the best-matching spot answers both, and the
+*displacement* of that spot from last frame *is* the motion.
+
+Per frame (`TemplateTracker::step`, `tracker.rs`, §5.2 / §7.1):
+
+1. **Predict** a center. Not the last position — the [motion](../CONTEXT.md#gap)
+   model's constant-velocity guess `predicted = position + velocity·dt`
+   (`motion.rs`, audit F1). If the bar was descending, the guess is already
+   lower.
+2. **Search a small window** — every integer offset `(dx, dy)` with
+   `|dx|,|dy| ≤ search_radius` (default 30) around that prediction. That is a
+   `61×61 = 3721`-candidate box, *not* the whole frame.
+3. **Score each candidate** with ZNCC against **both** templates (anchor +
+   adaptive, §3) and keep the running best.
+4. **The new position is the arg-max** — the single candidate with the highest
+   score. If that best score ≥ `min_score` (default **0.4**) *and* the winner
+   is within the physically-reachable **gate radius**
+   (`max_velocity·dt + uncertainty`, `motion.rs`; see
+   [code-map §6.1](code-map.md#61-the-five-signals-in-detail--when-called-compared-transformed-checked)),
+   it is `Found` at that
+   pixel; otherwise `Miss`.
+
+So "the new position of the seed" is literally *the pixel offset that maximizes
+ZNCC inside the search window*, subject to two vetoes (score floor + motion
+reachability). The displacement from the previous accepted position feeds
+`Track::observed`, which re-derives velocity — and that velocity is what later
+becomes the [Bar Path](../CONTEXT.md#bar-path) and the VBT numbers (§6).
+
+> **ELI5.** "Did it move?" and "where to?" are the same question. We find the
+> spot that looks most like the sticker; how far that spot is from where the
+> sticker was last time *is* the movement.
+
+### 10.3 Do we always look at the same region?
+
+**No.** The search window *re-centers every frame* on the motion prediction
+(§10.2 step 1). If the bar travels down the frame, the box travels down with it.
+Two consequences worth internalising:
+
+- The window is a **hard boundary**, not a soft penalty: nothing outside
+  `±search_radius` of the prediction can ever win, which is exactly why the
+  measured max inter-frame jump in [e2e-results.md](e2e-results.md) is always
+  `search_radius·√2 ≈ 42.4px` — the geometric corner of one step's box.
+- When the bar is briefly lost (a [Gap](../CONTEXT.md#gap)), the window keeps
+  *coasting* along the prediction and the reachability radius *grows*
+  (`Track::coasted` adds `growth_per_second·dt` of uncertainty per frame), so
+  the longer it's unseen the wider the net for reacquisition — then snaps tight
+  again on the next `Found`. See [code-map §4](code-map.md#4-the-state-machine).
+
+### 10.4 What if the video shakes? Can we stabilize first?
+
+**Today: there is no video stabilization.** Two things absorb *small* shake for
+free, and one real limitation remains:
+
+- **The search window is relative to a moving prediction, not to fixed frame
+  coordinates.** A few-pixel camera jitter just shifts where the bar appears;
+  as long as that shift stays inside `search_radius`, the arg-max still lands on
+  the plate and the tracker follows it. Small shake is silently tolerated.
+- **ZNCC's lighting-invariance** (§2) means the *brightness* flicker that often
+  accompanies handheld footage doesn't move the score.
+
+The limitation is **honest and documented** (§9.4 error table): handheld camera
+motion *adds the camera's displacement to the bar's displacement*. The tracker
+faithfully reports where the plate is *in the frame*; if the frame itself is
+swimming, that swim contaminates the velocity. Our guidance is a **tripod**
+(§9.4), and the numbers we trust (mean concentric velocity) are the ones least
+hurt by residual jitter.
+
+**Could we stabilize first? Yes — and it would slot in cleanly**, because the
+architecture already has the right seam. Global stabilization (estimate
+inter-frame camera motion, warp each frame to a common reference) is a
+*whole-frame* pre-processing step. It is *not* the same thing as the
+[Preprocessor](../CONTEXT.md#preprocessor) port, which is deliberately
+**region-level** (§5, the same-space invariant) — stabilization would live one
+level up, as a frame-source decorator between `FfmpegFrameSource` and the
+tracker, so the domain stays untouched. It is currently unbuilt and belongs on
+the [ROADMAP](../../ROADMAP.md) next to *perspective correction* (both are
+"correct the whole frame's geometry before tracking" problems). Note the
+tension: stabilization warps pixels (resampling introduces its own blur/noise),
+so it should be opt-in and validated against `groundtruth/` like any other
+tracking change (§ [architecture correctness rule](architecture.md#correctness-is-graded-not-self-reported)),
+never assumed to help.
+
+### 10.5 Digital Image Correlation (DIC) — what it is, and where we sit
+
+[Ncorr][ncorr] is an open-source 2-D **subset-based DIC** package from
+experimental mechanics. DIC measures how a *material* deforms by tracking a
+speckle pattern between a **reference** image and a **deformed** image. It is
+worth understanding because its core matching step is *the same idea we use*,
+and its more advanced stages are exactly the things we deliberately **don't**
+do — which is itself informative.
+
+DIC's pipeline, from the paper (equations and figure numbers cited so you can
+follow along in the PDF):
+
+1. **Subsets.** The reference image is partitioned into small square windows
+   ("subsets" / "subwindows") — the DIC name for what we call a **patch**. Each
+   subset is tracked independently.
+2. **Correlation criterion = NCC for the initial guess (their Eq. 5, Fig. 2).**
+   Ncorr's `C_cc` subtracts each subset's mean (`f_m`, `g_m`, their Eqs. 6–7)
+   and divides by the norms — i.e. their integer-pixel initial guess is
+   computed with **exactly ZNCC**. Their Fig. 2 ("pad the subset, convolve with
+   the current image, take the max of the correlation array") is a picture of
+   our §5.2 search loop.
+3. **Sub-pixel refinement by IC-GN (their Eqs. 8–12, Figs. 1 & 3).** DIC does
+   *not* stop at the best integer pixel. It runs an **Inverse-Compositional
+   Gauss-Newton** optimizer that fits a full first-order **warp** of the
+   subset — not just a shift `(u,v)` but its gradients
+   `∂u/∂x, ∂u/∂y, ∂v/∂x, ∂v/∂y` (their deformation vector **p**, Eq. 2) — using
+   **biquintic B-spline** interpolation to reach sub-pixel, sub-percent-strain
+   accuracy.
+4. **Reliability-Guided propagation (RG-DIC, their Figs. 4–5).** Only the very
+   first **seed** subset pays for a full NCC search. Every other subset takes
+   its *neighbour's* already-solved displacement as the initial guess, and the
+   analysis spreads outward through a queue ordered by correlation quality
+   `C_LS` — reliable points first, so a bad subset never seeds its neighbours.
+5. **Reference updating for large deformation (their Fig. 7).** When the sample
+   deforms so far that the original reference no longer correlates, Ncorr
+   *updates the reference image* to an intermediate frame and composes the
+   displacement fields.
+6. **Strains (their Eqs. 13–18).** The whole point of DIC: differentiate the
+   displacement *field* to get Green-Lagrangian strain.
+
+### 10.6 Side-by-side — DIC vs image-tracker
+
+| Aspect | DIC / Ncorr | image-tracker |
+|---|---|---|
+| **Goal** | Full 2-D displacement *field* + strain of a deforming material | Trajectory of *one* point (the bar) over *time* |
+| **What's compared** | Reference image vs deformed image (2 images, or a series) | Frame *N−1*'s template vs frame *N* (a video stream) |
+| **Unit** | Subset (square window) | Patch (square window) — **same thing** |
+| **Integer-pixel match** | NCC / ZNCC (their Eq. 5) | ZNCC (`metric.rs`) — **same metric** |
+| **Sub-pixel** | **Yes** — IC-GN warp + biquintic B-spline (Eqs. 8–12) | **No** — arg-max is integer-pixel; we don't refine |
+| **Subset deformation** | **Yes** — fits `u,v` + 4 gradients per subset | **No** — translation only; appearance change handled by the adaptive template instead |
+| **Many points** | **Yes** — a whole ROI grid, propagated | **No** — one tracked point per lift |
+| **How the search is seeded** | RG-DIC: neighbour subset's solved displacement | Motion model's constant-velocity prediction (`motion.rs`) |
+| **Reference staleness fix** | Update the *reference image* for large deformation (Fig. 7) | Update the *adaptive template* (§3) — **the direct analogue** |
+| **Output** | Strain field | Velocity → reps → VBT metrics (§6, §9) |
+
+Two rows deserve emphasis because they are the same insight discovered in two
+fields:
+
+- **RG-DIC's "use the neighbour's answer as your initial guess"** and **our
+  "use the motion model's prediction as the search center"** are the same
+  trick — *don't brute-force a global search; start near where a cheap
+  predictor says the answer is.* DIC propagates across *space* (neighbouring
+  subsets); we propagate across *time* (the previous frame's velocity).
+- **DIC's reference-image updating** (Fig. 7, for large deformation) and **our
+  anchor+adaptive dual template** (§3) both exist to solve the identical
+  problem: a fixed reference goes stale as the thing you're tracking changes
+  appearance. DIC's twist is composition of fields; ours is keeping the
+  original *anchor* alive as a veto so the adaptive copy can't ratchet onto the
+  wrong object (the [audit F3 drift-ratchet](code-map.md#2-anchor-veto--is-it-still-the-original-seed-not-just-last-frame)).
+
+### 10.7 Why we stop where DIC keeps going
+
+DIC's extra machinery (sub-pixel IC-GN, per-subset strain warps, full-field
+propagation) is *not* overkill we skipped for laziness — it solves problems we
+don't have:
+
+- **Sub-pixel accuracy** matters when you're measuring micro-strain on a metal
+  coupon. We're measuring a barbell moving *tens of pixels per frame*; §6's
+  noise argument says a camera-derived position already carries several pixels
+  of jitter, so a fractional-pixel refinement would be polishing well below our
+  noise floor — and §9.2 is why we refuse to trust even the *second* derivative
+  (acceleration/MPV) of this signal.
+- **Subset deformation warps** model a material stretching. A rigid steel plate
+  doesn't stretch; it translates and rotates. Rotation *does* change the
+  patch's appearance, but we absorb that with the cheap adaptive template (§3)
+  rather than a per-frame 6-parameter optimization.
+- **Full-field / strain** is DIC's entire reason to exist and simply isn't our
+  domain — we want one [Bar Path](../CONTEXT.md#bar-path), not a strain map.
+
+The honest one-liner: **image-tracker is "DIC's integer-pixel initial-guess
+stage (ZNCC template matching), specialized to follow a single point through
+time, with a motion model for the seed-search and a dual template for
+appearance drift — and none of DIC's sub-pixel / strain / full-field
+back half."** If we ever needed sub-pixel bar position (we currently don't), the
+IC-GN refinement in §10.5 step 3 is the well-documented place to bolt it on,
+directly above `metric.rs`.
+
+[ncorr]: https://www.ncorr.com/index.php/dic-algorithms — Blaber, Adair,
+Antoniou, "Ncorr: Open-Source 2D Digital Image Correlation Matlab Software,"
+*Experimental Mechanics* 55 (2015) 1105–1122,
+doi:[10.1007/s11340-015-0009-1](https://doi.org/10.1007/s11340-015-0009-1).

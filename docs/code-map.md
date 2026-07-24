@@ -392,7 +392,7 @@ Some(num / denom)                              // result in [-1, +1]
 **How it's checked:** two guards before you ever see a score — mismatched patch
 sizes → `None`; a flat (zero-variance) patch → `0.0`, never a divide-by-zero.
 The score itself is *compared* two ways downstream: it must beat the current
-`best` in the search loop, and the winner must clear `min_score` (default 0.5)
+`best` in the search loop, and the winner must clear `min_score` (default 0.4)
 to count as `Found` at all.
 
 **The trap:** a high peak means "looks like the template," not "is the bar." A
@@ -571,3 +571,69 @@ did — never a verdict on whether it was right.
 7. `velocity.rs` then `rep.rs` — how numbers come out the other end.
 8. `docs/architecture.md` — the rules that keep all this decoupled, once the
    shapes are familiar.
+
+---
+
+## 9. Watching one frame go by — a debugger walkthrough
+
+If you set a breakpoint and single-stepped *one* video frame through the whole
+program, here is the story you'd narrate. (ELI5 first, then the real call
+chain.)
+
+> **ELI5.** A photo arrives. The program guesses where the barbell sticker
+> probably slid to, looks in a small area around that guess, finds the spot
+> that looks most like the sticker, double-checks the answer isn't crazy, writes
+> down "sticker was here at this time," and asks for the next photo. Do that a
+> few thousand times and you've drawn the whole [bar path](../CONTEXT.md#bar-path).
+
+1. **A frame appears.** `run_tracking_loop` (`tracking.rs`) calls
+   `source.next_frame()` — one owned RGB buffer, display-space dimensions
+   (§5.1). Watch: `frame.width`, `frame.height`. If this is wrong you get the
+   scrambled-rows rotation bug ([e2e-results.md](e2e-results.md), 3.5).
+2. **Hand it to the session.** `session.step(&frame, dt)` where `dt = 1/fps`.
+   Watch `dt` — a wrong timebase silently scales every velocity later.
+3. **Predict, then search.** Inside `TemplateTracker::step` (`tracker.rs`),
+   `track.predicted(dt)` gives the search center (*not* the last position —
+   audit F1). Then the `for dy … for dx …` window loop. Watch `best` growing:
+   each iteration extracts a patch, ZNCC-scores it against `anchor` and
+   `adaptive`, keeps the max. This is the hot loop — ~3721 candidates ×
+   two templates (§5.2).
+4. **The two vetoes.** The winning candidate becomes `Found` only if
+   `score ≥ min_score` (0.4) **and** it's inside the reachability
+   `gate_radius` (`motion.rs`). Watch the `match best { … }` arm: a high score
+   that's too far away still returns `Miss`.
+5. **Trust layer.** Back in `TrackingSession::step` (`session.rs`): if a gap is
+   open, the mid-gap guards can *demote* a suspicious `Found` back to `Miss`
+   (too far, or below `reacquire_min_score`). A surviving `Found` calls
+   `track.observed(position, dt)` (re-derives velocity, resets uncertainty) and
+   pushes a `Sample`. A `Miss` extends the gap; past `coast_limit` it flips to
+   `NeedsReseed` (§4).
+6. **Tell the GUI.** `tx.send(TrackingMessage::Progress{…})`. The UI's
+   `poll_tracking` (`state/jobs.rs`) drains it next repaint (§2). Watch: the
+   worker never touches egui; the GUI never touches the tracker.
+7. **Loop.** Back to step 1 until EOF → `Done(BarPath)` → offline maths
+   (velocity, reps, export) fire *once*, on the finished aggregate (§5.4–§5.6).
+
+**Fastest way to see it live:** the headless CLI runs the identical
+`TrackingSession` with no GUI in the way —
+`tracker-app track <video> --seed-frame N --seed X,Y --out out/dbg` — then read
+the CSV. Reproduction recipes: [e2e-results.md](e2e-results.md).
+
+---
+
+## 10. Why this, and not that — the decision ledger
+
+The load-bearing "why we picked A over B" calls, each with where to read more.
+
+| Decision | Why not the obvious alternative | Deeper |
+|---|---|---|
+| **Template matching**, not frame-differencing / background subtraction | Differencing tells you *something* moved in a region, not *which object* or *where a specific point went*, and it breaks the instant the camera moves. We need one object's trajectory. | [theory §10.1](theory.md#101-do-we-compare-pixel-by-pixel-do-we-subtract-one-frame-from-another) |
+| **ZNCC**, not SSD or plain NCC | SSD breaks on any brightness change; NCC survives gain but not offset. ZNCC is algebraically invariant to *both* (positive affine luma) — a plate stays a `1.0` match through a rep as lighting shifts. | [theory §2](theory.md#2-template-matching-theory) |
+| **Integer-pixel arg-max**, no sub-pixel refinement | Sub-pixel (DIC's IC-GN) polishes below our several-pixel camera-noise floor; a barbell moves tens of px/frame. Not worth the machinery. | [theory §10.7](theory.md#107-why-we-stop-where-dic-keeps-going) |
+| **Dual template** (anchor + adaptive), not single | Anchor-only goes stale and loses the plate; adaptive-only ratchets onto the wrong object (drift). Two templates + `update_threshold` gate get both. | [theory §3](theory.md#3-seed--template-pinpointing), [§6.1 (2)](#2-anchor-veto--is-it-still-the-original-seed-not-just-last-frame) |
+| **Motion-model prediction** as search center, not last position | Centering on last position makes the window lag a fast bar; a constant-velocity guess keeps the plate centered (audit F1). Same idea as DIC's reliability-guided propagation, but across time. | [theory §10.6](theory.md#106-side-by-side--dic-vs-image-tracker), `motion.rs` |
+| **Lost is opt-in, default OFF** | Confidence can't reliably separate a dim-but-correct track from a false lock; a wrong terminal fire kills a good run. So the terminal state stays off unless footage has reliable confidence. | [§4](#the-two-lost-the-bar-outcomes--they-are-opposites-dont-conflate-them) |
+| **Worker thread** for tracking, never in `update` | A synchronous decode in the egui loop froze the window (the OS "not responding" dialog). The render loop must never block. | [gui-threading.md](gui-threading.md) |
+| **Ground truth grades correctness**, self-metrics only steer | ZNCC score / jitter / gap-count are all *maxed* by a confident false lock. They can't referee themselves. | [§6](#6-confidence-vs-correctness--the-load-bearing-lesson) |
+| **`tracker-core` dependency-free**, IO only in `tracker-app` | Keeps the domain testable without ffmpeg (233 pure tests run in 0.1s) and makes the layering compiler-enforced. | [architecture §3](architecture.md#3-layers-and-the-dependency-rule) |
+| **No video stabilization (yet)**, tripod guidance instead | Small shake is absorbed by the moving search window; real stabilization warps pixels (its own noise) and must be graded before trusting. A frame-source decorator is the clean place if we build it. | [theory §10.4](theory.md#104-what-if-the-video-shakes-can-we-stabilize-first) |
