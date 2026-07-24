@@ -1586,7 +1586,10 @@ back half."** If we ever needed sub-pixel bar position (we currently don't), the
 IC-GN refinement in §10.5 step 3 is the well-documented place to bolt it on,
 directly above `metric.rs`.
 
-[ncorr]: https://www.ncorr.com/index.php/dic-algorithms — Blaber, Adair,
-Antoniou, "Ncorr: Open-Source 2D Digital Image Correlation Matlab Software,"
+**Reference.** Ncorr algorithm write-up:
+<https://www.ncorr.com/index.php/dic-algorithms>. Paper: J. Blaber, B. Adair,
+A. Antoniou, "Ncorr: Open-Source 2D Digital Image Correlation Matlab Software,"
 *Experimental Mechanics* 55 (2015) 1105–1122,
 doi:[10.1007/s11340-015-0009-1](https://doi.org/10.1007/s11340-015-0009-1).
+
+[ncorr]: https://www.ncorr.com/index.php/dic-algorithms "Ncorr: Open-Source 2D DIC (Blaber et al., Exp. Mech. 2015)"
