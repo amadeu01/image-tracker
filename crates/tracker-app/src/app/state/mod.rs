@@ -256,7 +256,7 @@ pub struct AppState {
     pub video_path: PathBuf,
     pub metadata: VideoMetadata,
     // -- session.rs: mode / seed / calibration / frame position ---------
-    pub mode: Mode,
+    mode: Mode,
     pub current_frame: u64,
     /// The Seed, once placed (task 2.4). `None` until the user clicks in
     /// `Mode::PlacingSeed`.
@@ -268,10 +268,10 @@ pub struct AppState {
     /// The two points of the most recently completed calibration pair
     /// (success or failure), so the UI can draw a line between them even
     /// after the pair has reset for a potential third click.
-    pub last_calibration_segment: Option<(tracker_core::Point, tracker_core::Point)>,
+    last_calibration_segment: Option<(tracker_core::Point, tracker_core::Point)>,
     /// Bottom status bar text; errors surface here rather than panicking
     /// (project rule — see PLAN.md 2.6).
-    pub status: String,
+    status: String,
     // -- jobs.rs: tracking / export / benchmark background workers ------
     /// The one background job this `AppState` may be driving at a time
     /// (task 20.5's `Job` enum — see `jobs.rs`'s module doc comment).
@@ -281,7 +281,7 @@ pub struct AppState {
     /// `is_tracking`/`is_exporting`/`is_benchmarking`/`is_paused`/
     /// `benchmark_progress` accessor methods over matching this field
     /// directly at call sites outside `state::`.
-    pub job: Job,
+    job: Job,
     /// Pure reducer over the tracking worker's progress messages; drives
     /// the live crosshair and status bar while a run is active, and still
     /// holds the last-known state (including any error) after it finishes —
@@ -304,7 +304,7 @@ pub struct AppState {
     /// `None` until a Seed has been placed and a frame is available to
     /// evaluate (`TrackerApp::ensure_texture`/click handler sets this via
     /// `note_seed_suggestion`, since `AppState` alone has no frame access).
-    pub suggested_tracker: Option<tracker_core::TrackerKind>,
+    suggested_tracker: Option<tracker_core::TrackerKind>,
     /// Live rep count (task 10.8), recomputed from the partial path every
     /// `LIVE_REP_RECOMPUTE_INTERVAL` processed frames while a run is active
     /// (`poll_tracking`, via `TrackingRunState::live_rep_count`). `None`
@@ -312,7 +312,7 @@ pub struct AppState {
     /// outside an active run; on a *failed* recompute (e.g. a transient
     /// `VelocityError`), the previous value is left in place rather than
     /// cleared — see `live_rep_count`'s doc comment for why.
-    pub live_reps: Option<usize>,
+    live_reps: Option<usize>,
     /// Recent app events (task 7.2), newest last, capped at `MAX_EVENTS`.
     /// Fed from the same call sites that already emit `tracing` breadcrumbs,
     /// so the side panel gives on-screen visibility into the same history
@@ -325,13 +325,13 @@ pub struct AppState {
     /// resets (it's a user preference, not run output) so re-tracking or
     /// starting a fresh session on the same video keeps whatever the user
     /// last configured.
-    pub settings: TrackingSettings,
+    settings: TrackingSettings,
     /// The finished benchmark's rows, once the benchmark job reaches `Done`
     /// (a *result* that outlives `job`, same reasoning as `bar_path`/
     /// `results`/`tracking_run`). Persists after the run finishes so the
     /// results table/"Apply winner" button stay visible until a new
     /// benchmark is started or the session resets.
-    pub benchmark_rows: Option<Vec<crate::compare::BenchmarkRow>>,
+    benchmark_rows: Option<Vec<crate::compare::BenchmarkRow>>,
     /// Every file the auto-export job has written this session (task 12.6),
     /// in write order. Fed by `poll_export`'s `ExportMessage::Written`
     /// (the paths already flowed there, just as transient events before —
@@ -339,7 +339,7 @@ pub struct AppState {
     /// events ring buffer). Cleared whenever a fresh run starts
     /// (`start_export`) or the session resets (`start_new_session`), so it
     /// never shows a stale file from a previous run/video.
-    pub exported_files: Vec<PathBuf>,
+    exported_files: Vec<PathBuf>,
     // -- review.rs: results display/selection ----------------------------
     /// The toolbar's Live/Results pill selection (task 13.1). Defaults to
     /// `Results` — a freshly opened video has no live run active yet, and
@@ -347,7 +347,7 @@ pub struct AppState {
     /// lives, so there's nothing to switch away from until tracking starts.
     /// `start_tracking` flips it to `Live`; nothing currently flips it back
     /// automatically (left for 13.6, which owns the dedicated Live panel).
-    pub display_mode: DisplayMode,
+    display_mode: DisplayMode,
     /// The selected rep (0-based index into `results.reps`), task 13.2 —
     /// shared selection state: the scrub bar's segment highlight now, the
     /// 13.3 table row highlight and video path segment highlight later, all
@@ -360,7 +360,7 @@ pub struct AppState {
     /// from `selected_rep` per the design mock: clicking a segment/row
     /// selects (and clears any clip); only ▶ arms a clip. Nothing sets this
     /// yet — 13.3 owns that.
-    pub rep_clip: Option<usize>,
+    rep_clip: Option<usize>,
     /// Whether the bar-path overlay draws the *whole-set* polyline instead
     /// of just `selected_rep`'s segment (task 15.2, repurposed by 19.1).
     /// Defaults to `false` — 19.1's per-rep-by-default view, since the
@@ -372,7 +372,7 @@ pub struct AppState {
     /// `stop_threshold_pct`, keeping `AppState::new` IO-free). The *live*
     /// tracking crosshair and the Seed marker deliberately ignore this —
     /// lock-on feedback stays visible regardless.
-    pub show_path: bool,
+    show_path: bool,
 }
 
 impl AppState {
@@ -559,6 +559,11 @@ impl AppState {
     pub fn note_seed_suggestion(&mut self, kind: tracker_core::TrackerKind) {
         tracing::info!(kind = ?kind, "tracker auto-suggested");
         self.suggested_tracker = Some(kind);
+    }
+
+    /// The tracker `suggest_tracker` recommended for the current Seed, if any.
+    pub fn suggested_tracker(&self) -> Option<tracker_core::TrackerKind> {
+        self.suggested_tracker
     }
 
     /// Status-bar text reflecting mode and, once placed, the Seed and

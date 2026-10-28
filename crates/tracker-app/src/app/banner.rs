@@ -60,7 +60,7 @@ fn banner_kind(state: &AppState) -> BannerKind {
         Phase::TrackingPath { .. } => BannerKind::Working,
         Phase::ComputingMetrics => BannerKind::Working,
         Phase::Review => BannerKind::Done,
-        Phase::Idle => match state.mode {
+        Phase::Idle => match state.mode() {
             Mode::PlacingSeed => BannerKind::ActionNeeded,
             Mode::Calibrating { .. } => BannerKind::ActionNeeded,
             Mode::ViewOnly => BannerKind::Neutral,

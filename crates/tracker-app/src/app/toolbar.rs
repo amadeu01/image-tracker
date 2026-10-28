@@ -58,13 +58,13 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                     return;
                 };
 
-                let label = match state.mode {
+                let label = match state.mode() {
                     Mode::ViewOnly => "Place Seed",
                     Mode::PlacingSeed => "Placing Seed... (click frame)",
                     Mode::Calibrating { .. } => "Place Seed",
                 };
                 if ui
-                    .selectable_label(state.mode == Mode::PlacingSeed, label)
+                    .selectable_label(state.mode() == Mode::PlacingSeed, label)
                     .on_hover_text(
                         "click a frame to mark the object to track (S toggles this mode)",
                     )
@@ -79,7 +79,7 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
 
                 ui.separator();
 
-                let calibrating = matches!(state.mode, Mode::Calibrating { .. });
+                let calibrating = matches!(state.mode(), Mode::Calibrating { .. });
                 let cal_label = if calibrating {
                     "Calibrating... (click 2 points)"
                 } else {
@@ -103,7 +103,7 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                 if let Mode::Calibrating {
                     known_length_meters,
                     ..
-                } = state.mode
+                } = state.mode()
                 {
                     ui.label("known length (m):");
                     let mut meters = known_length_meters;
@@ -130,8 +130,8 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                 if paused {
                     // Nudge the user straight into placing a new seed on the
                     // paused frame.
-                    if state.mode != Mode::PlacingSeed {
-                        state.mode = Mode::PlacingSeed;
+                    if state.mode() != Mode::PlacingSeed {
+                        state.set_mode(Mode::PlacingSeed);
                     }
                     let ready = state
                         .seed
@@ -257,13 +257,13 @@ fn display_mode_pill(ui: &mut egui::Ui, state: &mut super::state::AppState) {
     let accent = palette::chrome_palette(dark_mode).accent;
 
     if ui
-        .selectable_label(state.display_mode == DisplayMode::Results, "Results")
+        .selectable_label(state.display_mode() == DisplayMode::Results, "Results")
         .on_hover_text("show the finished set's rep table, chart, and headline cards")
         .clicked()
     {
         state.set_display_mode(DisplayMode::Results);
     }
-    let live_selected = state.display_mode == DisplayMode::Live;
+    let live_selected = state.display_mode() == DisplayMode::Live;
     if ui
         .selectable_label(live_selected, "Live")
         .on_hover_text("show the in-progress run: live rep count and phase")

@@ -83,7 +83,7 @@ pub fn rep_table(ui: &mut egui::Ui, state: &mut AppState) {
                         )
                     })
                     .unwrap_or_else(|| "—".to_string()),
-                clip_armed: state.rep_clip == Some(i),
+                clip_armed: state.rep_clip() == Some(i),
                 selected: state.selected_rep == Some(i),
             })
             .collect()
@@ -91,7 +91,7 @@ pub fn rep_table(ui: &mut egui::Ui, state: &mut AppState) {
 
     let dark_mode = ui.visuals().dark_mode;
     let chrome = palette::chrome_palette(dark_mode);
-    let threshold = state.settings.stop_threshold_pct;
+    let threshold = state.settings().stop_threshold_pct;
     let font = egui::FontId::monospace(10.0);
     let weak_color = ui.visuals().weak_text_color();
     let text_color = ui.visuals().text_color();
@@ -218,7 +218,7 @@ pub fn rep_table(ui: &mut egui::Ui, state: &mut AppState) {
     // restart.
     if ui
         .checkbox(
-            &mut state.settings.burn_overlay_in_rep_clips,
+            &mut state.settings_mut().burn_overlay_in_rep_clips,
             "Burn bar-path overlay into clips",
         )
         .on_hover_text(
@@ -227,7 +227,9 @@ pub fn rep_table(ui: &mut egui::Ui, state: &mut AppState) {
         )
         .changed()
     {
-        crate::app::theme::save_burn_overlay_in_rep_clips(state.settings.burn_overlay_in_rep_clips);
+        crate::app::theme::save_burn_overlay_in_rep_clips(
+            state.settings().burn_overlay_in_rep_clips,
+        );
     }
     if ui
         .add_enabled(

@@ -191,17 +191,17 @@ impl TrackerApp {
         // filesystem IO (its tests construct `AppState` directly, often
         // many times per test).
         if let Some(pct) = theme::load_stop_threshold() {
-            state.settings.stop_threshold_pct = pct;
+            state.settings_mut().stop_threshold_pct = pct;
         }
         // Restore the persisted bar-path overlay visibility (task 15.2),
         // same pattern as the stop threshold above.
         if let Some(show) = theme::load_show_path() {
-            state.show_path = show;
+            state.set_show_path(show);
         }
         // Restore the persisted "burn overlay into rep clips" choice (task
         // 19.3), same pattern as the two loads above.
         if let Some(burn) = theme::load_burn_overlay_in_rep_clips() {
-            state.settings.burn_overlay_in_rep_clips = burn;
+            state.settings_mut().burn_overlay_in_rep_clips = burn;
         }
         self.state = Some(state);
         self.decode = Some(decode_worker::spawn_decode_worker(decoder, 16));
@@ -258,7 +258,7 @@ impl TrackerApp {
                             );
                             self.texture = Some(handle);
                             self.texture_frame = Some(frame_index);
-                            state.status.clear();
+                            state.clear_status();
                         }
                         if let Some((pending_frame, position)) = self.pending_seed_suggestion {
                             if pending_frame == frame_index {
@@ -280,8 +280,9 @@ impl TrackerApp {
                     tracing::error!(frame = frame_index, error = %message, "failed to decode frame");
                     if let Some(state) = &mut self.state {
                         if frame_index == state.current_frame {
-                            state.status =
-                                format!("failed to decode frame {frame_index}: {message}");
+                            state.set_status(format!(
+                                "failed to decode frame {frame_index}: {message}"
+                            ));
                         }
                     }
                     if self.pending_seed_suggestion.map(|(f, _)| f) == Some(frame_index) {
@@ -365,7 +366,7 @@ impl TrackerApp {
                 let message = format!("failed to open {}: {e}", video_path.display());
                 tracing::error!(video = %video_path.display(), error = %e, "failed to probe video");
                 if let Some(state) = &mut self.state {
-                    state.status = message.clone();
+                    state.set_status(message.clone());
                     state.note_error(message.clone());
                 }
                 self.open_error = Some(message);
@@ -396,7 +397,7 @@ impl TrackerApp {
             let handle = ctx.load_texture("current-frame", image, egui::TextureOptions::LINEAR);
             self.texture = Some(handle);
             self.texture_frame = Some(state.current_frame);
-            state.status.clear();
+            state.clear_status();
             return;
         }
         if let Some(decode) = &self.decode {
@@ -457,7 +458,7 @@ impl eframe::App for TrackerApp {
             // video frame frozen under a still-advancing path overlay.
             // While waiting on a still-in-flight decode, keep repainting
             // so the wait doesn't stall on some unrelated input event.
-            if state.rep_clip.is_some() {
+            if state.rep_clip().is_some() {
                 if state.advance_rep_clip(self.texture_frame) {
                     let (num, den) = (state.metadata.fps_num.max(1), state.metadata.fps_den.max(1));
                     ctx.request_repaint_after(std::time::Duration::from_secs_f64(

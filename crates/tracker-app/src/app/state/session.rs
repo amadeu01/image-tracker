@@ -58,6 +58,34 @@ impl WorkflowStep {
 }
 
 impl AppState {
+    /// The current click mode.
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// Arms `mode` as the click handler (no other state change).
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+    }
+
+    /// The two points of the most recently completed calibration pair.
+    pub fn last_calibration_segment(&self) -> Option<(tracker_core::Point, tracker_core::Point)> {
+        self.last_calibration_segment
+    }
+
+    /// Bottom status bar text (errors surface here).
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    pub fn set_status(&mut self, message: impl Into<String>) {
+        self.status = message.into();
+    }
+
+    pub fn clear_status(&mut self) {
+        self.status.clear();
+    }
+
     /// Toggle between `ViewOnly` and `PlacingSeed`.
     pub fn toggle_placing_seed(&mut self) {
         self.mode = match self.mode {

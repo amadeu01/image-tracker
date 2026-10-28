@@ -65,6 +65,32 @@ pub enum Job {
 }
 
 impl AppState {
+    /// User-editable tracking configuration.
+    pub fn settings(&self) -> &super::TrackingSettings {
+        &self.settings
+    }
+
+    /// Mutable access for the settings widgets, which bind egui controls
+    /// directly to individual fields.
+    pub fn settings_mut(&mut self) -> &mut super::TrackingSettings {
+        &mut self.settings
+    }
+
+    /// Rows of the finished benchmark, if one has completed.
+    pub fn benchmark_rows(&self) -> Option<&Vec<crate::compare::BenchmarkRow>> {
+        self.benchmark_rows.as_ref()
+    }
+
+    /// Files the auto-export job has written this session.
+    pub fn exported_files(&self) -> &[std::path::PathBuf] {
+        &self.exported_files
+    }
+
+    /// Live rep count while a run is active.
+    pub fn live_reps(&self) -> Option<usize> {
+        self.live_reps
+    }
+
     /// Whether a tracking run is currently active or paused.
     pub fn is_tracking(&self) -> bool {
         matches!(self.job, Job::Tracking { .. })

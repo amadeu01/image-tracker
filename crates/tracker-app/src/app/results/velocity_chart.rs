@@ -112,7 +112,7 @@ pub fn velocity_chart(ui: &mut egui::Ui, state: &mut AppState) {
         )
     };
     let n = means.len();
-    let threshold = state.settings.stop_threshold_pct;
+    let threshold = state.settings().stop_threshold_pct;
     let selected = state.selected_rep;
     let dark_mode = ui.visuals().dark_mode;
     let chrome = palette::chrome_palette(dark_mode);

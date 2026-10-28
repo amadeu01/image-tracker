@@ -227,6 +227,24 @@ pub fn format_clip_time(frame: u64, fps_num: u64, fps_den: u64) -> String {
 }
 
 impl AppState {
+    pub fn display_mode(&self) -> DisplayMode {
+        self.display_mode
+    }
+
+    /// The rep whose clip is armed, if any.
+    pub fn rep_clip(&self) -> Option<usize> {
+        self.rep_clip
+    }
+
+    /// Whether the overlay draws the whole-set path.
+    pub fn show_path(&self) -> bool {
+        self.show_path
+    }
+
+    pub fn set_show_path(&mut self, show: bool) {
+        self.show_path = show;
+    }
+
     /// Selects rep `index` and jumps the playhead to its start frame (the
     /// design's segment/row `onSelect`: select + jump + clear any active
     /// clip). No-op when `index` doesn't resolve to a rep in the current

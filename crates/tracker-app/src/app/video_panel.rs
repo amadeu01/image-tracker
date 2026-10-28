@@ -61,7 +61,7 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
                 .galley(text_rect.min, galley, egui::Color32::WHITE);
         }
 
-        let calibrating = matches!(state.mode, Mode::Calibrating { .. });
+        let calibrating = matches!(state.mode(), Mode::Calibrating { .. });
 
         if response.clicked() {
             if let Some(click_pos) = response.interact_pointer_pos() {
@@ -71,7 +71,7 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
                     state.metadata.display_width(),
                     state.metadata.display_height(),
                 ) {
-                    if state.mode == Mode::PlacingSeed {
+                    if state.mode() == Mode::PlacingSeed {
                         state.place_seed(image_px);
                         if let Some(seed) = state.seed {
                             // 18.1 (finding G2): this used to call
@@ -110,24 +110,24 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         // template patch region — writes the same `settings.patch_radius`
         // the Advanced DragValue edits (that knob stays the source of
         // truth; this is just another writer, clamped to the same range).
-        if state.mode == Mode::PlacingSeed && response.hovered() {
+        if state.mode() == Mode::PlacingSeed && response.hovered() {
             let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
             if scroll_y.abs() > 0.0 {
                 let step: i64 = if scroll_y > 0.0 { 1 } else { -1 };
-                let next = (state.settings.patch_radius as i64 + step).clamp(
+                let next = (state.settings().patch_radius as i64 + step).clamp(
                     *PATCH_RADIUS_RANGE.start() as i64,
                     *PATCH_RADIUS_RANGE.end() as i64,
                 );
-                state.settings.patch_radius = next as u32;
+                state.settings_mut().patch_radius = next as u32;
             }
         }
 
-        let patch_radius = effective_patch_radius(&state.settings);
+        let patch_radius = effective_patch_radius(state.settings());
         let accent = palette::chrome_palette(ui.visuals().dark_mode).accent;
 
         // 15.3: live preview of the patch region under the cursor while
         // placing, so the user sees the region they're about to seed.
-        if state.mode == Mode::PlacingSeed {
+        if state.mode() == Mode::PlacingSeed {
             if let Some(hover_pos) = response.hover_pos() {
                 if let Some(image_px) = screen_to_image_px(
                     hover_pos,
@@ -161,7 +161,7 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
                     patch_radius,
                     accent,
                 );
-                if state.mode == Mode::PlacingSeed {
+                if state.mode() == Mode::PlacingSeed {
                     draw_patch_hint(
                         ui.painter(),
                         image_rect,
@@ -209,12 +209,12 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         if let Mode::Calibrating {
             first_point: Some(first),
             ..
-        } = state.mode
+        } = state.mode()
         {
             draw_calibration_pending_point(ui.painter(), image_rect, tex_size, first);
         }
 
-        if let Some((a, b)) = state.last_calibration_segment {
+        if let Some((a, b)) = state.last_calibration_segment() {
             draw_calibration_segment(ui.painter(), image_rect, tex_size, a, b);
         }
 
@@ -234,7 +234,7 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         // deliberately not gated: lock-on feedback stays visible even with
         // the path hidden.
         if let Some(results) = &state.results {
-            let points = results.path_points_to_draw(state.selected_rep, state.show_path);
+            let points = results.path_points_to_draw(state.selected_rep, state.show_path());
             if !points.is_empty() {
                 draw_bar_path(ui.painter(), image_rect, tex_size, points);
                 if let Some(point) = results.bar_path.position_at(state.current_frame) {

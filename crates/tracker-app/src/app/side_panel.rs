@@ -233,7 +233,7 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
                     seed.position.x, seed.position.y, seed.frame_index
                 ),
             );
-            let suggestion = match state.suggested_tracker {
+            let suggestion = match state.suggested_tracker() {
                 Some(tracker_core::TrackerKind::Color) => "Color",
                 Some(tracker_core::TrackerKind::Template) => "Template",
                 None => "—",
@@ -310,7 +310,7 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
     // that there's nothing honest to say yet, so the row is omitted rather
     // than showing a misleading "0".
     if run.running {
-        if let Some(count) = state.live_reps {
+        if let Some(count) = state.live_reps() {
             kv_row(ui, "reps so far", &count.to_string());
         }
     }
@@ -320,7 +320,7 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
 /// column added 13.5), shown only once a run has finished
 /// (`state.results.is_some()`, the Review step). Three headline cards
 /// (REPS / SET TIME / VEL. LOSS, per the design), a "Stop set recommended"
-/// banner once any rep's loss crosses `state.settings.stop_threshold_pct`,
+/// banner once any rep's loss crosses `state.settings().stop_threshold_pct`,
 /// an uncalibrated-units chip, a per-rep depth/peak/mean/loss table, a
 /// quality line (gaps/interpolated%/reseeds), and — when `velocity_series`
 /// failed (10.9's GUI seam) — a warning in place of the table rather than a
@@ -341,7 +341,7 @@ fn results_section(ui: &mut egui::Ui, state: &mut AppState) {
         }
         Ok(_) => {
             let dark_mode = ui.visuals().dark_mode;
-            let threshold = state.settings.stop_threshold_pct;
+            let threshold = state.settings().stop_threshold_pct;
             let uncalibrated = !matches!(
                 results.unit,
                 Some(tracker_core::VelocityUnit::MetersPerSecond)
@@ -485,12 +485,12 @@ fn results_section(ui: &mut egui::Ui, state: &mut AppState) {
 /// "open folder" button; a folder-open failure surfaces as an event rather
 /// than panicking (`open_containing_folder`'s doc comment).
 fn files_section(ui: &mut egui::Ui, state: &AppState) {
-    if state.exported_files.is_empty() {
+    if state.exported_files().is_empty() {
         return;
     }
     ui.add_space(6.0);
     ui.label(egui::RichText::new("Files").strong());
-    for path in &state.exported_files {
+    for path in state.exported_files() {
         ui.horizontal(|ui| {
             let name = path
                 .file_name()

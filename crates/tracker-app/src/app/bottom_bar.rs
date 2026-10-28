@@ -58,10 +58,10 @@ pub fn show_status_bar(ctx: &egui::Context, state: Option<&AppState>) {
                             .color(color),
                     );
                 }
-                if !state.status.is_empty() {
+                if !state.status().is_empty() {
                     ui.separator();
                     ui.label(
-                        egui::RichText::new(&state.status)
+                        egui::RichText::new(state.status())
                             .monospace()
                             .color(egui::Color32::RED),
                     );
@@ -142,7 +142,7 @@ pub fn show_scrub_bar(ctx: &egui::Context, state: Option<&mut AppState>) {
             // transport row so it's reachable both live and in review; the
             // click persists immediately (same save-on-change stance as the
             // stop-threshold DragValue).
-            let mut show = state.show_path;
+            let mut show = state.show_path();
             if ui
                 .toggle_value(&mut show, "👁 Full Path")
                 .on_hover_text(
@@ -150,7 +150,7 @@ pub fn show_scrub_bar(ctx: &egui::Context, state: Option<&mut AppState>) {
                 )
                 .changed()
             {
-                state.show_path = show;
+                state.set_show_path(show);
                 theme::save_show_path(show);
             }
         });
@@ -231,7 +231,7 @@ fn show_rep_segments(ui: &mut egui::Ui, state: &mut AppState) {
     // In/out markers: 2px accent vlines while a rep clip is active (13.3
     // sets `rep_clip`; nothing arms it yet, but the drawing seam is 13.2's).
     if let Some(clip_bounds) = state
-        .rep_clip
+        .rep_clip()
         .and_then(|i| state.results.as_ref()?.rep_frame_bounds(i))
     {
         let (left, width) = segment_fraction(clip_bounds.0, clip_bounds.1, total);

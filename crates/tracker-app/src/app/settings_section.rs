@@ -141,7 +141,7 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
             ui.add_enabled_ui(!running, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("tracker:");
-                    let selected_text = match state.settings.tracker_selection {
+                    let selected_text = match state.settings().tracker_selection {
                         TrackerSelection::Auto => "Auto",
                         TrackerSelection::Template => "Template",
                         TrackerSelection::Color => "Color",
@@ -151,25 +151,25 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                         .selected_text(selected_text)
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
-                                &mut state.settings.tracker_selection,
+                                &mut state.settings_mut().tracker_selection,
                                 TrackerSelection::Auto,
                                 "Auto",
                             )
                             .on_hover_text(education::TIP_TRACKER_AUTO);
                             ui.selectable_value(
-                                &mut state.settings.tracker_selection,
+                                &mut state.settings_mut().tracker_selection,
                                 TrackerSelection::Template,
                                 "Template",
                             )
                             .on_hover_text(education::TIP_TRACKER_TEMPLATE);
                             ui.selectable_value(
-                                &mut state.settings.tracker_selection,
+                                &mut state.settings_mut().tracker_selection,
                                 TrackerSelection::Color,
                                 "Color",
                             )
                             .on_hover_text(education::TIP_TRACKER_COLOR);
                             ui.selectable_value(
-                                &mut state.settings.tracker_selection,
+                                &mut state.settings_mut().tracker_selection,
                                 TrackerSelection::Circle,
                                 "Circle",
                             )
@@ -182,8 +182,8 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                         .response
                         .on_hover_text(education::TIP_TRACKER_COMBO);
                 });
-                if state.settings.tracker_selection == TrackerSelection::Auto {
-                    let suggestion = match state.suggested_tracker {
+                if state.settings().tracker_selection == TrackerSelection::Auto {
+                    let suggestion = match state.suggested_tracker() {
                         Some(tracker_core::TrackerKind::Color) => "Color",
                         Some(tracker_core::TrackerKind::Template) => "Template",
                         None => "—",
@@ -196,11 +196,11 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.label(egui::RichText::new("Filter chain").strong());
                 ui.weak("applied gaussian-then-median when both are enabled (v1: fixed order)");
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut state.settings.gaussian_enabled, "Gaussian blur")
+                    ui.checkbox(&mut state.settings_mut().gaussian_enabled, "Gaussian blur")
                         .on_hover_text(education::TIP_GAUSSIAN);
                     ui.add_enabled(
-                        state.settings.gaussian_enabled,
-                        egui::DragValue::new(&mut state.settings.gaussian_sigma)
+                        state.settings().gaussian_enabled,
+                        egui::DragValue::new(&mut state.settings_mut().gaussian_sigma)
                             .speed(0.05)
                             .range(0.5..=5.0)
                             .prefix("σ="),
@@ -208,14 +208,14 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                     .on_hover_text(education::TIP_GAUSSIAN_SIGMA);
                 });
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut state.settings.median_enabled, "Median filter")
+                    ui.checkbox(&mut state.settings_mut().median_enabled, "Median filter")
                         .on_hover_text(education::TIP_MEDIAN);
-                    ui.add_enabled_ui(state.settings.median_enabled, |ui| {
+                    ui.add_enabled_ui(state.settings().median_enabled, |ui| {
                         egui::ComboBox::from_id_salt("median_k_combo")
-                            .selected_text(format!("k={}", state.settings.median_k))
+                            .selected_text(format!("k={}", state.settings().median_k))
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut state.settings.median_k, 3, "k=3");
-                                ui.selectable_value(&mut state.settings.median_k, 5, "k=5");
+                                ui.selectable_value(&mut state.settings_mut().median_k, 3, "k=3");
+                                ui.selectable_value(&mut state.settings_mut().median_k, 5, "k=5");
                             });
                     })
                     .response
@@ -227,14 +227,14 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                     ui.weak("stop-set threshold:");
                     let response = ui
                         .add(
-                            egui::DragValue::new(&mut state.settings.stop_threshold_pct)
+                            egui::DragValue::new(&mut state.settings_mut().stop_threshold_pct)
                                 .speed(0.5)
                                 .range(5.0..=40.0)
                                 .suffix("%"),
                         )
                         .on_hover_text(education::TIP_STOP_THRESHOLD);
                     if response.changed() {
-                        theme::save_stop_threshold(state.settings.stop_threshold_pct);
+                        theme::save_stop_threshold(state.settings().stop_threshold_pct);
                     }
                 });
 
@@ -246,7 +246,7 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                         advanced_tuning_row(
                             ui,
                             "patch radius (px)",
-                            &mut state.settings.patch_radius,
+                            &mut state.settings_mut().patch_radius,
                             1.0,
                             super::state::PATCH_RADIUS_RANGE,
                             education::TIP_PATCH_RADIUS,
@@ -254,7 +254,7 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                         advanced_tuning_row(
                             ui,
                             "search radius (px)",
-                            &mut state.settings.search_radius,
+                            &mut state.settings_mut().search_radius,
                             1.0,
                             5..=200,
                             education::TIP_SEARCH_RADIUS,
@@ -262,7 +262,7 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                         advanced_tuning_row_f64(
                             ui,
                             "min score",
-                            &mut state.settings.min_score,
+                            &mut state.settings_mut().min_score,
                             0.01,
                             0.0..=1.0,
                             education::TIP_MIN_SCORE,
@@ -270,7 +270,7 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                         advanced_tuning_row_f64(
                             ui,
                             "update threshold",
-                            &mut state.settings.update_threshold,
+                            &mut state.settings_mut().update_threshold,
                             0.01,
                             0.0..=1.0,
                             education::TIP_UPDATE_THRESHOLD,
@@ -278,7 +278,7 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                         advanced_tuning_row(
                             ui,
                             "coast limit (frames)",
-                            &mut state.settings.coast_limit,
+                            &mut state.settings_mut().coast_limit,
                             1.0,
                             0..=60,
                             education::TIP_COAST_LIMIT,
@@ -286,7 +286,7 @@ pub fn tracking_settings_section(ui: &mut egui::Ui, state: &mut AppState) {
                         advanced_tuning_row_f64(
                             ui,
                             "reacquire min score",
-                            &mut state.settings.reacquire_min_score,
+                            &mut state.settings_mut().reacquire_min_score,
                             0.01,
                             0.0..=1.0,
                             education::TIP_REACQUIRE_MIN_SCORE,
@@ -350,7 +350,7 @@ fn strategy_benchmark_section(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
 
-    let Some(rows) = state.benchmark_rows.clone() else {
+    let Some(rows) = state.benchmark_rows().cloned() else {
         return;
     };
     let metrics: Vec<crate::compare::StrategyMetrics> = rows.iter().map(|r| r.metrics).collect();
