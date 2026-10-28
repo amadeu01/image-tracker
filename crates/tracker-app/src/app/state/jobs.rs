@@ -677,27 +677,44 @@ mod tests {
     #[test]
     fn poll_tracking_done_populates_results_and_starts_export() {
         let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(30)));
+        let (handle, tx) = tracking::TrackingHandle::for_test();
+        state.job = Job::Tracking {
+            handle,
+            paused: false,
+        };
         state.tracking_run = TrackingRunState::started();
         state.tracking_run.gap_count = 1;
-        let bar_path = one_rep_bar_path();
-        state.tracking_run.bar_path = Some(bar_path);
-        let finished = state.tracking_run.apply(tracking::TrackingMessage::Done(
-            state.tracking_run.bar_path.clone().unwrap(),
-        ));
-        assert!(finished);
-        // Mirror what `poll_tracking` does on a `Done` message without a
-        // real worker thread/channel (unit-testable slice of the same
-        // logic that method runs).
-        state.bar_path = state.tracking_run.bar_path.clone();
-        if let Some(bp) = state.bar_path.clone() {
-            let results =
-                SessionResults::build(bp, state.calibration, state.tracking_run.gap_count);
-            assert_eq!(results.reps.len(), 1);
-            assert_eq!(results.quality.gap_count, 1);
-            state.results = Some(results);
-        }
-        assert!(state.results.is_some());
+        tx.send(tracking::TrackingMessage::Done(one_rep_bar_path()))
+            .unwrap();
+        assert!(state.poll_tracking());
+        assert!(!state.is_tracking());
+        let results = state.results.as_ref().expect("results built by poll");
+        assert_eq!(results.reps.len(), 1);
+        assert_eq!(results.quality.gap_count, 1);
         assert_eq!(state.current_step(), WorkflowStep::Review);
+    }
+
+    #[test]
+    fn poll_tracking_done_segments_reps_for_the_confirmed_lift() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(30)));
+        state.confirmed_lift = tracker_core::LiftType::Deadlift;
+        let (handle, tx) = tracking::TrackingHandle::for_test();
+        state.job = Job::Tracking {
+            handle,
+            paused: false,
+        };
+        state.tracking_run = TrackingRunState::started();
+        tx.send(tracking::TrackingMessage::Done(
+            super::super::test_support::deadlift_bar_path(),
+        ))
+        .unwrap();
+        assert!(state.poll_tracking());
+        let results = state.results.as_ref().expect("results built by poll");
+        assert_eq!(results.reps.len(), 1, "{:?}", results.reps);
+        assert_eq!(
+            results.reps[0].order,
+            tracker_core::PhaseOrder::ConcentricFirst
+        );
     }
 
     // -- Task 10.4: session lifecycle controls ------------------------------

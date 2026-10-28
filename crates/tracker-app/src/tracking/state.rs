@@ -274,6 +274,24 @@ pub struct TrackingHandle {
 }
 
 impl TrackingHandle {
+    /// Test back door: a handle fed by the returned sender instead of a real
+    /// worker, so tests can inject finished-tracking messages into
+    /// `AppState::poll_tracking`.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> (Self, std::sync::mpsc::Sender<TrackingMessage>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (reseed_tx, _) = std::sync::mpsc::channel();
+        let (control_tx, _) = std::sync::mpsc::channel();
+        (
+            Self {
+                messages: rx,
+                reseed_tx,
+                control_tx,
+            },
+            tx,
+        )
+    }
+
     /// Takes every message the worker has sent so far, without blocking.
     pub fn drain(&self) -> Vec<TrackingMessage> {
         self.messages.try_iter().collect()
