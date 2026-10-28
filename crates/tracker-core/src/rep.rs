@@ -395,29 +395,35 @@ pub fn segment_reps_for_lift(
             .filter(|r| r.phase == Phase::Ascending)
             .map(|r| run_displacement(velocity, r))
             .sum();
-        // Lowering span: runs after the pull up to the next Ascending run.
+        // Lowering span: runs after the pull up to the next Ascending run
+        // that is not a blip inside the lowering (see `blip_is_bridged`).
         let mut q = p;
-        while runs.get(q + 1).is_some_and(|r| r.phase != Phase::Ascending) {
+        while let Some(next) = runs.get(q + 1) {
+            if next.phase == Phase::Ascending && !blip_is_bridged(velocity, &runs, p, q, config) {
+                break;
+            }
             q += 1;
         }
         let lowering = &runs[p + 1..=q];
         let at_data_end = q + 1 == runs.len();
-        let lowering_travel: f64 = lowering.iter().map(|r| run_displacement(velocity, r)).sum();
+        let lowering_travel: f64 = lowering
+            .iter()
+            .filter(|r| r.phase != Phase::Ascending)
+            .map(|r| run_displacement(velocity, r))
+            .sum();
         let qualifies = pull_travel >= config.min_displacement
             && (at_data_end || lowering_travel >= config.min_displacement);
         if qualifies {
-            let last_descending = lowering.iter().rposition(|r| r.phase == Phase::Descending);
-            let (turn, end) = match last_descending {
-                Some(d) => {
-                    let turn = if lowering[0].phase == Phase::Idle {
-                        // Idle pause between pull and lowering: its midpoint.
-                        (lowering[0].start + lowering[0].end) / 2
-                    } else {
-                        runs[p].end
-                    };
-                    (turn, lowering[d].end)
-                }
-                None => (runs[p].end, runs[p].end),
+            let (turn, end) = if lowering.iter().any(|r| r.phase == Phase::Descending) {
+                let turn = if lowering[0].phase == Phase::Idle {
+                    // Idle pause between pull and lowering: its midpoint.
+                    (lowering[0].start + lowering[0].end) / 2
+                } else {
+                    runs[p].end
+                };
+                (turn, lowering_end(velocity, lowering))
+            } else {
+                (runs[p].end, runs[p].end)
             };
             reps.push(Rep {
                 order: PhaseOrder::ConcentricFirst,
@@ -429,6 +435,96 @@ pub fn segment_reps_for_lift(
         i = q + 1;
     }
     reps
+}
+
+/// Fraction of a deadlift lowering's total travel after which the rep is
+/// over: the rep ends at the first sample where the cumulative lowering
+/// displacement (from the start of the lowering span) has reached this share
+/// of the span's total. The bar is then essentially on the floor; slow tail
+/// samples just above the dead-band (noise, settling) never extend the rep.
+const LOWERING_END_FRACTION: f64 = 0.95;
+
+/// Descending samples slower than this fraction of the lowering's peak speed
+/// are treated as noise when measuring lowering travel for
+/// `LOWERING_END_FRACTION` (they contribute no displacement), so a long tail
+/// of 6-13 px/s samples cannot shift the 95% point into the noise.
+const LOWERING_NOISE_FRACTION: f64 = 0.10;
+
+/// True when the `Ascending` run `runs[q + 1]` is a blip inside the lowering
+/// that follows the pull ending at `runs[p]`, i.e. NOT the start of the next
+/// pull. All of: (1) its own travel is below `min_displacement` (it could not
+/// qualify as a pull); (2) the lowering so far (`runs[p+1..=q]`) already
+/// contains a `Descending` run; (3) looking ahead past `Idle` and further
+/// sub-gate `Ascending` runs, the next run is `Descending` (the same descent
+/// resumes). A blip at the start (no lowering yet), or one followed by rest
+/// and then a qualifying pull / the end of the data, is not bridged.
+fn blip_is_bridged(
+    velocity: &[VelocitySample],
+    runs: &[Run],
+    p: usize,
+    q: usize,
+    config: RepSegmentationConfig,
+) -> bool {
+    let sub_gate = |r: &Run| {
+        r.phase == Phase::Ascending && run_displacement(velocity, r) < config.min_displacement
+    };
+    if !sub_gate(&runs[q + 1]) {
+        return false;
+    }
+    if !runs[p + 1..=q].iter().any(|r| r.phase == Phase::Descending) {
+        return false;
+    }
+    runs[q + 2..]
+        .iter()
+        .find(|r| r.phase != Phase::Idle && !sub_gate(r))
+        .is_some_and(|r| r.phase == Phase::Descending)
+}
+
+/// End sample of a lowering span (`runs` after the pull, containing at least
+/// one `Descending` run): the first `Descending` sample at which the
+/// cumulative travel reaches `LOWERING_END_FRACTION` of the total travel.
+/// Only steps between two consecutive `Descending` samples of one run that are
+/// both at least `LOWERING_NOISE_FRACTION` of the peak speed count; `Ascending`
+/// blips and `Idle` runs add nothing.
+fn lowering_end(velocity: &[VelocitySample], lowering: &[Run]) -> usize {
+    let peak = lowering
+        .iter()
+        .filter(|r| r.phase == Phase::Descending)
+        .flat_map(|r| velocity[r.start..=r.end].iter().map(|s| s.vy))
+        .fold(0.0_f64, f64::max);
+    let floor = peak * LOWERING_NOISE_FRACTION;
+    let step = |k: usize| -> f64 {
+        let (a, b) = (velocity[k].vy, velocity[k + 1].vy);
+        if a < floor || b < floor {
+            return 0.0;
+        }
+        let dt = (velocity[k + 1].t_seconds - velocity[k].t_seconds).max(0.0);
+        0.5 * (a + b) * dt
+    };
+    let total: f64 = lowering
+        .iter()
+        .filter(|r| r.phase == Phase::Descending)
+        .map(|r| (r.start..r.end).map(step).sum::<f64>())
+        .sum();
+    let last_descending = lowering
+        .iter()
+        .rfind(|r| r.phase == Phase::Descending)
+        .map_or(0, |r| r.end);
+    if total <= 0.0 {
+        return last_descending;
+    }
+    let mut cumulative = 0.0;
+    for run in lowering.iter().filter(|r| r.phase == Phase::Descending) {
+        for k in run.start..=run.end {
+            if k > run.start {
+                cumulative += step(k - 1);
+            }
+            if cumulative >= LOWERING_END_FRACTION * total {
+                return k;
+            }
+        }
+    }
+    last_descending
 }
 
 /// Absolute vertical travel over a run, by trapezoidal integration of `vy`
@@ -746,11 +842,11 @@ mod tests {
         assert_eq!(reps[0].order, PhaseOrder::ConcentricFirst);
         assert_eq!(reps[0].eccentric_start, 10);
         assert_eq!(reps[0].bottom, 39);
-        assert_eq!(reps[0].concentric_end, 69);
+        assert_eq!(reps[0].concentric_end, 68);
         assert_eq!(reps[0].concentric_span(), 10..=39);
         assert_eq!(reps[0].bottom_index(), 10);
         assert_eq!(reps[0].turn_index(), 39);
-        assert_eq!(reps[0].eccentric_span(), 39..=69);
+        assert_eq!(reps[0].eccentric_span(), 39..=68);
     }
 
     /// Owner ruling 2026-10-28: each pull is a rep, even when the bar only
@@ -768,9 +864,9 @@ mod tests {
             let s = 10 + 60 * k;
             assert_eq!(rep.order, PhaseOrder::ConcentricFirst);
             assert_eq!(rep.concentric_span(), s..=s + 29);
-            assert_eq!(rep.eccentric_span(), s + 29..=s + 59);
+            assert_eq!(rep.eccentric_span(), s + 29..=s + 58);
             assert_eq!(rep.bottom_index(), s);
-            assert_eq!(rep.end_index(), s + 59);
+            assert_eq!(rep.end_index(), s + 58);
         }
     }
 
@@ -818,7 +914,7 @@ mod tests {
         assert_eq!(reps.len(), 1);
         assert_eq!(reps[0].concentric_span(), 10..=41);
         assert_eq!(reps[0].turn_index(), 41);
-        assert_eq!(reps[0].eccentric_span(), 41..=73);
+        assert_eq!(reps[0].eccentric_span(), 41..=72);
     }
 
     #[test]
@@ -832,7 +928,7 @@ mod tests {
         let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
         assert_eq!(reps.len(), 2);
         assert_eq!(reps[1].concentric_span(), 70..=101);
-        assert_eq!(reps[1].end_index(), 133);
+        assert_eq!(reps[1].end_index(), 132);
     }
 
     #[test]
@@ -858,9 +954,9 @@ mod tests {
         vys.extend(vec![0.0; 10]);
         let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
         assert_eq!(reps.len(), 2);
-        assert_eq!(reps[0].end_index(), 69);
+        assert_eq!(reps[0].end_index(), 68);
         assert_eq!(reps[1].start_frame_index(), 94);
-        assert_eq!(reps[1].end_index(), 153);
+        assert_eq!(reps[1].end_index(), 152);
     }
 
     #[test]
@@ -885,7 +981,7 @@ mod tests {
         vys.extend(leg(-200.0, 30));
         let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
         assert_eq!(reps.len(), 2);
-        assert_eq!(reps[0].end_index(), 69);
+        assert_eq!(reps[0].end_index(), 68);
         assert_eq!(reps[1].start_frame_index(), 70);
         assert_eq!(reps[1].turn_index(), 99);
         assert_eq!(reps[1].end_index(), 99);
@@ -907,7 +1003,7 @@ mod tests {
         assert_eq!(reps.len(), 1);
         assert_eq!(reps[0].start_frame_index(), 10);
         assert_eq!(reps[0].turn_index(), 39);
-        assert_eq!(reps[0].end_index(), 68);
+        assert_eq!(reps[0].end_index(), 67);
     }
 
     /// A clip that ends mid-lowering with under 40 px of lowering still
@@ -938,7 +1034,7 @@ mod tests {
         assert_eq!(reps.len(), 1);
         assert_eq!(reps[0].start_frame_index(), 10);
         assert_eq!(reps[0].concentric_span(), 10..=43);
-        assert_eq!(reps[0].end_index(), 73);
+        assert_eq!(reps[0].end_index(), 72);
     }
 
     /// `n` samples ramping linearly from `a` to `b`, both inclusive.
@@ -971,7 +1067,7 @@ mod tests {
             let base = 10 + 70 * k;
             assert_eq!(rep.start_frame_index(), base + 1);
             assert_eq!(rep.turn_index(), base + 33);
-            assert_eq!(rep.end_index(), base + 65);
+            assert_eq!(rep.end_index(), base + 62);
         }
     }
 
@@ -992,10 +1088,10 @@ mod tests {
         assert_eq!(reps.len(), 2);
         assert_eq!(reps[0].start_frame_index(), 10);
         assert_eq!(reps[0].turn_index(), 42);
-        assert_eq!(reps[0].end_index(), 74);
+        assert_eq!(reps[0].end_index(), 73);
         assert_eq!(reps[1].start_frame_index(), 81);
         assert_eq!(reps[1].turn_index(), 113);
-        assert_eq!(reps[1].end_index(), 145);
+        assert_eq!(reps[1].end_index(), 144);
     }
 
     /// Slow sustained drift after the set (the lifter walking away) is below
@@ -1009,7 +1105,7 @@ mod tests {
         vys.extend(vec![0.0; 10]);
         let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
         assert_eq!(reps.len(), 1);
-        assert_eq!(reps[0].end_index(), 69);
+        assert_eq!(reps[0].end_index(), 68);
     }
 
     #[test]
@@ -1042,5 +1138,126 @@ mod tests {
         assert_eq!(sq.bottom_index(), 20);
         assert_eq!(sq.concentric_span(), 20..=40);
         assert_eq!(sq.eccentric_span(), 5..=20);
+    }
+
+    // ---- task 13c: 95% lowering end, blips inside a lowering ----
+
+    /// Trailing noise above the dead-band after a clean lowering must not
+    /// stretch the rep. Lowering = samples 40..=69 at 200 px/s (6.67 px per
+    /// step, 193.3 px total); 95% = 183.7 px is first reached at 40 + 28 = 68.
+    #[test]
+    fn tail_noise_after_the_lowering_does_not_stretch_the_rep() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(pull_and_lower());
+        vys.extend(leg(8.0, 40));
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].start_frame_index(), 10);
+        assert_eq!(reps[0].turn_index(), 39);
+        assert_eq!(reps[0].end_index(), 68);
+    }
+
+    /// Mirror of v5: lowering, a ~5 px Ascending blip, lowering continues.
+    /// Descents 40..=54 and 61..=75 (93.3 px each, total 186.7); 95% = 177.3;
+    /// cum(k) = 93.3 + 6.667 * (k - 61) >= 177.3 first at k = 74.
+    #[test]
+    fn sub_gate_ascending_blip_inside_a_lowering_does_not_end_it() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(leg(-200.0, 30));
+        vys.extend(leg(200.0, 15));
+        vys.extend(leg(-30.0, 6));
+        vys.extend(leg(200.0, 15));
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].start_frame_index(), 10);
+        assert_eq!(reps[0].turn_index(), 39);
+        assert_eq!(reps[0].end_index(), 74);
+    }
+
+    /// A blip with the bar at rest on both sides is not inside a lowering:
+    /// it is ignored and merges neither neighbour.
+    #[test]
+    fn blip_between_two_real_pulls_with_the_bar_at_rest_is_still_ignored() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(pull_and_lower()); // 10..=69
+        vys.extend(leg(0.0, 10)); // 70..=79
+        vys.extend(leg(-30.0, 6)); // 80..=85 blip
+        vys.extend(leg(0.0, 10)); // 86..=95
+        vys.extend(pull_and_lower()); // 96..=155
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 2);
+        assert_eq!(reps[0].concentric_span(), 10..=39);
+        assert_eq!(reps[0].end_index(), 68);
+        // Ascending, Idle, Ascending is one pull whatever the gap (unchanged
+        // sticking-point rule), so the blip is absorbed into the next pull's
+        // start; it is never a rep of its own and the neighbours stay apart.
+        assert_eq!(reps[1].concentric_span(), 80..=125);
+        assert_eq!(reps[1].end_index(), 154);
+    }
+
+    /// A blip directly followed by a QUALIFYING pull is not bridged: the next
+    /// rep starts at the blip (Ascending, Idle, Ascending is one pull).
+    #[test]
+    fn a_qualifying_second_pull_after_a_blip_still_starts_a_new_rep() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(pull_and_lower()); // 10..=69
+        vys.extend(leg(-30.0, 6)); // 70..=75 blip
+        vys.extend(leg(0.0, 3)); // 76..=78
+        vys.extend(pull_and_lower()); // 79..=138
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 2);
+        assert_eq!(reps[0].end_index(), 68);
+        assert_eq!(reps[1].start_frame_index(), 70);
+        assert_eq!(reps[1].turn_index(), 108);
+        assert_eq!(reps[1].end_index(), 137);
+    }
+
+    #[test]
+    fn rep_end_is_never_before_the_turn_and_never_exceeds_the_data() {
+        let mut cases: Vec<Vec<f64>> = Vec::new();
+        let mut a = vec![0.0; 10];
+        a.extend(pull_and_lower());
+        a.extend(leg(-200.0, 30));
+        a.extend(leg(100.0, 8));
+        cases.push(a);
+        let mut b = vec![0.0; 10];
+        b.extend(leg(-200.0, 30));
+        b.extend(leg(0.0, 5));
+        b.extend(leg(200.0, 15));
+        b.extend(leg(-30.0, 6));
+        b.extend(leg(200.0, 15));
+        b.extend(leg(8.0, 40));
+        cases.push(b);
+        let mut c = vec![0.0; 10];
+        c.extend(leg(-200.0, 30));
+        cases.push(c);
+        for vys in cases {
+            let v = series(&vys);
+            for rep in segment_reps_for_lift(LiftType::Deadlift, &v, default_config()) {
+                assert!(rep.start_frame_index() <= rep.turn_index());
+                assert!(rep.turn_index() <= rep.end_index());
+                assert!(rep.end_index() < v.len());
+            }
+        }
+    }
+
+    /// Per-step travel is 10 px (300 px/s at 30 fps). 22 samples = 21 steps
+    /// (210 px): 95% = 199.5 px is reached at step 20, so end = start + 20.
+    /// 20 samples = 19 steps (190 px): 95% = 180.5, step 19 = the last sample.
+    /// (Lengths chosen so the boundary is never an exact float tie.)
+    #[test]
+    fn lowering_end_fraction_boundary() {
+        for (n, offset) in [(22usize, 20usize), (20, 19)] {
+            let mut vys = vec![0.0; 10];
+            vys.extend(leg(-300.0, 30)); // pull 10..=39
+            vys.extend(leg(300.0, n)); // lowering from 40
+            vys.extend(vec![0.0; 10]);
+            let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+            assert_eq!(reps.len(), 1);
+            assert_eq!(reps[0].end_index(), 40 + offset);
+        }
     }
 }
