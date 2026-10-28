@@ -537,6 +537,48 @@ mod tests {
         );
     }
 
+    /// A deadlift pulls first (y 100 -> 0) then lowers back and rests. A
+    /// confirmed `Deadlift` lift counts it concentric-first as one rep; the
+    /// `Unknown` default behaves exactly as before (see the test above).
+    #[test]
+    fn live_rep_count_counts_a_deadlift_concentric_first() {
+        let mut state = TrackingRunState::started();
+        let mut frame = 0u64;
+        let mut push = |state: &mut TrackingRunState, y: f64| {
+            state.apply(progress(frame, y));
+            frame += 1;
+        };
+        for _ in 0..5 {
+            push(&mut state, 100.0);
+        }
+        for i in 0..=10u64 {
+            push(&mut state, 100.0 - i as f64 * 10.0);
+        }
+        for i in 1..=10u64 {
+            push(&mut state, i as f64 * 10.0);
+        }
+        for _ in 0..10 {
+            push(&mut state, 100.0);
+        }
+        let tb = Timebase::new(30, 1).unwrap();
+        assert_eq!(
+            state.live_rep_count(tb, None, tracker_core::LiftType::Deadlift),
+            Some(1)
+        );
+        let unknown = state.live_rep_count(tb, None, tracker_core::LiftType::Unknown);
+        let expected = {
+            let bar = BarPath::new(&state.samples, &[], tb, 0);
+            let v = tracker_core::velocity_series(bar.points(), 5, None).unwrap();
+            tracker_core::segment_reps_for_lift(
+                tracker_core::LiftType::Unknown,
+                &v,
+                rep_segmentation_config(false),
+            )
+            .len()
+        };
+        assert_eq!(unknown, Some(expected), "Unknown keeps the default path");
+    }
+
     #[test]
     fn message_video_frame_index_is_some_only_for_progress() {
         let progress = TrackingMessage::Progress {

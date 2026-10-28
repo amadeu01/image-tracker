@@ -222,7 +222,11 @@ impl AppState {
             format!("automatic bar search found nothing: {why}"),
         );
         self.prepass_notice = Some(NO_BAR_FOUND_MESSAGE.to_string());
-        self.mode = Mode::PlacingSeed;
+        // Arm click-to-seed only from the idle mode: an in-progress
+        // calibration must not be silently abandoned.
+        if self.mode == Mode::ViewOnly {
+            self.mode = Mode::PlacingSeed;
+        }
     }
 
     /// Confirms the pending proposal: it becomes the Seed (frame and
@@ -446,6 +450,71 @@ mod tests {
         state.poll_prepass();
         assert!(state.seed.is_none());
         assert_eq!(state.banner_text(), NO_BAR_FOUND_MESSAGE);
+    }
+
+    #[test]
+    fn worker_that_drops_its_sender_without_done_is_reported_as_failure() {
+        let (mut state, tx, _) = state_finding_bar();
+        drop(tx);
+        assert!(state.poll_prepass());
+        assert!(!state.is_finding_bar(), "job cleared, no endless spinner");
+        assert!(state.seed.is_none());
+        assert_eq!(state.banner_text(), NO_BAR_FOUND_MESSAGE);
+        assert_eq!(state.mode(), Mode::PlacingSeed);
+    }
+
+    #[test]
+    fn reject_leaves_no_job_and_no_pending_proposal() {
+        let mut state = state_with_proposal(LiftType::Squat);
+        state.reject_proposal();
+        assert!(matches!(state.job, Job::Idle));
+        assert!(state.proposal().is_none());
+        assert!(!state.is_finding_bar());
+    }
+
+    #[test]
+    fn banner_cancel_leaves_no_job_and_no_pending_proposal() {
+        let (mut state, _tx, _) = state_finding_bar();
+        state.cancel_prepass();
+        assert!(matches!(state.job, Job::Idle));
+        assert!(state.proposal().is_none());
+        assert!(!state.is_finding_bar());
+    }
+
+    #[test]
+    fn no_proposal_does_not_abandon_an_in_progress_calibration() {
+        let (mut state, tx, _) = state_finding_bar();
+        state.toggle_calibrating();
+        state.place_calibration_point(Point::new(1.0, 1.0));
+        let before = state.mode();
+        assert!(matches!(
+            before,
+            Mode::Calibrating {
+                first_point: Some(_),
+                ..
+            }
+        ));
+        tx.send(PrepassMessage::Done(Ok(None))).unwrap();
+        state.poll_prepass();
+        assert_eq!(state.mode(), before, "calibration untouched");
+        assert_eq!(state.prepass_notice(), Some(NO_BAR_FOUND_MESSAGE));
+    }
+
+    #[test]
+    fn manual_seed_click_during_tracking_does_not_change_the_confirmed_lift() {
+        let mut state = state_with_proposal(LiftType::Deadlift);
+        state.confirm_proposal().unwrap();
+        state.job = Job::Tracking {
+            handle: super::super::test_support::dummy_tracking_handle(),
+            paused: false,
+        };
+        state.toggle_placing_seed();
+        let seed = state.seed;
+        state.place_seed(Point::new(99.0, 99.0));
+        assert_eq!(state.seed, seed, "seed not overwritten mid-run");
+        assert_eq!(state.confirmed_lift(), LiftType::Deadlift);
+        let results = state.build_results(deadlift_bar_path());
+        assert_eq!(results.reps[0].order, PhaseOrder::ConcentricFirst);
     }
 
     #[test]

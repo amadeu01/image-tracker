@@ -8,7 +8,7 @@
 //! `mod.rs` since it's derived from `jobs.rs`'s tracking state, not owned by
 //! this concern.
 
-use super::{AppState, EventLevel};
+use super::{AppState, EventLevel, Job};
 use crate::frame_cache::clamp_frame_index;
 
 /// What clicking on the frame view currently does.
@@ -125,6 +125,16 @@ impl AppState {
     /// Only takes effect in `Mode::PlacingSeed`.
     pub fn place_seed(&mut self, position: tracker_core::Point) {
         if self.mode != Mode::PlacingSeed {
+            return;
+        }
+        // Overwriting the seed while a tracking/strategy run is using it is
+        // nonsensical and would also reset the confirmed lift the run's
+        // results depend on, so refuse. (Every other case is unchanged.)
+        if matches!(self.job, Job::Tracking { .. } | Job::Benchmarking { .. }) {
+            self.push_event(
+                EventLevel::Warn,
+                "cannot place a new seed while a run is in progress".to_string(),
+            );
             return;
         }
         // A manual seed always wins: stop any automatic search and forget any
