@@ -397,7 +397,6 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
         fps_den: metadata.fps_den,
         seed_frame_index: seed.frame_index,
         seed_position: seed.position,
-        lift: seed.lift,
         tracker_config: tracking::tracker_config(args.tuning.clone()),
         session_config: tracking::session_config(args.tuning.clone()),
         tracker_selection: args.tracker_selection,

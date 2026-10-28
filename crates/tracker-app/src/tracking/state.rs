@@ -315,9 +315,6 @@ pub struct TrackingJob {
     pub fps_den: u64,
     pub seed_frame_index: u64,
     pub seed_position: Point,
-    /// Lift type, when known (auto runs). `Unknown` keeps eccentric-first
-    /// rep segmentation; consumers segment with `segment_reps_for_lift`.
-    pub lift: tracker_core::LiftType,
     pub tracker_config: TemplateTrackerConfig,
     pub session_config: TrackingSessionConfig,
     /// Which tracker to use once the seed frame is decoded (task 4.3).
