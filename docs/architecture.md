@@ -229,6 +229,7 @@ now models it as one enum instead:
 ```rust
 enum Job {
     Idle,
+    FindingBar { handle: PrepassHandle, progress: Option<(u64, u64)> },
     Tracking { handle: TrackingHandle, paused: bool },
     Exporting { handle: ExportHandle },
     Benchmarking { handle: BenchmarkHandle, progress: Option<(usize, usize)> },
@@ -248,6 +249,12 @@ the same as `bar_path`/`results`/`benchmark_rows`/`exported_files`. See task
 (20.6: grouping `seed`/`calibration`/`bar_path`/`results` into a
 `TrackingRun` value — surveyed at 113 call sites, too large to fold into the
 same session as the `Job` enum).
+
+`FindingBar` is the cancelable unseeded pre-pass (`prepass_job.rs`) that
+proposes a bar for one-click confirmation. A proposal is never a Seed;
+tracking and the benchmark are refused while it runs, a manual seed cancels
+it, and dropping the `AppState` (opening another video) cancels it too.
+See `state/proposal.rs`.
 
 ### Deliberately *not* DDD
 

@@ -11,10 +11,17 @@ use eframe::egui;
 use super::palette::{self, BannerKind};
 use super::state::{AppState, Mode, Phase};
 
-pub fn show(ctx: &egui::Context, state: Option<&AppState>) {
-    let Some(state) = state else {
-        return;
-    };
+/// What the user asked for through the banner's buttons. `Confirm` is handled
+/// by `TrackerApp` (it also needs the frame cache for the tracker suggestion);
+/// Cancel and "Not the bar" are applied directly to the state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BannerAction {
+    ConfirmProposal,
+}
+
+pub fn show(ctx: &egui::Context, state: Option<&mut AppState>) -> Option<BannerAction> {
+    let state = state?;
+    let mut action = None;
     let dark_mode = ctx.style().visuals.dark_mode;
     let chrome = palette::chrome_palette(dark_mode);
     // Task 13.7: informational states render as the design's *quiet* hint
@@ -43,12 +50,26 @@ pub fn show(ctx: &egui::Context, state: Option<&AppState>) {
             // than the rest of the chrome — same text/color logic as
             // before this restyle, just a smaller point size so it reads
             // as a hint strip rather than another heading-weight line.
-            ui.label(
-                egui::RichText::new(state.banner_text())
-                    .color(text)
-                    .size(12.5),
-            );
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(state.banner_text())
+                        .color(text)
+                        .size(12.5),
+                );
+                if state.is_finding_bar() && ui.button("Cancel").clicked() {
+                    state.cancel_prepass();
+                }
+                if state.proposal().is_some() {
+                    if ui.button("Confirm").clicked() {
+                        action = Some(BannerAction::ConfirmProposal);
+                    }
+                    if ui.button("Not the bar").clicked() {
+                        state.reject_proposal();
+                    }
+                }
+            });
         });
+    action
 }
 
 /// Which of `palette::banner_colors`'s four "temperatures" the banner
@@ -56,12 +77,21 @@ pub fn show(ctx: &egui::Context, state: Option<&AppState>) {
 /// even before reading it (task 10.7's "colored background per mode").
 /// Falls back to `Neutral` for the between-steps idle state.
 fn banner_kind(state: &AppState) -> BannerKind {
+    if state.is_finding_bar() {
+        return BannerKind::Working;
+    }
+    if state.proposal().is_some() {
+        return BannerKind::ActionNeeded;
+    }
     match state.phase() {
         Phase::TrackingPath { .. } => BannerKind::Working,
         Phase::ComputingMetrics => BannerKind::Working,
         Phase::Review => BannerKind::Done,
         Phase::Idle => match state.mode() {
             Mode::PlacingSeed => BannerKind::ActionNeeded,
+            Mode::ViewOnly if state.prepass_notice().is_some() && state.seed.is_none() => {
+                BannerKind::ActionNeeded
+            }
             Mode::Calibrating { .. } => BannerKind::ActionNeeded,
             Mode::ViewOnly => BannerKind::Neutral,
         },

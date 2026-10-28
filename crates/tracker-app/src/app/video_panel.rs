@@ -148,6 +148,21 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
             }
         }
 
+        // Proposed bar (not yet a Seed): a ring the size of the proposed plate
+        // plus a label, only on the frame it was found on.
+        if let (Some(p), Some(headline)) = (state.proposal(), state.proposal_headline()) {
+            if p.frame_index == state.current_frame {
+                draw_proposal_marker(
+                    ui.painter(),
+                    image_rect,
+                    tex_size,
+                    p.position,
+                    p.plate_diameter_px / 2.0,
+                    &format!("{headline}\n{}", p.lift.reason),
+                );
+            }
+        }
+
         if let Some(seed) = state.seed {
             if seed.frame_index == state.current_frame {
                 // 15.3: the seed region IS the template patch — draw the
@@ -375,6 +390,45 @@ fn draw_patch_hint(
         text_rect.expand(3.0),
         3.0,
         egui::Color32::from_black_alpha(150),
+    );
+    painter.galley(text_rect.min, galley, egui::Color32::WHITE);
+}
+
+/// Draws the proposed-bar marker: a ring of `radius_px` image pixels (half the
+/// proposed plate diameter) around `center_px`, a crosshair at the centre and
+/// a label beside it on a translucent backdrop. Painter overlay only.
+fn draw_proposal_marker(
+    painter: &egui::Painter,
+    image_rect: egui::Rect,
+    image_native_size: egui::Vec2,
+    center_px: tracker_core::Point,
+    radius_px: f64,
+    label: &str,
+) {
+    let Some(center) = image_px_to_screen(image_rect, image_native_size, center_px) else {
+        return;
+    };
+    let scale = image_rect.width() / image_native_size.x.max(1.0);
+    let radius = (radius_px as f32 * scale).max(6.0);
+    let color = egui::Color32::from_rgb(255, 200, 40);
+    painter.circle_stroke(
+        center,
+        radius + 1.0,
+        egui::Stroke::new(1.0f32, egui::Color32::from_black_alpha(180)),
+    );
+    painter.circle_stroke(center, radius, egui::Stroke::new(2.5f32, color));
+    draw_crosshair(painter, image_rect, image_native_size, center_px, color);
+    let galley = painter.layout_no_wrap(
+        label.to_string(),
+        egui::FontId::proportional(12.0),
+        egui::Color32::WHITE,
+    );
+    let anchor = egui::pos2(center.x + radius + 8.0, center.y);
+    let text_rect = egui::Align2::LEFT_CENTER.anchor_size(anchor, galley.size());
+    painter.rect_filled(
+        text_rect.expand(3.0),
+        3.0,
+        egui::Color32::from_black_alpha(160),
     );
     painter.galley(text_rect.min, galley, egui::Color32::WHITE);
 }

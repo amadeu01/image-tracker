@@ -203,6 +203,10 @@ impl TrackerApp {
         if let Some(burn) = theme::load_burn_overlay_in_rep_clips() {
             state.settings_mut().burn_overlay_in_rep_clips = burn;
         }
+        // Find the bar on its own: the pre-pass runs in the background and,
+        // if it finds one, proposes it for one-click confirmation. A manual
+        // seed still wins at any time (it cancels the search).
+        state.start_prepass();
         self.state = Some(state);
         self.decode = Some(decode_worker::spawn_decode_worker(decoder, 16));
         self.frames.clear();
@@ -374,6 +378,31 @@ impl TrackerApp {
         }
     }
 
+    /// Confirms the pending bar proposal (banner "Confirm"): it becomes the
+    /// Seed, and the tracker suggestion is requested for its frame exactly as
+    /// for a click-placed seed.
+    fn confirm_proposal(&mut self) {
+        let Some(state) = &mut self.state else {
+            return;
+        };
+        let Some(seed) = state.confirm_proposal() else {
+            return;
+        };
+        if let Some(frame) = self.frames.get(&seed.frame_index) {
+            let kind = tracker_core::suggest_tracker(
+                frame,
+                seed.position,
+                tracker_core::TrackerSuggestionConfig::default(),
+            );
+            state.note_seed_suggestion(kind);
+        } else {
+            self.pending_seed_suggestion = Some((seed.frame_index, seed.position));
+            if let Some(decode) = &self.decode {
+                decode.want(seed.frame_index);
+            }
+        }
+    }
+
     /// Requests the currently-wanted frame from the decode worker if the
     /// displayed texture doesn't already match `state.current_frame` (task
     /// 18.1, replacing the synchronous `FrameCache::get` this used to call
@@ -438,6 +467,14 @@ impl eframe::App for TrackerApp {
             if state.poll_benchmark() {
                 ctx.request_repaint();
             }
+            if state.poll_prepass() {
+                ctx.request_repaint();
+            }
+            // The pre-pass reports whole-percent progress only, so a modest
+            // repaint cadence is enough to pick it up (no busy repaint).
+            if state.is_finding_bar() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
             // While a run/export/benchmark is active, keep repainting so
             // progress keeps flowing even if nothing else prompts a redraw.
             if state.is_tracking() || state.is_exporting() || state.is_benchmarking() {
@@ -488,7 +525,9 @@ impl eframe::App for TrackerApp {
         handle_frame_step_shortcuts(ctx, self.state.as_mut());
 
         toolbar::show(ctx, self);
-        banner::show(ctx, self.state.as_ref());
+        if banner::show(ctx, self.state.as_mut()) == Some(banner::BannerAction::ConfirmProposal) {
+            self.confirm_proposal();
+        }
         bottom_bar::show_status_bar(ctx, self.state.as_ref());
         bottom_bar::show_scrub_bar(ctx, self.state.as_mut());
         // Thumbnail strip after the scrub bar so it stacks above it
