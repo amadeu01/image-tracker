@@ -569,6 +569,10 @@ mod tests {
         state.set_mode(Mode::PlacingSeed);
         state.place_seed(Point::new(99.0, 99.0));
         assert_eq!(state.mode(), Mode::ViewOnly, "refusal disarms the mode");
+        assert!(
+            state.events.iter().any(|e| e.level == EventLevel::Warn),
+            "refusal pushes a Warn event"
+        );
         // And it cannot be armed in the first place.
         state.toggle_placing_seed();
         assert_eq!(state.mode(), Mode::ViewOnly);
@@ -593,6 +597,21 @@ mod tests {
         assert_eq!(state.mode(), Mode::ViewOnly);
     }
 
+    /// Expected `place_seed` outcome per `Job` variant. Exhaustive on
+    /// purpose (no wildcard arm): adding a `Job` variant breaks the build
+    /// here until its seed-click behaviour is decided and tabulated.
+    fn expected_accepts_seed(state: &AppState) -> bool {
+        match &state.job {
+            Job::Idle => true,
+            Job::FindingBar { .. } => true,
+            Job::Tracking { .. } => {
+                state.tracking_run.session_state == Some(tracker_core::SessionState::NeedsReseed)
+            }
+            Job::Benchmarking { .. } => false,
+            Job::Exporting { .. } => true,
+        }
+    }
+
     #[test]
     fn place_seed_behaviour_for_every_job_variant() {
         let mut paused = confirmed_tracking_state(LiftType::Squat, false);
@@ -604,26 +623,32 @@ mod tests {
         };
         let mut idle = state_with_proposal(LiftType::Squat);
         idle.job = Job::Idle;
-        let cases: Vec<(&str, AppState, bool)> = vec![
-            ("Idle", idle, true),
-            ("FindingBar", state_finding_bar().0, true),
+        let mut benchmarking = state_with_proposal(LiftType::Squat);
+        benchmarking.job = Job::Benchmarking {
+            handle: super::super::test_support::dummy_benchmark_handle(&benchmarking),
+            progress: None,
+        };
+        let cases: Vec<(&str, AppState)> = vec![
+            ("Idle", idle),
+            ("FindingBar", state_finding_bar().0),
             (
                 "Tracking running",
                 confirmed_tracking_state(LiftType::Squat, false),
-                false,
             ),
-            ("Tracking user-paused", paused, false),
+            ("Tracking user-paused", paused),
             (
                 "Tracking NeedsReseed",
                 confirmed_tracking_state(LiftType::Squat, true),
-                true,
             ),
-            ("Exporting", exporting, true),
+            ("Benchmarking", benchmarking),
+            ("Exporting", exporting),
         ];
-        for (name, mut state, accepted) in cases {
+        for (name, mut state) in cases {
+            let accepted = expected_accepts_seed(&state);
             state.set_mode(Mode::PlacingSeed);
             let p = Point::new(123.0, 45.0);
-            state.place_seed(p);
+            let returned = state.place_seed(p);
+            assert_eq!(returned, accepted, "{name}: return value");
             assert_eq!(
                 state.seed.map(|s| s.position) == Some(p),
                 accepted,

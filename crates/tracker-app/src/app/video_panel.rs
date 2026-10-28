@@ -72,8 +72,8 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
                     state.metadata().display_height(),
                 ) {
                     if state.mode() == Mode::PlacingSeed {
-                        state.place_seed(image_px);
-                        if let Some(seed) = state.seed() {
+                        let stored = state.place_seed(image_px);
+                        if let Some(seed) = state.seed().filter(|_| stored) {
                             // 18.1 (finding G2): this used to call
                             // `cache.get(seed.frame_index)` synchronously,
                             // spawning ffmpeg on the UI thread if the seed

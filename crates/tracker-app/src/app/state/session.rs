@@ -162,10 +162,12 @@ impl AppState {
     }
 
     /// Record a Seed at the given image-pixel position on the current frame.
-    /// Only takes effect in `Mode::PlacingSeed`.
-    pub fn place_seed(&mut self, position: tracker_core::Point) {
+    /// Only takes effect in `Mode::PlacingSeed`. Returns whether a seed was
+    /// stored, so callers can skip follow-up work (tracker suggestion) for a
+    /// refused click rather than act on the stale previous seed.
+    pub fn place_seed(&mut self, position: tracker_core::Point) -> bool {
         if self.mode != Mode::PlacingSeed {
-            return;
+            return false;
         }
         // Overwriting the seed while a tracking/strategy run is using it is
         // nonsensical and would also reset the confirmed lift the run's
@@ -177,19 +179,20 @@ impl AppState {
                 EventLevel::Warn,
                 "cannot place a new seed while a run is in progress".to_string(),
             );
-            return;
+            return false;
         }
         // A reseed after the tracker lost the bar (`NeedsReseed`) only
         // replaces the seed: it never changes which lift this is, so the
         // confirmed lift (and any proposal) must survive.
         if matches!(self.job, Job::Tracking { .. }) {
             self.set_seed_at_current_frame(position);
-            return;
+            return true;
         }
         // A manual seed always wins: stop any automatic search and forget any
         // proposal and its lift (a manual seed carries no lift type).
         self.clear_seed_proposal_state();
         self.set_seed_at_current_frame(position);
+        true
     }
 
     fn set_seed_at_current_frame(&mut self, position: tracker_core::Point) {
@@ -347,6 +350,17 @@ mod tests {
         let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
         state.place_seed(tracker_core::Point::new(1.0, 2.0));
         assert!(state.seed.is_none());
+    }
+
+    #[test]
+    fn place_seed_reports_whether_a_seed_was_stored() {
+        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(10)));
+        let p = tracker_core::Point::new(1.0, 2.0);
+        assert!(!state.place_seed(p), "refused outside placing mode");
+        assert!(state.seed.is_none());
+        state.toggle_placing_seed();
+        assert!(state.place_seed(p), "accepted in placing mode");
+        assert!(state.seed.is_some());
     }
 
     #[test]
