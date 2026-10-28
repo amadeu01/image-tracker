@@ -464,7 +464,13 @@ graph LR
   `segment_reps_for_lift(lift, velocity, config)`. A deadlift is
   concentric-first: a rep is one pull, optional lockout, and its lowering, and
   ends when the bar returns to the floor, with or without rest. Each pull is
-  its own rep (owner ruling 2026-10-28), so touch-and-go counts one per pull. **Role-swap trap:** for `ConcentricFirst` the three index fields of
+  its own rep (owner ruling 2026-10-28), so touch-and-go counts one per pull.
+  The lowering is the whole Descending/Idle span after the pull, up to the
+  next pull; the pull and that whole span must each reach `min_displacement`,
+  so a stalled lowering is one lowering. `Ascending, Idle, Ascending` with no
+  Descending between is one pull. A qualifying pull at the end of the clip is
+  kept even when its lowering is truncated or absent.
+  **Role-swap trap:** for `ConcentricFirst` the three index fields of
   `Rep` (`eccentric_start`, `bottom`, `concentric_end`) swap phase roles
   (`eccentric_start` is the start of the pull, `bottom` the lockout,
   `concentric_end` the end of the lowering). Never read them by name for

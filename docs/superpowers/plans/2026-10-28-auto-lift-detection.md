@@ -18,7 +18,7 @@
 - One task = one commit, message ends `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`. Never push; never `git add -A`; never touch `test_videos/*`, untracked `state`, `crates/tracker-app/x.overlay.mp4`.
 - Plate scale comes from an owner-confirmed `plate_px` per clip. Never from the detector, never the 134 px default.
 - Pass bar (acceptance, Task 8): lift type right on 4/4 clips ("unknown" counts as a miss); rep count equals the owner's on every clip; at least 90% of labelled visible frames within 0.1 plate-diameters (`grade`); Gap or Lost where the bar is hidden, never a confident wrong position.
-- Rep rules: squat counts only full descent and ascent (unrack, walk-out, re-rack excluded). Deadlift: a new rep starts only after the bar rests on the floor, even briefly.
+- Rep rules: squat counts only full descent and ascent (unrack, walk-out, re-rack excluded). Deadlift: a new rep starts only after the bar rests on the floor, even briefly. (superseded 2026-10-28: each pull is a rep)
 - Size tag per task is S/M/L. Run `/brooks-audit` after Task 5 and again after Task 9.
 
 ## Review Focus
@@ -71,7 +71,7 @@ The owner runs `python3 groundtruth/serve.py`, opens `label.html?v=v5` through `
 - [ ] **Step 1:** Write failing `classify_lift` tests using synthetic `TrackPoint` sequences (positions in image convention, y down): `deadlift_track_starting_low_and_rising_over_one_plate_diameter_is_deadlift`; `squat_track_dipping_and_returning_to_start_height_is_squat`; `static_track_is_unknown`; `empty_track_is_unknown`; `short_dip_and_return_below_bench_range_is_unknown_not_bench` (Bench is never returned from a bar track alone until bench clips exist; the `reason` says so). Every `Unknown` has a non-empty `reason`.
 - [ ] **Step 2:** Run `cargo test -p tracker-core lift` — expected FAIL (module missing).
 - [ ] **Step 3:** Implement `lift.rs`. Rule shape: express all distances in `plate_diameter_px` units from the track itself. Deadlift = the lowest point is near the start and the track rises at least a threshold of plate diameters. Squat = the track descends then returns near its start height with range above a floor threshold. Everything else `Unknown`. Thresholds are named consts in `LiftClassifierConfig`, tuned on the v5–v8 labels in Task 8, not guessed constants like 134.
-- [ ] **Step 4:** Write failing rep tests: `deadlift_rep_is_concentric_then_eccentric_with_floor_rest`, `deadlift_bounce_without_rest_is_one_rep`, `deadlift_with_rest_between_pulls_is_two_reps`, `squat_order_is_unchanged_from_segment_reps`, `unknown_lift_falls_back_to_eccentric_first`. Run, expected FAIL.
+- [ ] **Step 4:** Write failing rep tests: `deadlift_rep_is_concentric_then_eccentric_with_floor_rest`, `deadlift_bounce_without_rest_is_one_rep`, `deadlift_with_rest_between_pulls_is_two_reps` (superseded 2026-10-28: each pull is a rep), `squat_order_is_unchanged_from_segment_reps`, `unknown_lift_falls_back_to_eccentric_first`. Run, expected FAIL.
 - [ ] **Step 5:** Implement `segment_reps_for_lift` (ConcentricFirst for `Deadlift`, else EccentricFirst) reusing the existing velocity-sign run logic; make `rep_metrics` pick the concentric span from `Rep::order`. Run `cargo test --workspace`; expected 533 + new tests, 0 failed.
 - [ ] **Step 6:** Commit `feat(core): lift type classifier and lift-aware rep segmentation`.
 

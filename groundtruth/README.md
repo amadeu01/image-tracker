@@ -119,7 +119,9 @@ videos).
      the walk-out and the re-rack are not reps.
    - **Deadlift**: each pull is a rep. A rep ends when the bar returns to
      the floor, whether or not it rests there, so lowering straight into the
-     next pull (touch-and-go) counts one rep per pull.
+     next pull (touch-and-go) counts one rep per pull. A pull at the end of
+     the clip counts if it reaches the displacement gate, even when the clip
+     ends before the bar is back on the floor.
 4. Fill `plate_px` per clip: the plate's diameter in pixels in that video's
    frame, measured with two clicks on opposite edges of the plate on a frame
    where it is fully visible (in the GUI calibration tool, or from the image

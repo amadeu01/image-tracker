@@ -145,7 +145,7 @@ UNVERIFIED: seed was auto-proposed; confirm or pass --seed-frame/--seed
 - `lift:` is `squat`, `deadlift` or `unknown`, with the reason in brackets
   (bench press is never auto-detected). Deadlift reps are segmented
   pull-first, each pull is one rep, and a rep ends when the bar returns to
-  the floor (with or without rest).
+  the floor (with or without rest); a pull at the end of the clip counts.
 - `seed proposal:` is the frame, Bar Point (pixels), apparent plate diameter in
   pixels and a 0-1 confidence. Low confidence or `unknown` means: check the
   overlay, or rerun with a manual seed.

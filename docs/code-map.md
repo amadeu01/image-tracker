@@ -318,7 +318,8 @@ up); `rep_metrics` aggregates each concentric phase:
 - **Velocity loss** = drop from rep 1's mean to the worst rep (fatigue proxy)
 
 A deadlift is concentric-first, so the app calls `segment_reps_for_lift`
-(each pull is a rep; it ends when the bar returns to the floor) and reads phases through the
+(each pull is a rep; it ends when the bar returns to the floor, and a
+qualifying pull at the end of the clip counts) and reads phases through the
 phase-neutral accessors (`concentric_span()`, `bottom_index()`, ...), never
 the raw `Rep` index fields; see architecture.md section 6b.
 
