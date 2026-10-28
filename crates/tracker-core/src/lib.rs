@@ -22,6 +22,7 @@ pub mod plate_finder;
 pub mod preprocessor;
 pub mod rep;
 pub mod rep_metrics;
+pub mod seed_proposal;
 pub mod session;
 pub mod smoothing;
 pub mod suggest;
@@ -58,6 +59,9 @@ pub use rep::{
 pub use rep_metrics::{
     all_rep_metrics, linear_trend, rep_metrics, set_duration_seconds, stop_set_evaluation,
     velocity_loss_percent, RepMetrics, StopSet,
+};
+pub use seed_proposal::{
+    propose_seed, FrameDetections, SeedProposal, SeedProposalConfig, SeedProposalConfigBuilder,
 };
 pub use session::{
     Gap, Sample, SessionState, Source, TrackingSession, TrackingSessionConfig,
