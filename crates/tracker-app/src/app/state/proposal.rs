@@ -430,6 +430,23 @@ mod tests {
     }
 
     #[test]
+    fn correcting_near_the_proposal_announces_the_kept_lift() {
+        let state = corrected(Some(LiftType::Deadlift), 7, Point::new(12.0, 34.0));
+        assert!(
+            state.events().iter().any(|e| e.level == EventLevel::Info
+                && e.message == "seed corrected; keeping proposed lift: Deadlift"),
+            "{:?}",
+            state.events()
+        );
+    }
+
+    #[test]
+    fn correcting_far_does_not_announce_a_lift() {
+        let state = corrected(Some(LiftType::Deadlift), 7, Point::new(12.0, 34.0 + 200.0));
+        assert!(!state.events().iter().any(|e| e.message.contains("keeping")));
+    }
+
+    #[test]
     fn correcting_on_a_different_frame_resets_the_lift() {
         let state = corrected(Some(LiftType::Deadlift), 8, Point::new(12.0, 34.0));
         assert_eq!(state.confirmed_lift(), LiftType::Unknown);

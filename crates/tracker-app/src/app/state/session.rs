@@ -197,6 +197,15 @@ impl AppState {
         self.clear_seed_proposal_state();
         self.confirmed_lift = kept_lift;
         self.set_seed_at_current_frame(position);
+        if kept_lift != tracker_core::LiftType::Unknown {
+            self.push_event(
+                EventLevel::Info,
+                format!(
+                    "seed corrected; keeping proposed lift: {}",
+                    super::proposal::lift_label(kept_lift)
+                ),
+            );
+        }
         true
     }
 
