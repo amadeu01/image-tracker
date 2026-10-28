@@ -414,7 +414,7 @@ graph LR
     Pre -->|"each sampled frame"| FP["find_plates (plate_finder)"]
     FP --> FD["FrameDetections per sample"]
     FD --> PS["propose_seed (seed_proposal)"]
-    PS --> SP[["SeedProposal: frame, Bar Point, plate_px, LiftClassification, confidence"]]
+    PS --> SP[["SeedProposal: frame, Bar Point, plate_diameter_px, LiftClassification, confidence"]]
     SP -->|GUI| Conf["banner: Confirm / Not the bar"]
     SP -->|CLI| Auto["auto-accept, UNVERIFIED"]
     Conf --> Seed[["Seed + confirmed LiftType"]]

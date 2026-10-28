@@ -174,6 +174,13 @@ Auto runs also write `--out/<stem>.run.json` (and print
 The export `<stem>.json` is unchanged (still a top-level array); `grade` reads
 the lift from this sidecar.
 
+The "unverified" marker lives only in the sidecar (`verified: false`) and on
+stdout; the exported `.csv`, `.json` and `.reps.json` carry nothing about it.
+
+Sidecars written before the field rename (key `plate_px`, now
+`detected_plate_px`) no longer parse; regenerate them by re-running auto
+tracking on the clip.
+
 Known limit: tracking runs forward from the proposed frame, so a proposal made
 late in the clip drops the reps before it. The thresholds behind auto mode
 were tuned on four clips and have not yet been checked against hand labels

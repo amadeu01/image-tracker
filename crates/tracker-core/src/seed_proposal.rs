@@ -1263,4 +1263,23 @@ mod tests {
         assert_eq!(ok.merge_speed_gate_plates_per_frame(), 0.3);
         assert_eq!(ok.merge_size_tolerance(), 0.1);
     }
+
+    // FINDING (see .superpowers/sdd/2026-10-28-auto-lift-detection/task-14-report.md):
+    // propose_seed returns the head-sized circle as the bar. The static plate
+    // is dropped by the static test BEFORE the shared scale is computed, so
+    // the head becomes the largest moving diameter and passes the
+    // min_relative_diameter filter. Ignored until the controller decides.
+    #[test]
+    #[ignore = "real defect: head-sized mover proposed when the plate is static; see task-14-report.md"]
+    fn only_a_head_sized_circle_moves_while_the_plate_is_static_is_not_proposed_as_the_bar() {
+        // A static plate-sized circle in every sample plus a head-sized one
+        // (0.4x the plate) moving a lot elsewhere: no moving plate-sized
+        // track exists, so nothing should be proposed.
+        let head = rising_strided(0, 40, 1, 3.0, 0.4 * R);
+        let dets: Vec<_> = head
+            .into_iter()
+            .map(|(i, h)| frame(i, vec![cand(500.0, 800.0, R), h]))
+            .collect();
+        assert!(propose_seed(&dets, &cfg()).is_none());
+    }
 }

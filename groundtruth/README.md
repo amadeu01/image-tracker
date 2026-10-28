@@ -21,6 +21,10 @@ ground truth rather than the tracker's opinion of itself.
   report a confident position. `target` is `bar_sleeve_end`, **not** the
   plate-disc centre — parallax and plate sag mean the disc centre is not the
   bar's true position; this was corrected during labelling (see PLAN 17.1).
+  A `blurred` status is reserved for genuinely ambiguous frames: a blurred
+  label is not scored and does not count against coverage, so labelling a
+  stretch the tracker skipped as `blurred` would hide that miss. Use
+  `visible` whenever the bar can be seen.
 - **`frames_index.json`** — the sampled frame indices per video; must match
   the `frame_index` column in the CSVs and the indices `extract_frames.sh`
   pulls.
