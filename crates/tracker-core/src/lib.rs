@@ -24,6 +24,7 @@ pub mod session;
 pub mod smoothing;
 pub mod suggest;
 pub mod tracker;
+pub mod tuning;
 pub mod velocity;
 pub mod video_sink;
 
@@ -62,6 +63,13 @@ pub use suggest::{
 pub use tracker::{
     StepOutcome, TemplateTracker, TemplateTrackerConfig, TemplateTrackerConfigBuilder,
     TemplateTrackerError, Tracker,
+};
+pub use tuning::{
+    color_tracker_config, default_circle_tracker_config, default_color_tracker_config,
+    default_session_config, default_tracker_config, rep_segmentation_config, session_config,
+    tracker_config, TrackerTuning, DEFAULT_ANCHOR_FLOOR, DEFAULT_COAST_LIMIT, DEFAULT_MIN_SCORE,
+    DEFAULT_PATCH_RADIUS, DEFAULT_REACQUIRE_MIN_SCORE, DEFAULT_SEARCH_RADIUS,
+    DEFAULT_UPDATE_THRESHOLD,
 };
 pub use velocity::{velocity_series, VelocityError, VelocitySample, VelocityUnit};
 pub use video_sink::VideoSink;
