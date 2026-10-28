@@ -16,5 +16,7 @@ directories = "5"
 # async-std backend: self-contained executor — the tokio feature panics
 # ("no reactor running") unless a tokio runtime is active, which a plain
 # eframe app doesn't have. See crash log 2026-07-16.
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+# rfd 0.17 dropped the async-std/tokio features; xdg-portal now drives
+# itself with the self-contained pollster executor (same property).
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
