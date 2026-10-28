@@ -271,6 +271,24 @@ impl AppState {
         self.push_event(EventLevel::Info, "bar proposal rejected".to_string());
     }
 
+    /// The lift to keep when a manual seed click at `position` replaces the
+    /// pending proposal: the proposal's lift if the click corrects it (same
+    /// frame, within one proposed plate diameter), else `Unknown`.
+    pub(super) fn lift_kept_by_correction(&self, position: tracker_core::Point) -> LiftType {
+        let Some(p) = &self.proposal else {
+            return LiftType::Unknown;
+        };
+        let (dx, dy) = (position.x - p.position.x, position.y - p.position.y);
+        if p.lift.lift != LiftType::Unknown
+            && self.current_frame == p.frame_index
+            && dx.hypot(dy) <= p.plate_diameter_px
+        {
+            p.lift.lift
+        } else {
+            LiftType::Unknown
+        }
+    }
+
     /// Drops everything automatic: cancels a running pre-pass, forgets any
     /// proposal and notice, and resets the confirmed lift to `Unknown`.
     pub(super) fn clear_seed_proposal_state(&mut self) {
@@ -374,11 +392,66 @@ mod tests {
     }
 
     #[test]
-    fn manual_seed_discards_a_pending_proposal_and_its_lift() {
+    fn far_manual_seed_discards_a_pending_proposal_and_its_lift() {
         let mut state = state_with_proposal(LiftType::Deadlift);
         state.toggle_placing_seed();
-        state.place_seed(Point::new(5.0, 5.0));
+        state.place_seed(Point::new(500.0, 500.0));
         assert!(state.proposal().is_none());
+        assert_eq!(state.confirmed_lift(), LiftType::Unknown);
+    }
+
+    /// Arms a manual click at `x` on `frame` (the proposal sits at (12, 34),
+    /// frame 7, diameter 80) and returns the state after `place_seed`.
+    fn corrected(lift: Option<LiftType>, frame: i64, at: Point) -> AppState {
+        let mut state = match lift {
+            Some(l) => state_with_proposal(l),
+            None => AppState::new(PathBuf::from("x.mp4"), meta(Some(30))),
+        };
+        state.toggle_placing_seed();
+        state.set_frame(frame);
+        assert!(state.place_seed(at));
+        assert!(state.proposal().is_none());
+        assert_eq!(state.seed.map(|s| s.position), Some(at));
+        state
+    }
+
+    #[test]
+    fn correcting_near_the_proposal_keeps_the_proposed_lift() {
+        let state = corrected(Some(LiftType::Deadlift), 7, Point::new(12.0, 34.0 + 28.0));
+        assert_eq!(state.confirmed_lift(), LiftType::Deadlift);
+        let results = state.build_results(deadlift_bar_path());
+        assert_eq!(results.reps[0].order, PhaseOrder::ConcentricFirst);
+    }
+
+    #[test]
+    fn correcting_far_from_the_proposal_resets_the_lift_to_unknown() {
+        let state = corrected(Some(LiftType::Deadlift), 7, Point::new(12.0, 34.0 + 200.0));
+        assert_eq!(state.confirmed_lift(), LiftType::Unknown);
+    }
+
+    #[test]
+    fn correcting_on_a_different_frame_resets_the_lift() {
+        let state = corrected(Some(LiftType::Deadlift), 8, Point::new(12.0, 34.0));
+        assert_eq!(state.confirmed_lift(), LiftType::Unknown);
+    }
+
+    #[test]
+    fn correcting_when_the_proposal_lift_is_unknown_stays_unknown() {
+        let state = corrected(Some(LiftType::Unknown), 7, Point::new(12.0, 34.0));
+        assert_eq!(state.confirmed_lift(), LiftType::Unknown);
+    }
+
+    #[test]
+    fn correcting_exactly_one_diameter_away_keeps_the_lift_and_just_beyond_resets() {
+        let on = corrected(Some(LiftType::Squat), 7, Point::new(12.0 + 80.0, 34.0));
+        assert_eq!(on.confirmed_lift(), LiftType::Squat);
+        let beyond = corrected(Some(LiftType::Squat), 7, Point::new(12.0 + 80.001, 34.0));
+        assert_eq!(beyond.confirmed_lift(), LiftType::Unknown);
+    }
+
+    #[test]
+    fn correcting_without_a_pending_proposal_stays_unknown() {
+        let state = corrected(None, 7, Point::new(12.0, 34.0));
         assert_eq!(state.confirmed_lift(), LiftType::Unknown);
     }
 

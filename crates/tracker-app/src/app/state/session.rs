@@ -189,8 +189,13 @@ impl AppState {
             return true;
         }
         // A manual seed always wins: stop any automatic search and forget any
-        // proposal and its lift (a manual seed carries no lift type).
+        // proposal. A click is a correction of the proposal (so its lift
+        // survives: it was inferred from the whole track, not the click
+        // pixel) only when it lands within one plate diameter of it on the
+        // proposal's frame; any other click carries no lift type.
+        let kept_lift = self.lift_kept_by_correction(position);
         self.clear_seed_proposal_state();
+        self.confirmed_lift = kept_lift;
         self.set_seed_at_current_frame(position);
         true
     }
