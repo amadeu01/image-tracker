@@ -89,9 +89,27 @@ impl SessionResults {
         calibration: Option<tracker_core::Calibration>,
         gap_count: u64,
     ) -> Self {
+        Self::build_for_lift(
+            bar_path,
+            calibration,
+            gap_count,
+            tracker_core::LiftType::Unknown,
+        )
+    }
+
+    /// Like [`build`](Self::build) but segments reps for `lift` (a
+    /// deadlift is concentric-first). `Unknown` behaves exactly like
+    /// `build`.
+    pub fn build_for_lift(
+        bar_path: tracker_core::BarPath,
+        calibration: Option<tracker_core::Calibration>,
+        gap_count: u64,
+        lift: tracker_core::LiftType,
+    ) -> Self {
         let velocity = tracker_core::velocity_series(bar_path.points(), 5, calibration.as_ref());
         let reps = match &velocity {
-            Ok(v) => tracker_core::segment_reps(
+            Ok(v) => tracker_core::segment_reps_for_lift(
+                lift,
                 v,
                 tracking::rep_segmentation_config(calibration.is_some()),
             ),
@@ -155,8 +173,8 @@ impl SessionResults {
     pub fn rep_frame_bounds(&self, index: usize) -> Option<(u64, u64)> {
         let velocity = self.velocity.as_ref().ok()?;
         let rep = self.reps.get(index)?;
-        let start = velocity.get(rep.eccentric_start)?.frame_index;
-        let end = velocity.get(rep.concentric_end)?.frame_index;
+        let start = velocity.get(rep.start_frame_index())?.frame_index;
+        let end = velocity.get(rep.end_index())?.frame_index;
         Some((start, end))
     }
 

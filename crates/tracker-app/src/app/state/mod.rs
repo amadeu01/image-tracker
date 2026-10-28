@@ -19,6 +19,7 @@
 //! `app/mod.rs`) don't need to change.
 
 mod jobs;
+mod proposal;
 mod review;
 mod session;
 #[cfg(test)]
@@ -305,6 +306,17 @@ pub struct AppState {
     /// evaluate (`TrackerApp::ensure_texture`/click handler sets this via
     /// `note_seed_suggestion`, since `AppState` alone has no frame access).
     suggested_tracker: Option<tracker_core::TrackerKind>,
+    // -- proposal.rs: automatic seed proposal ----------------------------
+    /// The bar the pre-pass proposed, until the user confirms it (becomes the
+    /// `seed`) or rejects it. A proposal is never a Seed: nothing may start
+    /// tracking from it.
+    proposal: Option<tracker_core::SeedProposal>,
+    /// The lift the user confirmed along with a proposal; `Unknown` for a
+    /// manually placed seed or an unrecognised lift. Feeds rep segmentation.
+    confirmed_lift: tracker_core::LiftType,
+    /// Why no proposal is on offer (pre-pass found nothing or failed), shown
+    /// in the banner until a seed exists.
+    prepass_notice: Option<String>,
     /// Live rep count (task 10.8), recomputed from the partial path every
     /// `LIVE_REP_RECOMPUTE_INTERVAL` processed frames while a run is active
     /// (`poll_tracking`, via `TrackingRunState::live_rep_count`). `None`
@@ -391,6 +403,9 @@ impl AppState {
             bar_path: None,
             results: None,
             suggested_tracker: None,
+            proposal: None,
+            confirmed_lift: tracker_core::LiftType::Unknown,
+            prepass_notice: None,
             live_reps: None,
             events: VecDeque::new(),
             start_time: Instant::now(),
@@ -481,6 +496,9 @@ impl AppState {
                     .to_string();
             }
             Phase::Idle => {}
+        }
+        if let Some(text) = self.prepass_banner_text() {
+            return text;
         }
         match self.mode {
             Mode::PlacingSeed => {
@@ -622,6 +640,7 @@ impl AppState {
         self.last_calibration_segment = None;
         self.suggested_tracker = None;
         self.job = Job::Idle;
+        self.clear_seed_proposal_state();
         self.tracking_run = TrackingRunState::default();
         self.bar_path = None;
         self.results = None;

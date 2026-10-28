@@ -241,6 +241,7 @@ impl TrackingRunState {
         &self,
         timebase: Timebase,
         calibration: Option<Calibration>,
+        lift: tracker_core::LiftType,
     ) -> Option<usize> {
         if self.samples.is_empty() {
             return None;
@@ -249,8 +250,12 @@ impl TrackingRunState {
         let velocity = tracker_core::velocity_series(bar_path.points(), 5, calibration.as_ref());
         match velocity {
             Ok(v) => Some(
-                tracker_core::segment_reps(&v, rep_segmentation_config(calibration.is_some()))
-                    .len(),
+                tracker_core::segment_reps_for_lift(
+                    lift,
+                    &v,
+                    rep_segmentation_config(calibration.is_some()),
+                )
+                .len(),
             ),
             Err(e) => {
                 tracing::debug!(error = %e, "live rep recompute skipped: not enough data yet");
@@ -503,7 +508,10 @@ mod tests {
     fn live_rep_count_is_none_with_too_few_samples() {
         let state = TrackingRunState::started();
         let tb = Timebase::new(30, 1).unwrap();
-        assert_eq!(state.live_rep_count(tb, None), None);
+        assert_eq!(
+            state.live_rep_count(tb, None, tracker_core::LiftType::Unknown),
+            None
+        );
     }
 
     /// A synthetic one-rep descent/ascent, fed in as partial `Progress`
@@ -523,7 +531,10 @@ mod tests {
             state.apply(progress(i, (20 - i) as f64 * 10.0));
         }
         let tb = Timebase::new(30, 1).unwrap();
-        assert_eq!(state.live_rep_count(tb, None), Some(1));
+        assert_eq!(
+            state.live_rep_count(tb, None, tracker_core::LiftType::Unknown),
+            Some(1)
+        );
     }
 
     #[test]

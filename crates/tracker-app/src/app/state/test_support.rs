@@ -104,6 +104,31 @@ pub(super) fn two_rep_bar_path() -> tracker_core::BarPath {
     tracker_core::BarPath::new(&samples, &[], tb, 0)
 }
 
+/// A single deadlift rep: pull up from the floor (y 100 -> 0), then lower
+/// back (y 0 -> 100) and rest on the floor (concentric first).
+pub(super) fn deadlift_bar_path() -> tracker_core::BarPath {
+    let tb = tracker_core::Timebase::new(30, 1).unwrap();
+    let mut samples = Vec::new();
+    let mut frame = 0u64;
+    let mut push = |y: f64, frame: &mut u64| {
+        samples.push(sample(*frame, 0.0, y, tracker_core::Source::Tracked));
+        *frame += 1;
+    };
+    for _ in 0..5 {
+        push(100.0, &mut frame);
+    }
+    for i in 0..=10u64 {
+        push(100.0 - i as f64 * 10.0, &mut frame);
+    }
+    for i in 1..=10u64 {
+        push(i as f64 * 10.0, &mut frame);
+    }
+    for _ in 0..10 {
+        push(100.0, &mut frame);
+    }
+    tracker_core::BarPath::new(&samples, &[], tb, 0)
+}
+
 pub(super) fn state_in_review() -> AppState {
     let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(30)));
     state.toggle_placing_seed();

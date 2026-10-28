@@ -127,6 +127,9 @@ impl AppState {
         if self.mode != Mode::PlacingSeed {
             return;
         }
+        // A manual seed always wins: stop any automatic search and forget any
+        // proposal and its lift (a manual seed carries no lift type).
+        self.clear_seed_proposal_state();
         self.seed = Some(Seed {
             position,
             frame_index: self.current_frame,

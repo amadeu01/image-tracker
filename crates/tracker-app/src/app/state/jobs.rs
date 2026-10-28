@@ -37,6 +37,7 @@ use super::review::SessionResults;
 use super::{AppState, EventLevel, Mode};
 use crate::compare::{BenchmarkHandle, BenchmarkMessage};
 use crate::export_job::{self, ExportHandle, ExportMessage};
+use crate::prepass_job::PrepassHandle;
 use crate::tracking::{self, TrackingHandle, TrackingRunState};
 
 /// The one background job `AppState` may be driving at a time (task 20.5).
@@ -52,6 +53,14 @@ pub enum Job {
     Tracking {
         handle: TrackingHandle,
         paused: bool,
+    },
+    /// The unseeded pre-pass is searching the clip for the bar (see
+    /// `proposal.rs`). `progress` is `(samples_done, samples_total)`, `None`
+    /// until the first progress message. Cancelable; dropping the handle
+    /// cancels it.
+    FindingBar {
+        handle: PrepassHandle,
+        progress: Option<(u64, u64)>,
     },
     /// The auto-export (or per-rep-clip export) job is writing files.
     Exporting { handle: ExportHandle },
@@ -128,7 +137,7 @@ impl AppState {
     /// Whether the "Track" action should currently be available: a Seed
     /// must be placed, and no run already active.
     pub fn can_start_tracking(&self) -> bool {
-        self.seed.is_some() && !self.is_tracking()
+        self.seed.is_some() && !self.is_tracking() && !self.is_finding_bar()
     }
 
     /// Spawns a background tracking run from the current Seed, using this
@@ -243,9 +252,11 @@ impl AppState {
                 if let Ok(timebase) =
                     tracker_core::Timebase::new(self.metadata.fps_num, self.metadata.fps_den)
                 {
-                    if let Some(count) =
-                        self.tracking_run.live_rep_count(timebase, self.calibration)
-                    {
+                    if let Some(count) = self.tracking_run.live_rep_count(
+                        timebase,
+                        self.calibration,
+                        self.confirmed_lift,
+                    ) {
                         self.live_reps = Some(count);
                     }
                 }
@@ -265,11 +276,7 @@ impl AppState {
                     ),
                 );
                 if let Some(bar_path) = self.bar_path.clone() {
-                    let results = SessionResults::build(
-                        bar_path,
-                        self.calibration,
-                        self.tracking_run.gap_count,
-                    );
+                    let results = self.build_results(bar_path);
                     match &results.velocity {
                         Ok(v) => {
                             self.push_event(
@@ -297,11 +304,26 @@ impl AppState {
         any
     }
 
+    /// Derives the Review-step results for a finished run, segmenting reps
+    /// for the lift the user confirmed (`Unknown` -> eccentric-first, the
+    /// pre-existing behaviour).
+    pub(super) fn build_results(&self, bar_path: tracker_core::BarPath) -> SessionResults {
+        SessionResults::build_for_lift(
+            bar_path,
+            self.calibration,
+            self.tracking_run.gap_count,
+            self.confirmed_lift,
+        )
+    }
+
     /// Whether the "Test strategies" button (task 11.4) should currently be
     /// available: a Seed must be placed, and neither a tracking run nor
     /// another benchmark is already active.
     pub fn can_test_strategies(&self) -> bool {
-        self.seed.is_some() && !self.is_tracking() && !self.is_benchmarking()
+        self.seed.is_some()
+            && !self.is_tracking()
+            && !self.is_benchmarking()
+            && !self.is_finding_bar()
     }
 
     /// Spawns the background strategy benchmark (task 11.4): the fixed
@@ -807,7 +829,11 @@ mod tests {
         // here too).
         if state.tracking_run.should_recompute_live_reps() {
             let tb = tracker_core::Timebase::new(30, 1).unwrap();
-            if let Some(count) = state.tracking_run.live_rep_count(tb, state.calibration) {
+            if let Some(count) = state.tracking_run.live_rep_count(
+                tb,
+                state.calibration,
+                tracker_core::LiftType::Unknown,
+            ) {
                 state.live_reps = Some(count);
             }
         }
@@ -830,7 +856,7 @@ mod tests {
         let tb = tracker_core::Timebase::new(30, 1).unwrap();
         let count = state
             .tracking_run
-            .live_rep_count(tb, state.calibration)
+            .live_rep_count(tb, state.calibration, tracker_core::LiftType::Unknown)
             .unwrap();
         assert_eq!(count, 1);
     }
