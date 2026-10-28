@@ -1013,6 +1013,14 @@ mod tests {
         plate_rise: f64,
         plate_every: impl Fn(u64) -> bool,
     ) -> Vec<FrameDetections> {
+        plate_and_false_chain_of_radius(plate_rise, plate_every, R)
+    }
+
+    fn plate_and_false_chain_of_radius(
+        plate_rise: f64,
+        plate_every: impl Fn(u64) -> bool,
+        chain_radius: f64,
+    ) -> Vec<FrameDetections> {
         // A short static burst (so a stability window exists), then sparse
         // detections hopping vertically; gaps alternate link / merge sized.
         let hops = [630.0, 460.0, 434.0, 795.0];
@@ -1032,7 +1040,7 @@ mod tests {
                     cands.push(cand(100.0, y, R));
                 }
                 if let Some((_, y)) = chain_samples.iter().find(|(cs, _)| *cs == s) {
-                    cands.push(cand(330.0, *y, R));
+                    cands.push(cand(330.0, *y, chain_radius));
                 }
                 frame(s * 4, cands)
             })
@@ -1067,18 +1075,56 @@ mod tests {
         assert_eq!(p.frame_index, alone.frame_index);
     }
 
+    /// Plate rising 1.5 plates over 100 samples (stride 4). Samples whose
+    /// index modulo 20 is in `absent` keep their frame but carry NO
+    /// candidates, as the production pre-pass emits for no-plate frames.
+    fn plate_with_absent_samples(absent: &[u64]) -> Vec<FrameDetections> {
+        rising_strided(0, 100, 4, 1.5, R)
+            .into_iter()
+            .enumerate()
+            .map(|(k, (i, c))| {
+                if absent.contains(&(k as u64 % 20)) {
+                    frame(i, vec![])
+                } else {
+                    frame(i, vec![c])
+                }
+            })
+            .collect()
+    }
+
+    /// 11 of 20 present (persistence 0.55), gaps of at most 3 samples.
+    const ABSENT_55: [u64; 9] = [3, 4, 5, 9, 10, 11, 15, 16, 17];
+    /// 9 of 20 present (persistence 0.45), gaps of at most 3 samples.
+    const ABSENT_45: [u64; 11] = [2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15];
+
     #[test]
     fn plate_occluded_thirty_percent_of_samples_is_still_proposed() {
-        let dets = to_frames(
-            rising_strided(0, 100, 4, 1.5, R)
-                .into_iter()
-                .enumerate()
-                .filter(|(k, _)| ![2, 5, 8].contains(&(k % 10)))
-                .map(|(_, v)| v)
-                .collect(),
-        );
+        // Runs of 3 empty samples, 30% of all samples: persistence 0.7.
+        let dets = plate_with_absent_samples(&[2, 3, 4, 12, 13, 14]);
+        assert_eq!(dets.iter().filter(|f| f.candidates.is_empty()).count(), 30);
         let p = propose_seed(&dets, &cfg()).expect("70% persistent plate survives");
         assert!((p.position.x - 300.0).abs() < 1.0);
+        assert!((p.plate_diameter_px - D).abs() < 1e-9);
+        assert!(p.frame_index < 100, "got {}", p.frame_index);
+    }
+
+    #[test]
+    fn plate_occluded_sixty_percent_is_dropped_by_the_persistence_filter() {
+        // Boundary of the default 0.5: 0.55 survives, 0.45 is dropped.
+        let kept = plate_with_absent_samples(&ABSENT_55);
+        assert!(propose_seed(&kept, &cfg()).is_some());
+        let dropped = plate_with_absent_samples(&ABSENT_45);
+        assert!(propose_seed(&dropped, &cfg()).is_none());
+        // The filter, not the gaps, decides: a lower threshold keeps it.
+        let lenient = SeedProposalConfig::builder()
+            .min_track_persistence(0.4)
+            .build();
+        assert!(propose_seed(&dropped, &lenient).is_some());
+        // And a stricter one drops the 0.55 plate.
+        let strict = SeedProposalConfig::builder()
+            .min_track_persistence(0.6)
+            .build();
+        assert!(propose_seed(&kept, &strict).is_none());
     }
 
     #[test]
@@ -1110,6 +1156,17 @@ mod tests {
                 p.position.x
             );
         }
+    }
+
+    #[test]
+    fn persistence_filter_runs_before_the_shared_scale() {
+        // A sparse chain of circles 1.8x the plate's diameter (persistence
+        // ~0.2, huge range). If it were allowed to set the shared scale the
+        // plate (0.55 of it) would fall under min_relative_diameter.
+        let dets = plate_and_false_chain_of_radius(1.0, |_| true, 1.8 * R);
+        let p = propose_seed(&dets, &cfg()).expect("plate proposed, chain ignored");
+        assert!((p.position.x - 100.0).abs() < 1.0, "x={}", p.position.x);
+        assert!((p.plate_diameter_px - D).abs() < 1e-9);
     }
 
     /// Plate standing on the floor for 30 samples, then a first lift step of
