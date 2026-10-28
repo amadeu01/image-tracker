@@ -51,6 +51,7 @@ pub struct SeedProposalConfig {
     max_gap_samples: usize,
     merge_gap_samples: usize,
     min_track_points: usize,
+    min_track_persistence: f64,
     min_stable_samples: usize,
     stable_window_samples: usize,
     min_relative_diameter: f64,
@@ -75,6 +76,7 @@ impl SeedProposalConfig {
             max_gap_samples: 3,
             merge_gap_samples: 10,
             min_track_points: 5,
+            min_track_persistence: 0.5,
             min_stable_samples: 4,
             stable_window_samples: 6,
             min_relative_diameter: 0.6,
@@ -106,6 +108,12 @@ impl SeedProposalConfig {
     /// Minimum linked detections for a track to count.
     pub fn min_track_points(&self) -> usize {
         self.min_track_points
+    }
+    /// Minimum fraction of the samples between a track's first and last
+    /// point that must carry a detection, in `[0, 1]`. Sparse chains of
+    /// unrelated false circles fall below it.
+    pub fn min_track_persistence(&self) -> f64 {
+        self.min_track_persistence
     }
     /// Samples that must be present inside a stability window.
     pub fn min_stable_samples(&self) -> usize {
@@ -182,6 +190,10 @@ impl SeedProposalConfigBuilder {
         self.cfg.min_track_points = v;
         self
     }
+    pub fn min_track_persistence(mut self, v: f64) -> Self {
+        self.cfg.min_track_persistence = v;
+        self
+    }
     pub fn min_stable_samples(mut self, v: usize) -> Self {
         self.cfg.min_stable_samples = v;
         self
@@ -222,6 +234,11 @@ impl SeedProposalConfigBuilder {
     /// `1 <= min_stable_samples <= stable_window_samples`.
     pub fn build(self) -> SeedProposalConfig {
         let mut cfg = self.cfg;
+        cfg.min_track_persistence = if cfg.min_track_persistence.is_nan() {
+            SeedProposalConfig::default_config().min_track_persistence
+        } else {
+            cfg.min_track_persistence.clamp(0.0, 1.0)
+        };
         cfg.stable_window_samples = cfg.stable_window_samples.max(1);
         cfg.min_stable_samples = cfg.min_stable_samples.clamp(1, cfg.stable_window_samples);
         cfg
@@ -468,6 +485,17 @@ pub fn propose_seed(
     config: &SeedProposalConfig,
 ) -> Option<SeedProposal> {
     let tracks = link_tracks(detections, config);
+    // Persistence = points / samples spanned. Sporadic false circles chained
+    // across long gaps are sparse; a real plate is present most of the time.
+    // Filtered before the static test and the shared scale so a sparse chain
+    // can neither win nor inflate the scale.
+    let tracks: Vec<Track> = tracks
+        .into_iter()
+        .filter(|t| {
+            let span = t[t.len() - 1].sample - t[0].sample + 1;
+            t.len() as f64 / span as f64 >= config.min_track_persistence
+        })
+        .collect();
     let mut cands: Vec<Candidate> = tracks
         .iter()
         .filter_map(|t| {
@@ -938,5 +966,110 @@ mod tests {
             .min_stable_samples(9)
             .build();
         assert!(c.min_stable_samples() <= c.stable_window_samples());
+    }
+
+    /// Persistent plate at x=100 plus a sporadic chain of same-size circles at
+    /// x=330 hopping vertically (the v7 shape): stride 4 frames, 90 samples.
+    fn persistent_plate_and_false_chain(
+        plate_rise: f64,
+        plate_every: impl Fn(u64) -> bool,
+    ) -> Vec<FrameDetections> {
+        // A short static burst (so a stability window exists), then sparse
+        // detections hopping vertically; gaps alternate link / merge sized.
+        let hops = [630.0, 460.0, 434.0, 795.0];
+        let mut chain_samples: Vec<(u64, f64)> = (0..4).map(|s| (s, 795.0)).collect();
+        let mut s = 8u64;
+        let mut k = 0usize;
+        while s < 90 && chain_samples.len() < 15 {
+            chain_samples.push((s, hops[k % hops.len()]));
+            s += if k.is_multiple_of(2) { 4 } else { 7 };
+            k += 1;
+        }
+        (0..90u64)
+            .map(|s| {
+                let mut cands = Vec::new();
+                if plate_every(s) {
+                    let y = Y0 - plate_rise * D * s as f64 / 89.0;
+                    cands.push(cand(100.0, y, R));
+                }
+                if let Some((_, y)) = chain_samples.iter().find(|(cs, _)| *cs == s) {
+                    cands.push(cand(330.0, *y, R));
+                }
+                frame(s * 4, cands)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sporadic_false_chain_with_large_vertical_range_never_beats_a_persistent_plate() {
+        let dets = persistent_plate_and_false_chain(1.0, |_| true);
+        let p = propose_seed(&dets, &cfg()).expect("persistent plate proposed");
+        assert!(
+            (p.position.x - 100.0).abs() < 1.0,
+            "followed x={}",
+            p.position.x
+        );
+        assert!((p.plate_diameter_px - D).abs() < 1e-9);
+        let plate_only: Vec<_> = dets
+            .iter()
+            .map(|f| {
+                frame(
+                    f.frame_index,
+                    f.candidates
+                        .iter()
+                        .filter(|c| c.center.x < 200.0)
+                        .cloned()
+                        .collect(),
+                )
+            })
+            .collect();
+        let alone = propose_seed(&plate_only, &cfg()).unwrap();
+        assert_eq!(p.lift.lift, alone.lift.lift);
+        assert_eq!(p.frame_index, alone.frame_index);
+    }
+
+    #[test]
+    fn plate_occluded_thirty_percent_of_samples_is_still_proposed() {
+        let dets = to_frames(
+            rising_strided(0, 100, 4, 1.5, R)
+                .into_iter()
+                .enumerate()
+                .filter(|(k, _)| ![2, 5, 8].contains(&(k % 10)))
+                .map(|(_, v)| v)
+                .collect(),
+        );
+        let p = propose_seed(&dets, &cfg()).expect("70% persistent plate survives");
+        assert!((p.position.x - 300.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn min_track_persistence_clamps_and_rejects_nan() {
+        assert_eq!(cfg().min_track_persistence(), 0.5);
+        let hi = SeedProposalConfig::builder()
+            .min_track_persistence(7.0)
+            .build();
+        assert_eq!(hi.min_track_persistence(), 1.0);
+        let lo = SeedProposalConfig::builder()
+            .min_track_persistence(-1.0)
+            .build();
+        assert_eq!(lo.min_track_persistence(), 0.0);
+        let nan = SeedProposalConfig::builder()
+            .min_track_persistence(f64::NAN)
+            .build();
+        assert_eq!(nan.min_track_persistence(), 0.5);
+    }
+
+    #[test]
+    fn persistence_filter_runs_before_ranking_not_after() {
+        // Persistent plate barely moves (static test fails); the chain has
+        // huge range. The chain must not be proposed either way.
+        let dets = persistent_plate_and_false_chain(0.2, |_| true);
+        if let Some(p) = propose_seed(&dets, &cfg()) {
+            assert!(
+                (p.position.x - 100.0).abs() < 1.0,
+                "chain proposed at x={}",
+                p.position.x
+            );
+        }
     }
 }
