@@ -10,6 +10,10 @@
 //! pull. The lowering is the whole `Descending`/`Idle` span after the pull
 //! up to the next pull; a qualifying pull at the end of the data is kept
 //! even if its lowering is truncated or absent (see `segment_reps_for_lift`).
+//! The rep ends at the first sample where 95% of the lowering's total travel
+//! is done (`LOWERING_END_FRACTION`), not at the last above-dead-band sample,
+//! and a sub-gate `Ascending` blip between `Descending` runs does not end the
+//! lowering.
 //!
 //! ## Robustness
 //! Real velocity series are noisy, so a naive "first sign change starts a
@@ -165,9 +169,11 @@ pub struct Rep {
     /// `turn_index()`; the lowest bar position is `bottom_index()`.
     pub bottom: usize,
     /// Last sample of the rep, in time order: the end of the ascent
-    /// (`EccentricFirst`) or the end of the lowering (`ConcentricFirst`;
-    /// for a pull at the end of the data with no lowering, the end of the
-    /// pull). Use `end_index()`.
+    /// (`EccentricFirst`) or the end of the lowering (`ConcentricFirst`: the
+    /// first sample where 95% of the lowering's total travel is done, so tail
+    /// noise never extends it and a tiny `Ascending` blip inside the lowering
+    /// does not end it; for a pull at the end of the data with no lowering,
+    /// the end of the pull). Use `end_index()`.
     pub concentric_end: usize,
 }
 
@@ -351,11 +357,16 @@ fn label_runs(velocity: &[VelocitySample], config: RepSegmentationConfig) -> Vec
 ///   The `turn` is the end of the pull, or the midpoint of the lockout pause
 ///   (`Idle`) between the pull and its lowering.
 /// - **Lowering**: the contiguous `Descending`/`Idle` samples after the
-///   pull up to (not including) the next `Ascending` run, or to the end of
-///   the data. A stalled lowering (`Descending, Idle, Descending`) is one
-///   lowering. The rep ends at the last `Descending` sample of that span
-///   (trailing `Idle` is the bar resting on the floor, not part of the rep);
-///   the next pull's first sample follows the span directly.
+///   pull up to (not including) the next qualifying `Ascending` run, or to the
+///   end of the data. A stalled lowering (`Descending, Idle, Descending`) is
+///   one lowering. A sub-gate `Ascending` run (travel below `min_displacement`)
+///   is a blip inside the lowering, not its end, when the lowering already
+///   holds a `Descending` run and the next non-`Idle`, non-blip run is
+///   `Descending` again. The rep ends at the first sample where cumulative
+///   lowering travel reaches `LOWERING_END_FRACTION` (95%) of the span total
+///   (samples under `LOWERING_NOISE_FRACTION` of the peak speed add no
+///   travel); trailing noise and floor rest are not part of the rep. The next
+///   pull's first sample follows the span; samples between belong to no rep.
 /// - **Gate**: the pull AND the whole lowering (total travel over the span)
 ///   must each reach `min_displacement`, otherwise the candidate is jitter
 ///   and is skipped without affecting its neighbours (it never merges them).

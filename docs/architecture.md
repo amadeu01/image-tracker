@@ -469,7 +469,11 @@ graph LR
   next pull; the pull and that whole span must each reach `min_displacement`,
   so a stalled lowering is one lowering. `Ascending, Idle, Ascending` with no
   Descending between is one pull. A qualifying pull at the end of the clip is
-  kept even when its lowering is truncated or absent.
+  kept even when its lowering is truncated or absent. The rep ends at the
+  first sample where 95% of the lowering's total travel is done (named
+  `LOWERING_END_FRACTION`; near-dead-band tail samples never extend it), and a
+  sub-gate Ascending blip between Descending runs of one lowering does not
+  end that lowering.
   **Role-swap trap:** for `ConcentricFirst` the three index fields of
   `Rep` (`eccentric_start`, `bottom`, `concentric_end`) swap phase roles
   (`eccentric_start` is the start of the pull, `bottom` the lockout,
