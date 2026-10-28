@@ -82,7 +82,7 @@ fn main() {
             Ok(a) => a,
             Err(e) => {
                 eprintln!(
-                    "usage: tracker-app grade <points.csv> <truth.csv> [--plate-px N] [--tolerance-dia F]"
+                    "usage: tracker-app grade <points.csv> [<truth.csv>] [--plate-px N] [--tolerance-dia F] [--manifest M --clip ID]"
                 );
                 eprintln!("error: {e}");
                 std::process::exit(2);
