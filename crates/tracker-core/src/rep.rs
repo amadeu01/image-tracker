@@ -7,7 +7,9 @@
 //! followed by one concentric phase. A deadlift rep is one concentric pull
 //! followed by its eccentric lowering to the floor; every pull is its own
 //! rep (owner ruling 2026-10-28), so a touch-and-go set counts one rep per
-//! pull (see `segment_reps_for_lift`).
+//! pull. The lowering is the whole `Descending`/`Idle` span after the pull
+//! up to the next pull; a qualifying pull at the end of the data is kept
+//! even if its lowering is truncated or absent (see `segment_reps_for_lift`).
 //!
 //! ## Robustness
 //! Real velocity series are noisy, so a naive "first sign change starts a
@@ -29,9 +31,11 @@
 //!    velocity series); slow sustained drift (walkout/unrack shuffling)
 //!    passes the two gates above but only travels a few pixels, and is
 //!    discarded here rather than counted.
-//! 5. **Incomplete trailing reps are dropped** — an eccentric phase with no
-//!    following concentric phase (e.g. the clip ends mid-descent) is not
-//!    emitted, since depth/velocity metrics (5.4) for it would be bogus.
+//! 5. **Incomplete trailing squat reps are dropped** — an eccentric phase
+//!    with no following concentric phase (e.g. the clip ends mid-descent) is
+//!    not emitted by `segment_reps`, since depth/velocity metrics (5.4) for
+//!    it would be bogus. (A deadlift pull is different: the pull is the
+//!    lift, so `segment_reps_for_lift` keeps a qualifying trailing pull.)
 //!
 //! ## Indices
 //! `Rep` fields are indices into the `velocity` slice passed to
@@ -139,22 +143,31 @@ impl RepSegmentationConfigBuilder {
 /// `velocity` slice passed to `segment_reps`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rep {
-    /// Which phase comes first. For `ConcentricFirst` (deadlift) the three
-    /// index fields below swap phase roles: `eccentric_start` is the start
-    /// of the pull (the floor), `bottom` is the turnaround (the lockout),
-    /// and `concentric_end` is the end of the lowering back to the floor.
-    /// The field names keep their `EccentricFirst` meaning, so do not read
-    /// them by name for phase meaning; use `start_frame_index`, `end_index`,
-    /// `turn_index`, `bottom_index`, `eccentric_span` and `concentric_span`.
-    /// A `ConcentricFirst` rep is exactly one pull and its own lowering.
+    /// Which phase comes first. The three index fields below are stored in
+    /// time order (first sample, turnaround, last sample), so their meaning
+    /// depends on `order`: for `EccentricFirst` (squat, bench) they are the
+    /// start of the descent, the bottom, and the end of the ascent; for
+    /// `ConcentricFirst` (deadlift) the phase roles swap: `eccentric_start`
+    /// is the start of the pull (the floor), `bottom` is the lockout (the
+    /// top, not the lowest point) and `concentric_end` is the end of the
+    /// lowering. Do not read the fields by name for phase meaning; use the
+    /// accessors `start_frame_index`, `end_index`, `turn_index`,
+    /// `bottom_index`, `eccentric_span` and `concentric_span`.
     pub order: PhaseOrder,
-    /// Index of the first sample of the eccentric (descent) phase.
+    /// First sample of the rep, in time order: the start of the descent
+    /// (`EccentricFirst`) or the start of the pull (`ConcentricFirst`). Use
+    /// `start_frame_index()`.
     pub eccentric_start: usize,
-    /// Index of the turnaround: the last descending sample if the descent
-    /// runs straight into the ascent, or the midpoint of an `Idle` pause
-    /// between them if there's a plateau at the bottom.
+    /// The turnaround between the two phases, in time order: the bottom of
+    /// the descent (`EccentricFirst`; the last descending sample, or the
+    /// midpoint of an `Idle` pause) or the lockout (`ConcentricFirst`; the
+    /// last pulling sample, or the midpoint of a lockout pause). Use
+    /// `turn_index()`; the lowest bar position is `bottom_index()`.
     pub bottom: usize,
-    /// Index of the last sample of the concentric (ascent) phase.
+    /// Last sample of the rep, in time order: the end of the ascent
+    /// (`EccentricFirst`) or the end of the lowering (`ConcentricFirst`;
+    /// for a pull at the end of the data with no lowering, the end of the
+    /// pull). Use `end_index()`.
     pub concentric_end: usize,
 }
 
@@ -325,15 +338,32 @@ fn label_runs(velocity: &[VelocitySample], config: RepSegmentationConfig) -> Vec
 
 /// Like `segment_reps`, but honours the lift's phase order. `Deadlift` is
 /// concentric-then-eccentric and every pull is its own rep (owner ruling
-/// 2026-10-28): a rep is one pull, an optional lockout pause, and the
-/// lowering back to the floor. A rep ends when the bar returns to the floor,
-/// whether or not it rests there, so a touch-and-go set counts one rep per
-/// pull and each rep's `concentric_span()` is that pull alone. A pull or
-/// lowering shorter than `min_displacement` is jitter: that candidate is
-/// skipped without affecting its neighbours. A pull with no lowering before
-/// the series ends is incomplete and dropped, like a squat descent with no
-/// ascent. Every other lift segments exactly like `segment_reps`
-/// (EccentricFirst).
+/// 2026-10-28): a rep ends when the bar returns to the floor, whether or not
+/// it rests there, so a touch-and-go set counts one rep per pull and each
+/// rep's `concentric_span()` is that pull alone. Every other lift segments
+/// exactly like `segment_reps` (EccentricFirst).
+///
+/// Definitions for the deadlift:
+/// - **Pull**: a run of `Ascending` samples. `Ascending, Idle..., Ascending`
+///   with no `Descending` between is ONE pull (a sticking point or a pause
+///   mid-pull), whatever the length of the `Idle` gap: no `Descending`
+///   sample means the bar never came down, so there is nothing to split on.
+///   The `turn` is the end of the pull, or the midpoint of the lockout pause
+///   (`Idle`) between the pull and its lowering.
+/// - **Lowering**: the contiguous `Descending`/`Idle` samples after the
+///   pull up to (not including) the next `Ascending` run, or to the end of
+///   the data. A stalled lowering (`Descending, Idle, Descending`) is one
+///   lowering. The rep ends at the last `Descending` sample of that span
+///   (trailing `Idle` is the bar resting on the floor, not part of the rep);
+///   the next pull's first sample follows the span directly.
+/// - **Gate**: the pull AND the whole lowering (total travel over the span)
+///   must each reach `min_displacement`, otherwise the candidate is jitter
+///   and is skipped without affecting its neighbours (it never merges them).
+/// - **End of data**: a pull that reaches `min_displacement` but whose
+///   lowering is truncated by the end of the data (or absent) is KEPT: the
+///   lift happened. The lowering gate is not applied there; with no
+///   lowering at all, `turn` and the rep end are the last sample of the
+///   pull. (Squat descents with no ascent are still dropped.)
 pub fn segment_reps_for_lift(
     lift: LiftType,
     velocity: &[VelocitySample],
@@ -353,30 +383,50 @@ pub fn segment_reps_for_lift(
             i += 1;
             continue;
         }
-        // Parse `Ascending, [Idle], Descending`; the turn is the end of the
-        // pull, or the midpoint of the lockout pause.
-        let mut k = i + 1;
-        let mut turn = runs[i].end;
-        if runs.get(k).is_some_and(|r| r.phase == Phase::Idle) {
-            turn = (runs[k].start + runs[k].end) / 2;
-            k += 1;
-        }
-        let Some(lowering) = runs.get(k).filter(|r| r.phase == Phase::Descending) else {
-            // Pull with no lowering: incomplete.
-            i += 1;
-            continue;
-        };
-        if run_displacement(velocity, &runs[i]) >= config.min_displacement
-            && run_displacement(velocity, lowering) >= config.min_displacement
+        // Pull: Ascending runs joined across Idle-only gaps.
+        let mut p = i;
+        while runs.get(p + 1).is_some_and(|r| r.phase == Phase::Idle)
+            && runs.get(p + 2).is_some_and(|r| r.phase == Phase::Ascending)
         {
+            p += 2;
+        }
+        let pull_travel: f64 = runs[i..=p]
+            .iter()
+            .filter(|r| r.phase == Phase::Ascending)
+            .map(|r| run_displacement(velocity, r))
+            .sum();
+        // Lowering span: runs after the pull up to the next Ascending run.
+        let mut q = p;
+        while runs.get(q + 1).is_some_and(|r| r.phase != Phase::Ascending) {
+            q += 1;
+        }
+        let lowering = &runs[p + 1..=q];
+        let at_data_end = q + 1 == runs.len();
+        let lowering_travel: f64 = lowering.iter().map(|r| run_displacement(velocity, r)).sum();
+        let qualifies = pull_travel >= config.min_displacement
+            && (at_data_end || lowering_travel >= config.min_displacement);
+        if qualifies {
+            let last_descending = lowering.iter().rposition(|r| r.phase == Phase::Descending);
+            let (turn, end) = match last_descending {
+                Some(d) => {
+                    let turn = if lowering[0].phase == Phase::Idle {
+                        // Idle pause between pull and lowering: its midpoint.
+                        (lowering[0].start + lowering[0].end) / 2
+                    } else {
+                        runs[p].end
+                    };
+                    (turn, lowering[d].end)
+                }
+                None => (runs[p].end, runs[p].end),
+            };
             reps.push(Rep {
                 order: PhaseOrder::ConcentricFirst,
                 eccentric_start: runs[i].start,
                 bottom: turn,
-                concentric_end: lowering.end,
+                concentric_end: end,
             });
         }
-        i = k + 1;
+        i = q + 1;
     }
     reps
 }
@@ -825,14 +875,138 @@ mod tests {
         assert_eq!(reps[0].start_frame_index(), 34);
     }
 
-    /// A pull with no lowering before the data ends is incomplete and is
-    /// dropped, like a squat descent with no ascent; the complete pulls
-    /// before it are kept.
+    /// Owner ruling 2026-10-28: a qualifying pull at the end of the data is
+    /// a rep even with no lowering (the lift happened); turn and end are the
+    /// last sample of the pull.
     #[test]
-    fn trailing_pull_without_lowering_is_handled() {
+    fn pull_at_the_end_with_no_lowering_is_kept_as_a_rep() {
         let mut vys = vec![0.0; 10];
         vys.extend(pull_and_lower());
         vys.extend(leg(-200.0, 30));
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 2);
+        assert_eq!(reps[0].end_index(), 69);
+        assert_eq!(reps[1].start_frame_index(), 70);
+        assert_eq!(reps[1].turn_index(), 99);
+        assert_eq!(reps[1].end_index(), 99);
+        assert_eq!(reps[1].concentric_span(), 70..=99);
+    }
+
+    /// The lowering is the whole Descending/Idle span, not just its first
+    /// Descending run: a stalled lowering must not drop a full-ROM pull nor
+    /// truncate the rep end at the first piece (~35 px < the 40 px gate).
+    #[test]
+    fn stalled_lowering_does_not_drop_a_full_pull() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(leg(-200.0, 30));
+        vys.extend(leg(150.0, 8));
+        vys.extend(leg(0.0, 3));
+        vys.extend(leg(200.0, 18));
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].start_frame_index(), 10);
+        assert_eq!(reps[0].turn_index(), 39);
+        assert_eq!(reps[0].end_index(), 68);
+    }
+
+    /// A clip that ends mid-lowering with under 40 px of lowering still
+    /// keeps the complete pull before it.
+    #[test]
+    fn lowering_cut_off_by_the_end_of_data_keeps_the_pull() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(pull_and_lower());
+        vys.extend(leg(-200.0, 30));
+        vys.extend(leg(100.0, 8)); // ~23 px of lowering, then the data ends
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 2);
+        assert_eq!(reps[1].start_frame_index(), 70);
+        assert_eq!(reps[1].turn_index(), 99);
+        assert_eq!(reps[1].end_index(), 107);
+    }
+
+    /// `Ascending, Idle, Ascending` with no Descending between is one pull.
+    #[test]
+    fn sticking_point_idle_inside_a_pull_is_one_pull() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(leg(-200.0, 15));
+        vys.extend(leg(0.0, 4));
+        vys.extend(leg(-200.0, 15));
+        vys.extend(leg(200.0, 30));
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].start_frame_index(), 10);
+        assert_eq!(reps[0].concentric_span(), 10..=43);
+        assert_eq!(reps[0].end_index(), 73);
+    }
+
+    /// `n` samples ramping linearly from `a` to `b`, both inclusive.
+    fn ramp(n: usize, a: f64, b: f64) -> Vec<f64> {
+        (0..n)
+            .map(|i| a + (b - a) * i as f64 / (n - 1) as f64)
+            .collect()
+    }
+
+    /// Realistic shape: velocity ramps in and out around lockout and floor,
+    /// with sub-dead-band flicker at both turning points. Each set of 70
+    /// samples is one pull and one lowering.
+    #[test]
+    fn ramped_velocity_around_the_turn_still_yields_one_rep_per_pull() {
+        let mut vys = vec![0.0; 10];
+        for _ in 0..3 {
+            vys.extend(ramp(11, 0.0, -300.0));
+            vys.extend(leg(-300.0, 10));
+            vys.extend(ramp(11, -300.0, 0.0));
+            vys.extend([2.0, -3.0, 2.0]); // lockout flicker
+            vys.extend(ramp(11, 0.0, 250.0));
+            vys.extend(leg(250.0, 10));
+            vys.extend(ramp(11, 250.0, 0.0));
+            vys.extend([-3.0, 2.0, -2.0]); // floor flicker
+        }
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 3);
+        for (k, rep) in reps.iter().enumerate() {
+            let base = 10 + 70 * k;
+            assert_eq!(rep.start_frame_index(), base + 1);
+            assert_eq!(rep.turn_index(), base + 33);
+            assert_eq!(rep.end_index(), base + 65);
+        }
+    }
+
+    /// Short supra-dead-band blips (jitter) at lockout and at the floor are
+    /// folded into Idle and neither add reps nor split a rep.
+    #[test]
+    fn idle_flicker_at_the_floor_between_touch_and_go_pulls_still_yields_one_rep_per_pull() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(pull_and_lower().into_iter().take(30));
+        vys.extend([20.0, 20.0, 0.0, -20.0, -20.0]); // lockout blips
+        vys.extend(leg(200.0, 30));
+        vys.extend([-20.0, -20.0, 0.0, 20.0, 20.0, 0.0]); // floor blips
+        vys.extend(leg(-200.0, 30));
+        vys.extend([20.0, 20.0, 0.0, -20.0, -20.0]);
+        vys.extend(leg(200.0, 30));
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 2);
+        assert_eq!(reps[0].start_frame_index(), 10);
+        assert_eq!(reps[0].turn_index(), 42);
+        assert_eq!(reps[0].end_index(), 74);
+        assert_eq!(reps[1].start_frame_index(), 81);
+        assert_eq!(reps[1].turn_index(), 113);
+        assert_eq!(reps[1].end_index(), 145);
+    }
+
+    /// Slow sustained drift after the set (the lifter walking away) is below
+    /// `min_displacement`: not a rep, even at the end of the data.
+    #[test]
+    fn walk_away_noise_at_the_end_below_min_displacement_is_not_a_rep() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(pull_and_lower());
+        vys.extend(leg(-10.0, 30));
+        vys.extend(leg(10.0, 30));
+        vys.extend(vec![0.0; 10]);
         let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
         assert_eq!(reps.len(), 1);
         assert_eq!(reps[0].end_index(), 69);
