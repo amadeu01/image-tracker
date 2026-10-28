@@ -18,6 +18,7 @@ pub mod metric;
 pub mod motion;
 pub mod overlay;
 pub mod patch;
+pub mod plate_finder;
 pub mod preprocessor;
 pub mod rep;
 pub mod rep_metrics;
@@ -48,6 +49,7 @@ pub use metric::{CorrelationMetric, Zncc};
 pub use motion::Track;
 pub use overlay::{render_overlay, render_rep_bottoms, Color, OverlayStyle, OverlayStyleBuilder};
 pub use patch::{extract_patch, Patch};
+pub use plate_finder::{find_plates, PlateCandidate, PlateFinderConfig, PlateFinderConfigBuilder};
 pub use preprocessor::{Preprocessor, PreprocessorChain};
 pub use rep::{
     segment_reps, segment_reps_for_lift, PhaseOrder, Rep, RepSegmentationConfig,
