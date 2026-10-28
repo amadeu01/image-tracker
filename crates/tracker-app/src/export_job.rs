@@ -51,7 +51,14 @@ pub struct ExportJob {
 /// A handle to a running export job: just the read side of its progress
 /// channel (there's nothing to send back — auto-export isn't cancellable).
 pub struct ExportHandle {
-    pub messages: Receiver<ExportMessage>,
+    messages: Receiver<ExportMessage>,
+}
+
+impl ExportHandle {
+    /// Takes every message the worker has sent so far, without blocking.
+    pub fn drain(&self) -> Vec<ExportMessage> {
+        self.messages.try_iter().collect()
+    }
 }
 
 /// Spawns a background thread that writes every export for `job`, next to

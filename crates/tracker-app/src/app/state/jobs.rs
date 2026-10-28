@@ -195,10 +195,7 @@ impl AppState {
         };
         let mut any = false;
         let mut finished = false;
-        let mut messages = Vec::new();
-        while let Ok(msg) = handle.messages.try_recv() {
-            messages.push(msg);
-        }
+        let messages = handle.drain();
         for msg in messages {
             any = true;
             if let Some(frame_index) = msg.video_frame_index() {
@@ -368,10 +365,7 @@ impl AppState {
             return false;
         };
         let mut any = false;
-        let mut messages = Vec::new();
-        while let Ok(msg) = handle.messages.try_recv() {
-            messages.push(msg);
-        }
+        let messages = handle.drain();
         for msg in messages {
             any = true;
             match msg {
@@ -483,10 +477,7 @@ impl AppState {
         };
         let mut any = false;
         let mut done = false;
-        let mut messages = Vec::new();
-        while let Ok(msg) = handle.messages.try_recv() {
-            messages.push(msg);
-        }
+        let messages = handle.drain();
         for msg in messages {
             any = true;
             match msg {

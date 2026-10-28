@@ -698,7 +698,14 @@ pub enum BenchmarkMessage {
 /// A handle to a running background benchmark: the read side of its
 /// progress channel, mirroring `tracking::TrackingHandle`'s shape.
 pub struct BenchmarkHandle {
-    pub messages: Receiver<BenchmarkMessage>,
+    messages: Receiver<BenchmarkMessage>,
+}
+
+impl BenchmarkHandle {
+    /// Takes every message the worker has sent so far, without blocking.
+    pub fn drain(&self) -> Vec<BenchmarkMessage> {
+        self.messages.try_iter().collect()
+    }
 }
 
 /// Spawns a background thread that runs `strategy_matrix()`'s six strategies

@@ -269,6 +269,11 @@ pub struct TrackingHandle {
 }
 
 impl TrackingHandle {
+    /// Takes every message the worker has sent so far, without blocking.
+    pub fn drain(&self) -> Vec<TrackingMessage> {
+        self.messages.try_iter().collect()
+    }
+
     /// Sends a reseed command to a paused worker, so it resumes tracking
     /// from `position` at `video_frame_index`. If the worker has already
     /// exited (e.g. after an error), the send is silently dropped — the UI
