@@ -3,6 +3,7 @@
 //! plate to track. Pure orchestration over a `FrameDecoder`; no IO of its own.
 
 use std::fmt::Display;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracker_core::{
     find_plates, propose_seed, Frame, FrameDetections, PlateFinderConfig, SeedProposal,
@@ -18,6 +19,11 @@ use crate::frame_cache::FrameDecoder;
 /// link), while decoding a quarter of the frames keeps the pre-pass cheap.
 pub const DEFAULT_PREPASS_STRIDE: u64 = 4;
 
+/// Error text returned by [`run_prepass`] when `cancel` was set. Callers that
+/// need to tell a cancel from a failure compare against this (or, simpler,
+/// check their own flag, which is what the GUI job does).
+pub const CANCELLED: &str = "pre-pass cancelled";
+
 /// Run the pre-pass over `frame_count` frames, decoding every `stride`-th one
 /// (0, stride, 2*stride, ... < frame_count).
 ///
@@ -26,10 +32,15 @@ pub const DEFAULT_PREPASS_STRIDE: u64 = 4;
 /// Frames where no plate is found are still recorded with an empty candidate
 /// list so the proposer sees the sample gap. `on_progress` receives
 /// `(samples_done, samples_total)` after each sample.
+///
+/// `cancel` is checked before every sample is decoded; once it is set no
+/// further frames are requested and the result is `Err(CANCELLED)`. The CLI,
+/// which never cancels, passes a flag that is never set.
 pub fn run_prepass<D>(
     decoder: &mut D,
     frame_count: u64,
     stride: u64,
+    cancel: &AtomicBool,
     mut on_progress: impl FnMut(u64, u64),
 ) -> Result<Option<SeedProposal>, String>
 where
@@ -45,6 +56,9 @@ where
     let mut last_error = None;
 
     for sample in 0..total {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(CANCELLED.to_string());
+        }
         let index = sample * stride;
         match decoder.decode_frame(index) {
             Ok(frame) => detections.push(FrameDetections {
@@ -122,6 +136,8 @@ mod tests {
         }
     }
 
+    static NEVER: AtomicBool = AtomicBool::new(false);
+
     const R: f64 = 40.0;
     const COUNT: u64 = 60;
 
@@ -140,22 +156,39 @@ mod tests {
     fn prepass_samples_every_stride_th_frame_and_reports_progress() {
         let mut d = Scripted::new(|_| blank(60, 60, 90));
         let mut progress = Vec::new();
-        run_prepass(&mut d, 10, 3, |a, b| progress.push((a, b))).unwrap();
+        run_prepass(&mut d, 10, 3, &NEVER, |a, b| progress.push((a, b))).unwrap();
         assert_eq!(d.requested, vec![0, 3, 6, 9]);
         assert_eq!(progress.last(), Some(&(4, 4)));
         assert_eq!(progress.len(), 4);
     }
 
     #[test]
+    fn prepass_cancel_flag_stops_between_samples() {
+        let mut d = Scripted::new(|_| blank(60, 60, 90));
+        let cancel = AtomicBool::new(false);
+        let r = run_prepass(&mut d, COUNT, 4, &cancel, |done, _| {
+            if done == 3 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        assert_eq!(r, Err(CANCELLED.to_string()));
+        assert_eq!(
+            d.requested,
+            vec![0, 4, 8],
+            "no decode after the flag was set"
+        );
+    }
+
+    #[test]
     fn prepass_returns_none_for_a_clip_with_no_plate() {
         let mut d = Scripted::new(|_| blank(300, 400, 90));
-        assert_eq!(run_prepass(&mut d, COUNT, 4, |_, _| {}), Ok(None));
+        assert_eq!(run_prepass(&mut d, COUNT, 4, &NEVER, |_, _| {}), Ok(None));
     }
 
     #[test]
     fn prepass_zero_stride_is_an_error() {
         let mut d = Scripted::new(|_| blank(60, 60, 90));
-        assert!(run_prepass(&mut d, 10, 0, |_, _| {}).is_err());
+        assert!(run_prepass(&mut d, 10, 0, &NEVER, |_, _| {}).is_err());
         assert!(d.requested.is_empty());
     }
 
@@ -163,7 +196,7 @@ mod tests {
     fn prepass_skips_a_failing_frame_and_still_proposes() {
         let mut d = Scripted::new(moving_disc);
         d.fail = vec![8, 28];
-        let p = run_prepass(&mut d, COUNT, 4, |_, _| {}).unwrap();
+        let p = run_prepass(&mut d, COUNT, 4, &NEVER, |_, _| {}).unwrap();
         assert!(p.is_some());
     }
 
@@ -171,14 +204,14 @@ mod tests {
     fn prepass_errors_when_every_decode_fails() {
         let mut d = Scripted::new(moving_disc);
         d.fail_all = true;
-        let err = run_prepass(&mut d, COUNT, 4, |_, _| {}).unwrap_err();
+        let err = run_prepass(&mut d, COUNT, 4, &NEVER, |_, _| {}).unwrap_err();
         assert!(err.contains("could not decode"), "{err}");
     }
 
     #[test]
     fn prepass_proposes_a_moving_disc() {
         let mut d = Scripted::new(moving_disc);
-        let p = run_prepass(&mut d, COUNT, 4, |_, _| {})
+        let p = run_prepass(&mut d, COUNT, 4, &NEVER, |_, _| {})
             .unwrap()
             .expect("moving disc should be proposed");
         let (ex, ey) = (150.0, disc_y(p.frame_index));
@@ -209,9 +242,13 @@ mod tests {
         );
         let start = std::time::Instant::now();
         let mut samples = 0;
-        let r = run_prepass(&mut dec, count, DEFAULT_PREPASS_STRIDE, |done, _| {
-            samples = done
-        });
+        let r = run_prepass(
+            &mut dec,
+            count,
+            DEFAULT_PREPASS_STRIDE,
+            &NEVER,
+            |done, _| samples = done,
+        );
         println!(
             "elapsed_s={:.1} samples={samples} frame_count={count}",
             start.elapsed().as_secs_f64()

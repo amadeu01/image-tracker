@@ -273,6 +273,7 @@ where
         decoder,
         frame_count,
         crate::prepass::DEFAULT_PREPASS_STRIDE,
+        &std::sync::atomic::AtomicBool::new(false),
         on_progress,
     )?;
     let Some(p) = proposal else {
