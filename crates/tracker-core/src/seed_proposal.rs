@@ -1,13 +1,21 @@
 //! Seed proposal: pick the moving plate from per-frame plate detections.
 //!
-//! Candidates are linked frame to frame by nearest-neighbour continuity, with
-//! the link gate expressed in plate-diameter units. Tracks with negligible
-//! vertical travel (floor plates, rack hardware) are dropped, and the track
-//! with the largest vertical travel wins. No pixel scale is baked in.
+//! Candidates are linked sample to sample (a sample is one `FrameDetections`
+//! entry; the pre-pass may stride over many frames) by global nearest-
+//! neighbour assignment. The speed gate is expressed in plate diameters per
+//! elapsed frame and every link must also keep the plate size consistent, so
+//! a head-sized circle never joins a plate track. Short occlusions are
+//! bridged by merging tracks whose end and start are consistent in speed and
+//! size.
+//!
+//! Static tracks (floor plates, rack hardware, jitter) are rejected by a
+//! robust vertical range (10th to 90th percentile of one consistent point per
+//! track) and the track with the largest range wins. The proposal sits at the
+//! first stable run of that track. No pixel scale is baked in.
 //!
 //! `PlateCandidate::score` saturates and is only coarsely comparable across
-//! frames, so confidence is derived from track length, persistence and
-//! vertical travel, not from score differences.
+//! frames, so confidence is derived from track length, persistence, vertical
+//! travel and ambiguity, never from score differences.
 
 use crate::geometry::Point;
 use crate::lift::{classify_lift, LiftClassification, LiftClassifierConfig, TrackPoint};
@@ -23,9 +31,9 @@ pub struct FrameDetections {
 /// A proposed seed for the tracker.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeedProposal {
-    /// Frame of the track's first stable detection.
+    /// Frame of the chosen track's first stable detection.
     pub frame_index: u64,
-    /// Bar Point there (sleeve end when found, else plate centre).
+    /// Bar Point there (sleeve end when the track has one, else plate centre).
     pub position: Point,
     /// Median plate diameter over the track, from the detections.
     pub plate_diameter_px: f64,
@@ -34,13 +42,20 @@ pub struct SeedProposal {
     pub confidence: f64,
 }
 
-/// Thresholds for `propose_seed`, in plate-diameter units or fractions.
+/// Thresholds for `propose_seed`, in plate-diameter units, fractions or
+/// sample counts.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SeedProposalConfig {
     link_gate_plates_per_frame: f64,
-    max_gap_frames: u64,
+    size_ratio_tolerance: f64,
+    max_gap_samples: usize,
+    merge_gap_samples: usize,
     min_track_points: usize,
+    min_stable_samples: usize,
+    stable_window_samples: usize,
     min_vertical_travel_plates: f64,
+    sleeve_end_min_fraction: f64,
+    ambiguity_ratio: f64,
     full_confidence_points: usize,
     full_confidence_travel_plates: f64,
     lift_classifier: LiftClassifierConfig,
@@ -54,10 +69,16 @@ impl SeedProposalConfig {
     /// Initial values, to be tuned against labelled clips.
     pub fn default_config() -> Self {
         Self {
-            link_gate_plates_per_frame: 0.5,
-            max_gap_frames: 5,
+            link_gate_plates_per_frame: 0.12,
+            size_ratio_tolerance: 0.3,
+            max_gap_samples: 3,
+            merge_gap_samples: 10,
             min_track_points: 5,
+            min_stable_samples: 4,
+            stable_window_samples: 6,
             min_vertical_travel_plates: 0.5,
+            sleeve_end_min_fraction: 0.8,
+            ambiguity_ratio: 0.5,
             full_confidence_points: 30,
             full_confidence_travel_plates: 2.0,
             lift_classifier: LiftClassifierConfig::default_config(),
@@ -68,17 +89,42 @@ impl SeedProposalConfig {
     pub fn link_gate_plates_per_frame(&self) -> f64 {
         self.link_gate_plates_per_frame
     }
-    /// Frames a track may go undetected and still be continued.
-    pub fn max_gap_frames(&self) -> u64 {
-        self.max_gap_frames
+    /// Allowed relative diameter deviation when linking (0.3 = +-30%).
+    pub fn size_ratio_tolerance(&self) -> f64 {
+        self.size_ratio_tolerance
+    }
+    /// Consecutive samples a track may miss and still be continued.
+    pub fn max_gap_samples(&self) -> usize {
+        self.max_gap_samples
+    }
+    /// Max samples between two tracks for them to be merged.
+    pub fn merge_gap_samples(&self) -> usize {
+        self.merge_gap_samples
     }
     /// Minimum linked detections for a track to count.
     pub fn min_track_points(&self) -> usize {
         self.min_track_points
     }
-    /// Minimum vertical range, in plate diameters, for a track to count.
+    /// Samples that must be present inside a stability window.
+    pub fn min_stable_samples(&self) -> usize {
+        self.min_stable_samples
+    }
+    /// Length, in consecutive samples, of the stability window.
+    pub fn stable_window_samples(&self) -> usize {
+        self.stable_window_samples
+    }
+    /// Minimum robust vertical range, in plate diameters, for a track.
     pub fn min_vertical_travel_plates(&self) -> f64 {
         self.min_vertical_travel_plates
+    }
+    /// Fraction of a track's samples that must carry a sleeve end for the
+    /// sleeve end to be used as the track's point.
+    pub fn sleeve_end_min_fraction(&self) -> f64 {
+        self.sleeve_end_min_fraction
+    }
+    /// Second-best travel / best travel at or above which confidence drops.
+    pub fn ambiguity_ratio(&self) -> f64 {
+        self.ambiguity_ratio
     }
     /// Track length at which the length term of confidence saturates.
     pub fn full_confidence_points(&self) -> usize {
@@ -113,16 +159,40 @@ impl SeedProposalConfigBuilder {
         self.cfg.link_gate_plates_per_frame = v;
         self
     }
-    pub fn max_gap_frames(mut self, v: u64) -> Self {
-        self.cfg.max_gap_frames = v;
+    pub fn size_ratio_tolerance(mut self, v: f64) -> Self {
+        self.cfg.size_ratio_tolerance = v;
+        self
+    }
+    pub fn max_gap_samples(mut self, v: usize) -> Self {
+        self.cfg.max_gap_samples = v;
+        self
+    }
+    pub fn merge_gap_samples(mut self, v: usize) -> Self {
+        self.cfg.merge_gap_samples = v;
         self
     }
     pub fn min_track_points(mut self, v: usize) -> Self {
         self.cfg.min_track_points = v;
         self
     }
+    pub fn min_stable_samples(mut self, v: usize) -> Self {
+        self.cfg.min_stable_samples = v;
+        self
+    }
+    pub fn stable_window_samples(mut self, v: usize) -> Self {
+        self.cfg.stable_window_samples = v;
+        self
+    }
     pub fn min_vertical_travel_plates(mut self, v: f64) -> Self {
         self.cfg.min_vertical_travel_plates = v;
+        self
+    }
+    pub fn sleeve_end_min_fraction(mut self, v: f64) -> Self {
+        self.cfg.sleeve_end_min_fraction = v;
+        self
+    }
+    pub fn ambiguity_ratio(mut self, v: f64) -> Self {
+        self.cfg.ambiguity_ratio = v;
         self
     }
     pub fn full_confidence_points(mut self, v: usize) -> Self {
@@ -145,13 +215,17 @@ impl SeedProposalConfigBuilder {
 /// One linked detection.
 #[derive(Debug, Clone, Copy)]
 struct Linked {
+    sample: usize,
     frame_index: u64,
-    position: Point,
+    center: Point,
+    sleeve: Option<Point>,
     diameter_px: f64,
 }
 
-fn bar_point(c: &PlateCandidate) -> Point {
-    c.sleeve_end.unwrap_or(c.center)
+type Track = Vec<Linked>;
+
+fn finite_point(p: Point) -> bool {
+    p.x.is_finite() && p.y.is_finite()
 }
 
 fn median(values: &mut [f64]) -> f64 {
@@ -164,83 +238,235 @@ fn median(values: &mut [f64]) -> f64 {
     }
 }
 
-fn link_tracks(detections: &[FrameDetections], config: &SeedProposalConfig) -> Vec<Vec<Linked>> {
+/// Median diameter of the last few points of a track.
+fn recent_diameter(track: &[Linked]) -> f64 {
+    let tail = &track[track.len().saturating_sub(5)..];
+    let mut d: Vec<f64> = tail.iter().map(|p| p.diameter_px).collect();
+    median(&mut d)
+}
+
+fn size_consistent(diameter: f64, reference: f64, tolerance: f64) -> bool {
+    (diameter / reference - 1.0).abs() <= tolerance
+}
+
+fn dist_plates(a: Point, b: Point, diameter: f64) -> f64 {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt() / diameter
+}
+
+/// Valid samples, sorted by frame index with duplicate indices merged.
+fn clean_samples(detections: &[FrameDetections]) -> Vec<(u64, Vec<&PlateCandidate>)> {
     let mut frames: Vec<&FrameDetections> = detections.iter().collect();
     frames.sort_by_key(|f| f.frame_index);
+    let mut out: Vec<(u64, Vec<&PlateCandidate>)> = Vec::new();
+    for f in frames {
+        let valid = f
+            .candidates
+            .iter()
+            .filter(|c| finite_point(c.center) && c.radius_px.is_finite() && c.radius_px > 0.0);
+        match out.last_mut() {
+            Some((idx, cs)) if *idx == f.frame_index => cs.extend(valid),
+            _ => out.push((f.frame_index, valid.collect())),
+        }
+    }
+    out
+}
 
-    let mut tracks: Vec<Vec<Linked>> = Vec::new();
-    for frame in frames {
-        let existing = tracks.len();
-        let mut claimed = vec![false; existing];
-        for cand in &frame.candidates {
-            let pos = bar_point(cand);
-            let diameter = cand.radius_px * 2.0;
-            if !(diameter.is_finite() && diameter > 0.0) {
+fn link_tracks(detections: &[FrameDetections], config: &SeedProposalConfig) -> Vec<Track> {
+    let samples = clean_samples(detections);
+    let mut tracks: Vec<Track> = Vec::new();
+    for (s, (frame_index, cands)) in samples.iter().enumerate() {
+        // All (track, candidate) pairs inside the gates, closest first.
+        let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+        for (ti, track) in tracks.iter().enumerate() {
+            let last = track[track.len() - 1];
+            if s - last.sample > config.max_gap_samples + 1 {
                 continue;
             }
-            let mut best: Option<(usize, f64)> = None;
-            for (i, track) in tracks.iter().enumerate().take(existing) {
-                if claimed[i] {
+            let elapsed = frame_index.saturating_sub(last.frame_index);
+            if elapsed == 0 {
+                continue;
+            }
+            let reference = recent_diameter(track);
+            for (ci, c) in cands.iter().enumerate() {
+                if !size_consistent(c.radius_px * 2.0, reference, config.size_ratio_tolerance) {
                     continue;
                 }
-                let last = track[track.len() - 1];
-                let elapsed = frame.frame_index.saturating_sub(last.frame_index);
-                if elapsed == 0 || elapsed > config.max_gap_frames + 1 {
-                    continue;
-                }
-                let dist = ((pos.x - last.position.x).powi(2) + (pos.y - last.position.y).powi(2))
-                    .sqrt()
-                    / last.diameter_px;
-                if dist <= config.link_gate_plates_per_frame * elapsed as f64
-                    && best.is_none_or(|(_, d)| dist < d)
-                {
-                    best = Some((i, dist));
+                let per_frame =
+                    dist_plates(c.center, last.center, last.diameter_px) / elapsed as f64;
+                if per_frame <= config.link_gate_plates_per_frame {
+                    pairs.push((per_frame, ti, ci));
                 }
             }
-            let linked = Linked {
-                frame_index: frame.frame_index,
-                position: pos,
-                diameter_px: diameter,
-            };
-            match best {
-                Some((i, _)) => {
-                    claimed[i] = true;
-                    tracks[i].push(linked);
-                }
-                None => tracks.push(vec![linked]),
+        }
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut track_taken = vec![false; tracks.len()];
+        let mut cand_taken = vec![false; cands.len()];
+        let make = |c: &PlateCandidate| Linked {
+            sample: s,
+            frame_index: *frame_index,
+            center: c.center,
+            sleeve: c.sleeve_end.filter(|p| finite_point(*p)),
+            diameter_px: c.radius_px * 2.0,
+        };
+        for (_, ti, ci) in pairs {
+            if track_taken[ti] || cand_taken[ci] {
+                continue;
+            }
+            track_taken[ti] = true;
+            cand_taken[ci] = true;
+            tracks[ti].push(make(cands[ci]));
+        }
+        for (ci, c) in cands.iter().enumerate() {
+            if !cand_taken[ci] {
+                tracks.push(vec![make(c)]);
             }
         }
     }
-    tracks
+    merge_tracks(tracks, config)
 }
 
-fn vertical_travel_plates(track: &[Linked]) -> f64 {
-    let mut diameters: Vec<f64> = track.iter().map(|p| p.diameter_px).collect();
-    let d = median(&mut diameters);
-    let (lo, hi) = track
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
-            (lo.min(p.position.y), hi.max(p.position.y))
-        });
-    (hi - lo) / d
+/// Bridge occlusions: join a track's end to a later track's start when the
+/// implied speed and the diameter are consistent.
+fn merge_tracks(tracks: Vec<Track>, config: &SeedProposalConfig) -> Vec<Track> {
+    let n = tracks.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| tracks[i][0].sample);
+    let starts: Vec<usize> = order.iter().map(|&i| tracks[i][0].sample).collect();
+
+    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+    for a in 0..n {
+        let end = tracks[a][tracks[a].len() - 1];
+        let lo = starts.partition_point(|&s| s <= end.sample);
+        for &b in order[lo..].iter() {
+            let first = tracks[b][0];
+            if first.sample - end.sample > config.merge_gap_samples {
+                break;
+            }
+            let elapsed = first.frame_index.saturating_sub(end.frame_index);
+            if elapsed == 0
+                || !size_consistent(
+                    first.diameter_px,
+                    recent_diameter(&tracks[a]),
+                    config.size_ratio_tolerance,
+                )
+            {
+                continue;
+            }
+            let per_frame = dist_plates(first.center, end.center, end.diameter_px) / elapsed as f64;
+            if per_frame <= config.link_gate_plates_per_frame {
+                pairs.push((per_frame, a, b));
+            }
+        }
+    }
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut next: Vec<Option<usize>> = vec![None; n];
+    let mut has_prev = vec![false; n];
+    for (_, a, b) in pairs {
+        if next[a].is_none() && !has_prev[b] {
+            next[a] = Some(b);
+            has_prev[b] = true;
+        }
+    }
+    let mut slots: Vec<Option<Track>> = tracks.into_iter().map(Some).collect();
+    let mut merged = Vec::new();
+    for head in 0..n {
+        if has_prev[head] {
+            continue;
+        }
+        let mut chain = slots[head].take().unwrap_or_default();
+        let mut cur = head;
+        while let Some(nx) = next[cur] {
+            chain.extend(slots[nx].take().unwrap_or_default());
+            cur = nx;
+        }
+        merged.push(chain);
+    }
+    merged
+}
+
+/// One consistent bar point per track: the sleeve end only when most samples
+/// carry one, otherwise always the plate centre.
+fn use_sleeve(track: &[Linked], config: &SeedProposalConfig) -> bool {
+    let with = track.iter().filter(|p| p.sleeve.is_some()).count();
+    with as f64 >= config.sleeve_end_min_fraction * track.len() as f64
+}
+
+fn point_of(p: &Linked, sleeve: bool) -> Point {
+    if sleeve {
+        p.sleeve.unwrap_or(p.center)
+    } else {
+        p.center
+    }
+}
+
+/// Index of the first sample starting a stable run, if any.
+fn first_stable(track: &[Linked], config: &SeedProposalConfig) -> Option<usize> {
+    for i in 0..track.len() {
+        let end = track[i].sample + config.stable_window_samples;
+        let window: Vec<&Linked> = track[i..].iter().take_while(|p| p.sample < end).collect();
+        if window.len() < config.min_stable_samples {
+            continue;
+        }
+        let mut d: Vec<f64> = window.iter().map(|p| p.diameter_px).collect();
+        let m = median(&mut d);
+        if window
+            .iter()
+            .all(|p| size_consistent(p.diameter_px, m, config.size_ratio_tolerance))
+        {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// 10th to 90th percentile vertical range, in plate diameters.
+fn robust_travel_plates(track: &[Linked], sleeve: bool) -> f64 {
+    let mut ys: Vec<f64> = track.iter().map(|p| point_of(p, sleeve).y).collect();
+    ys.sort_by(|a, b| a.total_cmp(b));
+    let n = ys.len();
+    let lo = ys[((n - 1) as f64 * 0.1).floor() as usize];
+    let hi = ys[((n - 1) as f64 * 0.9).ceil() as usize];
+    let mut d: Vec<f64> = track.iter().map(|p| p.diameter_px).collect();
+    (hi - lo) / median(&mut d)
+}
+
+struct Candidate<'a> {
+    track: &'a [Linked],
+    sleeve: bool,
+    travel: f64,
 }
 
 /// Propose the seed for tracking: the first stable point of the moving plate.
 ///
-/// Returns `None` when no track is long enough and travels far enough, so a
-/// static floor plate or rack hardware is never proposed.
+/// Returns `None` when no track is long enough, stable and travels far
+/// enough, so a static floor plate or rack hardware is never proposed.
 pub fn propose_seed(
     detections: &[FrameDetections],
     config: &SeedProposalConfig,
 ) -> Option<SeedProposal> {
     let tracks = link_tracks(detections, config);
-    let (track, travel) = tracks
+    let mut cands: Vec<Candidate> = tracks
         .iter()
-        .filter(|t| t.len() >= config.min_track_points)
-        .map(|t| (t, vertical_travel_plates(t)))
-        .filter(|(_, travel)| *travel >= config.min_vertical_travel_plates)
-        .max_by(|a, b| a.1.total_cmp(&b.1))?;
+        .filter_map(|t| {
+            let start = first_stable(t, config)?;
+            let track = &t[start..];
+            if track.len() < config.min_track_points {
+                return None;
+            }
+            let sleeve = use_sleeve(track, config);
+            let travel = robust_travel_plates(track, sleeve);
+            (travel >= config.min_vertical_travel_plates).then_some(Candidate {
+                track,
+                sleeve,
+                travel,
+            })
+        })
+        .collect();
+    cands.sort_by(|a, b| b.travel.total_cmp(&a.travel));
+    let best = cands.first()?;
+    let second_travel = cands.get(1).map(|c| c.travel);
 
+    let track = best.track;
     let mut diameters: Vec<f64> = track.iter().map(|p| p.diameter_px).collect();
     let plate_diameter_px = median(&mut diameters);
 
@@ -248,7 +474,7 @@ pub fn propose_seed(
         .iter()
         .map(|p| TrackPoint {
             frame_index: p.frame_index,
-            position: p.position,
+            position: point_of(p, best.sleeve),
             plate_diameter_px: p.diameter_px,
         })
         .collect();
@@ -256,19 +482,24 @@ pub fn propose_seed(
 
     let first = track[0];
     let last = track[track.len() - 1];
-    let span = (last.frame_index - first.frame_index + 1) as f64;
+    let span = (last.sample - first.sample + 1) as f64;
     let length_term = (track.len() as f64 / config.full_confidence_points.max(1) as f64).min(1.0);
-    let travel_term = (travel / config.full_confidence_travel_plates).min(1.0);
+    let travel_term = (best.travel / config.full_confidence_travel_plates).min(1.0);
     let persistence_term = (track.len() as f64 / span).min(1.0);
-    let confidence =
-        (0.4 * length_term + 0.4 * travel_term + 0.2 * persistence_term).clamp(0.0, 1.0);
+    let mut confidence = 0.4 * length_term + 0.4 * travel_term + 0.2 * persistence_term;
+    if let Some(second) = second_travel {
+        let ratio = second / best.travel;
+        if ratio >= config.ambiguity_ratio {
+            confidence *= 1.0 - 0.5 * ratio.min(1.0);
+        }
+    }
 
     Some(SeedProposal {
         frame_index: first.frame_index,
-        position: first.position,
+        position: point_of(&first, best.sleeve),
         plate_diameter_px,
         lift,
-        confidence,
+        confidence: confidence.clamp(0.0, 1.0),
     })
 }
 
@@ -276,6 +507,9 @@ pub fn propose_seed(
 mod tests {
     use super::*;
     use crate::lift::LiftType;
+
+    const R: f64 = 60.0;
+    const D: f64 = 120.0;
 
     fn cand(x: f64, y: f64, radius: f64) -> PlateCandidate {
         PlateCandidate {
@@ -293,15 +527,33 @@ mod tests {
         }
     }
 
-    /// Plate rising 3 diameters over `n` frames starting at `start`.
-    fn rising(start: u64, n: u64, radius: f64) -> Vec<(u64, PlateCandidate)> {
+    /// Bar y (image coords) at the start of a lift.
+    const Y0: f64 = 900.0;
+
+    /// Plate rising `rise` plate diameters over `n` samples, `stride` frames
+    /// apart, starting at frame `start`.
+    fn rising_strided(
+        start: u64,
+        n: u64,
+        stride: u64,
+        rise: f64,
+        radius: f64,
+    ) -> Vec<(u64, PlateCandidate)> {
         let d = radius * 2.0;
         (0..n)
             .map(|k| {
-                let y = 900.0 - 3.0 * d * k as f64 / (n - 1) as f64;
-                (start + k, cand(300.0, y, radius))
+                let y = Y0 - rise * d * k as f64 / (n - 1) as f64;
+                (start + k * stride, cand(300.0, y, radius))
             })
             .collect()
+    }
+
+    fn rising(start: u64, n: u64, rise: f64) -> Vec<(u64, PlateCandidate)> {
+        rising_strided(start, n, 1, rise, R)
+    }
+
+    fn to_frames(v: Vec<(u64, PlateCandidate)>) -> Vec<FrameDetections> {
+        v.into_iter().map(|(i, c)| frame(i, vec![c])).collect()
     }
 
     fn cfg() -> SeedProposalConfig {
@@ -311,19 +563,19 @@ mod tests {
     #[test]
     fn static_plate_present_in_every_frame_is_never_proposed() {
         let dets: Vec<_> = (0..60)
-            .map(|i| frame(i, vec![cand(500.0, 800.0, 60.0)]))
+            .map(|i| frame(i, vec![cand(500.0, 800.0, R)]))
             .collect();
         assert!(propose_seed(&dets, &cfg()).is_none());
     }
 
     #[test]
-    fn proposal_starts_at_first_stable_detection_not_frame_zero() {
+    fn proposal_frame_is_within_a_small_bound_of_the_first_stable_detection() {
         let mut dets: Vec<_> = (0..100).map(|i| frame(i, vec![])).collect();
-        for (i, c) in rising(100, 40, 60.0) {
-            dets.push(frame(i, vec![c]));
-        }
+        dets.extend(to_frames(rising(100, 40, 3.0)));
         let p = propose_seed(&dets, &cfg()).unwrap();
+        let window = cfg().stable_window_samples() as u64;
         assert!(p.frame_index >= 100);
+        assert!(p.frame_index <= 100 + 2 * window, "got {}", p.frame_index);
     }
 
     #[test]
@@ -339,11 +591,7 @@ mod tests {
 
     #[test]
     fn proposal_carries_lift_classification_from_the_linked_track() {
-        let dets: Vec<_> = rising(0, 40, 60.0)
-            .into_iter()
-            .map(|(i, c)| frame(i, vec![c]))
-            .collect();
-        let p = propose_seed(&dets, &cfg()).unwrap();
+        let p = propose_seed(&to_frames(rising(0, 40, 3.0)), &cfg()).unwrap();
         assert_eq!(p.lift.lift, LiftType::Deadlift);
         assert!((0.0..=1.0).contains(&p.confidence));
     }
@@ -351,10 +599,7 @@ mod tests {
     #[test]
     fn plate_diameter_comes_from_the_detections_not_a_constant() {
         for radius in [40.0, 90.0] {
-            let dets: Vec<_> = rising(0, 40, radius)
-                .into_iter()
-                .map(|(i, c)| frame(i, vec![c]))
-                .collect();
+            let dets = to_frames(rising_strided(0, 40, 1, 3.0, radius));
             let p = propose_seed(&dets, &cfg()).unwrap();
             assert!((p.plate_diameter_px - radius * 2.0).abs() < 1e-9);
         }
@@ -362,7 +607,7 @@ mod tests {
 
     #[test]
     fn moving_bar_wins_over_static_floor_plate() {
-        let dets: Vec<_> = rising(0, 40, 60.0)
+        let dets: Vec<_> = rising(0, 40, 3.0)
             .into_iter()
             .map(|(i, c)| frame(i, vec![cand(900.0, 1000.0, 70.0), c]))
             .collect();
@@ -371,21 +616,22 @@ mod tests {
     }
 
     #[test]
-    fn detection_gap_in_the_middle_keeps_one_track() {
-        let dets: Vec<_> = rising(0, 40, 60.0)
+    fn detection_gap_in_the_middle_keeps_one_full_range_track() {
+        // Rise of 1.6 plates: each half alone (0.8) is not a deadlift, the
+        // whole track is.
+        let dets: Vec<_> = rising(0, 40, 1.6)
             .into_iter()
             .filter(|(i, _)| !(18..22).contains(i))
             .map(|(i, c)| frame(i, vec![c]))
             .collect();
         let p = propose_seed(&dets, &cfg()).unwrap();
         assert_eq!(p.frame_index, 0);
-        // Travel covers the whole rise, so the track was not split.
         assert_eq!(p.lift.lift, LiftType::Deadlift);
     }
 
     #[test]
     fn sleeve_end_is_preferred_as_position() {
-        let dets: Vec<_> = rising(0, 40, 60.0)
+        let dets: Vec<_> = rising(0, 40, 3.0)
             .into_iter()
             .map(|(i, mut c)| {
                 c.sleeve_end = Some(Point::new(c.center.x + 5.0, c.center.y));
@@ -394,5 +640,205 @@ mod tests {
             .collect();
         let p = propose_seed(&dets, &cfg()).unwrap();
         assert!((p.position.x - 305.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn candidate_steal_goes_to_the_closest_candidate() {
+        // Samples 4 frames apart, bar moves 0.05 plate per sample. At sample 1
+        // a wrong candidate X (0.3 plate away, listed first) competes with the
+        // true continuation Y. Y must win, so the track starts at frame 0.
+        let bar = rising_strided(0, 30, 4, 1.5, R);
+        let dets: Vec<_> = bar
+            .into_iter()
+            .enumerate()
+            .map(|(k, (i, c))| {
+                let mut cs = vec![];
+                if k == 1 {
+                    cs.push(cand(c.center.x + 0.3 * D, c.center.y, R));
+                }
+                cs.push(c);
+                frame(i, cs)
+            })
+            .collect();
+        let p = propose_seed(&dets, &cfg()).unwrap();
+        assert_eq!(p.frame_index, 0);
+        assert!((p.position.x - 300.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn head_sized_circle_does_not_link_to_a_plate_track() {
+        // From frame 1 on, a head-sized circle sits 0.05 plate above the bar
+        // and is listed first.
+        let dets: Vec<_> = rising(0, 40, 3.0)
+            .into_iter()
+            .map(|(i, c)| {
+                let mut cs = vec![];
+                if i >= 1 {
+                    let y = Y0 - 0.3 * (Y0 - c.center.y) - 0.05 * D;
+                    cs.push(cand(c.center.x, y, R / 2.0));
+                }
+                cs.push(c);
+                frame(i, cs)
+            })
+            .collect();
+        let p = propose_seed(&dets, &cfg()).unwrap();
+        assert!((p.plate_diameter_px - D).abs() < 1e-9);
+        assert_eq!(p.frame_index, 0);
+    }
+
+    #[test]
+    fn deadlift_plate_still_for_many_samples_then_rising_is_proposed_in_the_still_stretch() {
+        // Documented behaviour: the proposal is the first stable detection of
+        // the CHOSEN moving track. The plate is still for 40 samples and
+        // then rises, so the proposal lies in the still stretch (or at the
+        // lift start), never on the static floor plate.
+        let mut bar: Vec<(u64, PlateCandidate)> =
+            (0..40).map(|i| (i, cand(300.0, Y0, R))).collect();
+        bar.extend(rising(40, 40, 3.0));
+        let dets: Vec<_> = bar
+            .into_iter()
+            .map(|(i, c)| frame(i, vec![cand(900.0, 1000.0, 70.0), c]))
+            .collect();
+        let p = propose_seed(&dets, &cfg()).unwrap();
+        assert!(p.frame_index <= 40, "got {}", p.frame_index);
+        assert!((p.position.x - 300.0).abs() < 1e-9);
+        assert_eq!(p.lift.lift, LiftType::Deadlift);
+    }
+
+    fn jitter_plate(i: u64, sleeve_every: Option<u64>) -> PlateCandidate {
+        let s = if i.is_multiple_of(2) { 1.0 } else { -1.0 };
+        let mut c = cand(500.0 + s * 2.0, 800.0 + s * 0.1 * D, R * (1.0 + s * 0.05));
+        if let Some(n) = sleeve_every {
+            if i.is_multiple_of(n) {
+                c.sleeve_end = Some(Point::new(500.0, 800.0 + 0.6 * D));
+            }
+        }
+        c
+    }
+
+    #[test]
+    fn jittery_static_plate_is_never_proposed() {
+        let dets: Vec<_> = (0..80)
+            .map(|i| frame(i, vec![jitter_plate(i, None)]))
+            .collect();
+        assert!(propose_seed(&dets, &cfg()).is_none());
+    }
+
+    #[test]
+    fn static_plate_with_intermittent_sleeve_end_is_never_proposed() {
+        let dets: Vec<_> = (0..80)
+            .map(|i| frame(i, vec![jitter_plate(i, Some(2))]))
+            .collect();
+        assert!(propose_seed(&dets, &cfg()).is_none());
+    }
+
+    #[test]
+    fn squat_wobble_then_set_includes_the_walkout_in_the_track() {
+        // Documented behaviour: unrack/walk-out wobble that links into the
+        // same track is included, so the proposal is at the first stable
+        // sample of the wobble, not at the start of the set. The lift is
+        // still classified from the whole track.
+        let mut pts: Vec<(u64, PlateCandidate)> = (0..12u64)
+            .map(|i| {
+                let w = if i.is_multiple_of(2) { 0.03 } else { -0.03 };
+                (i, cand(300.0, Y0 + w * D, R))
+            })
+            .collect();
+        for k in 0..60u64 {
+            // Down 1.0 plate over 30 frames, then back up.
+            let t = if k < 30 { k } else { 60 - k } as f64 / 30.0;
+            pts.push((12 + k, cand(300.0, Y0 + t * D, R)));
+        }
+        let p = propose_seed(&to_frames(pts), &cfg()).unwrap();
+        assert!(p.frame_index < 12, "got {}", p.frame_index);
+        assert_eq!(p.lift.lift, LiftType::Squat);
+    }
+
+    /// 40-sample rise of 1.8 plates with `gap` empty samples starting at 17.
+    fn rise_with_empty_gap(gap: u64) -> Vec<FrameDetections> {
+        rising(0, 40, 1.8)
+            .into_iter()
+            .map(|(i, c)| {
+                if (17..17 + gap).contains(&i) {
+                    frame(i, vec![])
+                } else {
+                    frame(i, vec![c])
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gap_longer_than_max_gap_is_merged_when_consistent() {
+        let p = propose_seed(&rise_with_empty_gap(6), &cfg()).unwrap();
+        assert_eq!(p.frame_index, 0);
+        assert_eq!(p.lift.lift, LiftType::Deadlift);
+    }
+
+    #[test]
+    fn gap_with_inconsistent_motion_is_not_merged() {
+        let dets: Vec<_> = rising(0, 40, 1.8)
+            .into_iter()
+            .map(|(i, mut c)| {
+                if (17..23).contains(&i) {
+                    return frame(i, vec![]);
+                }
+                if i >= 23 {
+                    c.center.x += 2.0 * D;
+                }
+                frame(i, vec![c])
+            })
+            .collect();
+        let p = propose_seed(&dets, &cfg()).unwrap();
+        assert_ne!(p.lift.lift, LiftType::Deadlift);
+    }
+
+    #[test]
+    fn stride_of_eight_frames_still_links_a_real_bar() {
+        // 0.05 plate per frame, sampled every 8 frames.
+        let dets = to_frames(rising_strided(0, 9, 8, 3.2, R));
+        let p = propose_seed(&dets, &cfg()).unwrap();
+        assert_eq!(p.frame_index, 0);
+        assert_eq!(p.lift.lift, LiftType::Deadlift);
+    }
+
+    #[test]
+    fn confidence_is_lower_for_short_or_ambiguous_tracks_than_for_a_long_clean_one() {
+        let clean = propose_seed(&to_frames(rising(0, 60, 3.0)), &cfg()).unwrap();
+        let short = propose_seed(&to_frames(rising(0, 8, 0.8)), &cfg()).unwrap();
+        let ambiguous_dets: Vec<_> = rising(0, 60, 3.0)
+            .into_iter()
+            .map(|(i, c)| {
+                let other = cand(700.0, c.center.y + 50.0, R);
+                frame(i, vec![c, other])
+            })
+            .collect();
+        let ambiguous = propose_seed(&ambiguous_dets, &cfg()).unwrap();
+        assert!(short.confidence < clean.confidence);
+        assert!(ambiguous.confidence < clean.confidence);
+        for p in [&clean, &short, &ambiguous] {
+            assert!((0.0..=1.0).contains(&p.confidence));
+        }
+    }
+
+    #[test]
+    fn nan_zero_negative_radius_and_unsorted_or_duplicate_frame_index_do_not_panic() {
+        let mut dets = to_frames(rising(0, 30, 3.0));
+        dets.reverse();
+        dets.push(frame(5, vec![cand(300.0, Y0, R)]));
+        dets.push(frame(
+            7,
+            vec![
+                cand(f64::NAN, 100.0, R),
+                cand(100.0, f64::NAN, R),
+                cand(100.0, 100.0, f64::NAN),
+                cand(100.0, 100.0, 0.0),
+                cand(100.0, 100.0, -5.0),
+                cand(f64::INFINITY, 100.0, R),
+            ],
+        ));
+        let _ = propose_seed(&dets, &cfg());
+        let all_bad = vec![frame(0, vec![cand(f64::NAN, f64::NAN, f64::NAN)]); 10];
+        assert!(propose_seed(&all_bad, &cfg()).is_none());
     }
 }
