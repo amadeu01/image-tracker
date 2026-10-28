@@ -47,7 +47,7 @@ A noise-reduction filter (e.g. Gaussian blur, median) applied to image regions b
 The full recipe used to process one video: which Tracker, which Preprocessor chain, and the tuning thresholds. Strategies are swappable per video, and can be compared on a short segment to pick what fits a particular clip.
 
 ### Rep
-One cycle of the lift between rest positions, segmented from the Bar Path by vertical velocity sign. The order of phases depends on the Lift Type: squat and bench press go eccentric (descent) then concentric (ascent) between lockouts; deadlift goes concentric (pull from the floor) then eccentric (lowering back to the floor). A deadlift rep ends only once the bar rests on the floor, even briefly; lowering straight into the next pull (a bounce) stays one rep. Per-rep metrics include depth, peak concentric velocity, and mean concentric velocity.
+One cycle of the lift between rest positions, segmented from the Bar Path by vertical velocity sign. The order of phases depends on the Lift Type: squat and bench press go eccentric (descent) then concentric (ascent) between lockouts; deadlift goes concentric (pull from the floor) then eccentric (lowering back to the floor). A deadlift rep ends when the bar returns to the floor, whether or not it rests there: each pull counts as its own rep, so a touch-and-go set counts one rep per pull (owner ruling, 2026-10-28). Per-rep metrics include depth, peak concentric velocity, and mean concentric velocity.
 
 ### Overlay Video
 The rendered output video: original frames plus the traced Bar Path, marker legend, and metrics.
