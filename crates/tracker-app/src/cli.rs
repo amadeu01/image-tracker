@@ -294,17 +294,24 @@ where
     })
 }
 
-/// Writes `<stem>.run.json` for auto runs; manual runs write nothing
-/// (`Ok(None)`), and a missing sidecar reads back as "verified".
+/// Writes `<stem>.run.json` for auto runs. Manual runs write nothing
+/// (`Ok(None)`) and remove a stale sidecar of the same stem left by an
+/// earlier auto run, so `grade` never reads a lift for a seeded run. A
+/// missing sidecar reads back as "verified".
 pub fn write_run_sidecar(
     out_dir: &std::path::Path,
     stem: &str,
     seed: &ResolvedSeed,
 ) -> Result<Option<PathBuf>, CliError> {
+    let path = out_dir.join(format!("{stem}.run.json"));
     let Some(auto) = &seed.auto else {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("failed to remove stale {}: {e}", path.display())),
+        }
         return Ok(None);
     };
-    let path = out_dir.join(format!("{stem}.run.json"));
     crate::run_info::write_run_info(
         &path,
         &crate::run_info::RunInfo {
@@ -1210,6 +1217,75 @@ mod tests {
         assert!(!dir.join("clip.run.json").exists());
     }
 
+    fn manual_seed() -> ResolvedSeed {
+        ResolvedSeed {
+            frame_index: 0,
+            position: Point::new(0.0, 0.0),
+            lift: tracker_core::LiftType::Unknown,
+            auto: None,
+        }
+    }
+
+    fn auto_seed() -> ResolvedSeed {
+        ResolvedSeed {
+            frame_index: 12,
+            position: Point::new(3.0, 4.0),
+            lift: tracker_core::LiftType::Deadlift,
+            auto: Some(AutoSeedInfo {
+                lift_reason: "rises from floor".into(),
+                plate_px: 88.0,
+                confidence: 0.9,
+            }),
+        }
+    }
+
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cli-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn manual_run_removes_a_stale_sidecar_for_its_stem() {
+        let dir = fresh_dir("stale");
+        write_run_sidecar(&dir, "clip", &auto_seed()).unwrap();
+        assert!(dir.join("clip.run.json").exists());
+        assert_eq!(
+            write_run_sidecar(&dir, "clip", &manual_seed()).unwrap(),
+            None
+        );
+        assert!(!dir.join("clip.run.json").exists());
+    }
+
+    #[test]
+    fn manual_run_leaves_other_stems_sidecars_alone() {
+        let dir = fresh_dir("others");
+        write_run_sidecar(&dir, "other", &auto_seed()).unwrap();
+        write_run_sidecar(&dir, "clip", &manual_seed()).unwrap();
+        assert!(dir.join("other.run.json").exists());
+    }
+
+    #[test]
+    fn manual_run_with_no_sidecar_present_is_fine() {
+        let dir = fresh_dir("none");
+        assert_eq!(
+            write_run_sidecar(&dir, "clip", &manual_seed()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn auto_run_overwrites_an_existing_sidecar() {
+        let dir = fresh_dir("overwrite");
+        std::fs::write(dir.join("clip.run.json"), "stale").unwrap();
+        let p = write_run_sidecar(&dir, "clip", &auto_seed())
+            .unwrap()
+            .unwrap();
+        let info = crate::run_info::read_run_info(&p).unwrap().unwrap();
+        assert_eq!(info.seed_frame, 12);
+    }
+
     #[test]
     fn auto_run_writes_unverified_sidecar() {
         let dir = std::env::temp_dir().join(format!("cli-sidecar-{}", std::process::id()));
@@ -1229,6 +1305,9 @@ mod tests {
         assert_eq!(info.lift, "deadlift");
         assert!(!info.verified);
         assert_eq!(info.seed_frame, 12);
+        assert_eq!(info.plate_px, 88.0);
+        assert_eq!(info.seed, [3.0, 4.0]);
+        assert_eq!(info.lift_reason, "rises from floor");
     }
 
     #[test]
