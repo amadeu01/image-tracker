@@ -25,3 +25,6 @@
 # graphify: graph is rebuilt by the post-commit hook, so a tracked copy would be dirty after every commit
 /graphify-out/
 .claude/*.graphify-bak
+
+# Written by `cargo test` (overlay export test); not a source file
+/crates/tracker-app/x.overlay.mp4
