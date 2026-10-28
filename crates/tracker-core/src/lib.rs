@@ -13,6 +13,7 @@ pub mod color_tracker;
 pub mod export;
 pub mod frame_source;
 pub mod geometry;
+pub mod lift;
 pub mod metric;
 pub mod motion;
 pub mod overlay;
@@ -42,12 +43,16 @@ pub use color_tracker::{ColorTracker, ColorTrackerConfig, ColorTrackerConfigBuil
 pub use export::{export_csv, export_json, export_reps_csv, export_reps_json};
 pub use frame_source::FrameSource;
 pub use geometry::{Frame, FrameError, Point};
+pub use lift::{classify_lift, LiftClassification, LiftClassifierConfig, LiftType, TrackPoint};
 pub use metric::{CorrelationMetric, Zncc};
 pub use motion::Track;
 pub use overlay::{render_overlay, render_rep_bottoms, Color, OverlayStyle, OverlayStyleBuilder};
 pub use patch::{extract_patch, Patch};
 pub use preprocessor::{Preprocessor, PreprocessorChain};
-pub use rep::{segment_reps, Rep, RepSegmentationConfig, RepSegmentationConfigBuilder};
+pub use rep::{
+    segment_reps, segment_reps_for_lift, PhaseOrder, Rep, RepSegmentationConfig,
+    RepSegmentationConfigBuilder,
+};
 pub use rep_metrics::{
     all_rep_metrics, linear_trend, rep_metrics, set_duration_seconds, stop_set_evaluation,
     velocity_loss_percent, RepMetrics, StopSet,

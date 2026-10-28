@@ -480,6 +480,7 @@ mod tests {
         let path = BarPath::new(&samples, &[], tb(), 0);
         let velocity_frame_indices = vec![0u64, 1, 2];
         let reps = vec![Rep {
+            order: crate::rep::PhaseOrder::EccentricFirst,
             eccentric_start: 0,
             bottom: 1,
             concentric_end: 2,
@@ -500,6 +501,7 @@ mod tests {
         let path = BarPath::new(&samples, &[], tb(), 0);
         let velocity_frame_indices = vec![0u64, 1, 2];
         let reps = vec![Rep {
+            order: crate::rep::PhaseOrder::EccentricFirst,
             eccentric_start: 0,
             bottom: 1,
             concentric_end: 2,

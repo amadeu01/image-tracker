@@ -98,7 +98,8 @@ pub fn rep_metrics(
         None => depth_px,
     };
 
-    let concentric = &velocity[rep.bottom..=rep.concentric_end];
+    let (conc_start, conc_end) = rep.concentric_span();
+    let concentric = &velocity[conc_start..=conc_end];
     let excluded_interpolated_samples = concentric.iter().filter(|s| s.from_interpolated).count();
     let peak_concentric_speed = concentric
         .iter()
@@ -106,8 +107,8 @@ pub fn rep_metrics(
         .map(|s| s.vy.abs())
         .fold(0.0_f64, f64::max);
 
-    let bottom_point = &points[rep.bottom];
-    let end_point = &points[rep.concentric_end];
+    let bottom_point = &points[conc_start];
+    let end_point = &points[conc_end];
     let concentric_displacement_px = (bottom_point.position.y - end_point.position.y).abs();
     let concentric_displacement = match cal {
         Some(c) => c.px_to_meters(concentric_displacement_px),
@@ -128,8 +129,8 @@ pub fn rep_metrics(
 
     RepMetrics {
         start_t: points[rep.eccentric_start].t_seconds,
-        bottom_t: bottom_point.t_seconds,
-        end_t: end_point.t_seconds,
+        bottom_t: points[rep.bottom].t_seconds,
+        end_t: points[rep.concentric_end].t_seconds,
         depth,
         peak_concentric_speed,
         mean_concentric_velocity,
@@ -250,6 +251,7 @@ pub fn set_duration_seconds(metrics: &[RepMetrics]) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::geometry::Point;
+    use crate::rep::PhaseOrder;
     use crate::session::Source;
 
     /// Builds parallel `points`/`velocity` slices for a synthetic rep: a
@@ -277,11 +279,43 @@ mod tests {
             .collect();
         let velocity = crate::velocity::velocity_series(&points, 1, None).unwrap();
         let rep = Rep {
+            order: PhaseOrder::EccentricFirst,
             eccentric_start: 0,
             bottom: 10,
             concentric_end: points.len() - 1,
         };
         (points, velocity, rep)
+    }
+
+    #[test]
+    fn concentric_first_rep_measures_the_leading_ascent() {
+        // y: 10 -> 0 (pull, 10 frames) -> 10 (lowering, 10 frames).
+        let ys: Vec<f64> = (0..=10)
+            .rev()
+            .map(|i| i as f64)
+            .chain((1..=10).map(|i| i as f64))
+            .collect();
+        let points: Vec<PathPoint> = ys
+            .iter()
+            .enumerate()
+            .map(|(i, &y)| PathPoint {
+                frame_index: i as u64,
+                t_seconds: i as f64 / 30.0,
+                position: Point::new(0.0, y),
+                source: Source::Tracked,
+                confidence: None,
+            })
+            .collect();
+        let velocity = crate::velocity::velocity_series(&points, 1, None).unwrap();
+        let rep = Rep {
+            order: PhaseOrder::ConcentricFirst,
+            eccentric_start: 0,
+            bottom: 10,
+            concentric_end: points.len() - 1,
+        };
+        let m = rep_metrics(&rep, &velocity, &points, None);
+        assert!((m.mean_concentric_velocity - 30.0).abs() < 1e-6);
+        assert!((m.depth - 10.0).abs() < 1e-9);
     }
 
     #[test]

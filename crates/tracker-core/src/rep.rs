@@ -35,6 +35,7 @@
 //! `segment_reps` (not raw video frame numbers) — callers who need a frame
 //! number can look up `velocity[idx].frame_index`.
 
+use crate::lift::LiftType;
 use crate::velocity::VelocitySample;
 
 /// Configuration for `segment_reps`, built via `RepSegmentationConfig::builder()`.
@@ -134,6 +135,13 @@ impl RepSegmentationConfigBuilder {
 /// `velocity` slice passed to `segment_reps`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rep {
+    /// Which phase comes first. For `ConcentricFirst` (deadlift) the field
+    /// names below keep their index positions but swap phase roles: the rep
+    /// starts at `eccentric_start` with the concentric (pull), turns at
+    /// `bottom` (the lockout), and the eccentric (lowering) ends at
+    /// `concentric_end`. Use `Rep::concentric_span` instead of reading the
+    /// fields by name when phase identity matters.
+    pub order: PhaseOrder,
     /// Index of the first sample of the eccentric (descent) phase.
     pub eccentric_start: usize,
     /// Index of the turnaround: the last descending sample if the descent
@@ -142,6 +150,26 @@ pub struct Rep {
     pub bottom: usize,
     /// Index of the last sample of the concentric (ascent) phase.
     pub concentric_end: usize,
+}
+
+/// Which phase of a rep comes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseOrder {
+    /// Descent then ascent (squat, bench): the default.
+    EccentricFirst,
+    /// Ascent then descent (deadlift: pull from the floor, then lower).
+    ConcentricFirst,
+}
+
+impl Rep {
+    /// Inclusive `(start, end)` sample indices of the concentric (upward)
+    /// phase, honouring `order`.
+    pub fn concentric_span(&self) -> (usize, usize) {
+        match self.order {
+            PhaseOrder::EccentricFirst => (self.bottom, self.concentric_end),
+            PhaseOrder::ConcentricFirst => (self.eccentric_start, self.bottom),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,39 +195,7 @@ pub fn segment_reps(velocity: &[VelocitySample], config: RepSegmentationConfig) 
         return Vec::new();
     }
 
-    let raw_labels: Vec<Phase> = velocity
-        .iter()
-        .map(|s| {
-            if s.vy > config.min_velocity {
-                Phase::Descending
-            } else if s.vy < -config.min_velocity {
-                Phase::Ascending
-            } else {
-                Phase::Idle
-            }
-        })
-        .collect();
-
-    let runs = group_runs(&raw_labels);
-
-    // Fold Descending/Ascending runs shorter than min_phase_duration back
-    // into Idle (jitter, not a real phase).
-    let mut filtered_labels = raw_labels;
-    for run in &runs {
-        if run.phase == Phase::Idle {
-            continue;
-        }
-        let duration = velocity[run.end].t_seconds - velocity[run.start].t_seconds;
-        if duration < config.min_phase_duration_seconds {
-            for label in filtered_labels.iter_mut().take(run.end + 1).skip(run.start) {
-                *label = Phase::Idle;
-            }
-        }
-    }
-
-    // Regroup now that short runs have been folded into Idle, so adjacent
-    // Idle runs merge into one.
-    let runs = group_runs(&filtered_labels);
+    let runs = label_runs(velocity, config);
 
     let mut reps = Vec::new();
     let mut i = 0;
@@ -234,6 +230,7 @@ pub fn segment_reps(velocity: &[VelocitySample], config: RepSegmentationConfig) 
                 && concentric_travel >= config.min_displacement
             {
                 reps.push(Rep {
+                    order: PhaseOrder::EccentricFirst,
                     eccentric_start,
                     bottom,
                     concentric_end: runs[j].end,
@@ -247,6 +244,109 @@ pub fn segment_reps(velocity: &[VelocitySample], config: RepSegmentationConfig) 
         }
     }
 
+    reps
+}
+
+/// Labels each sample Idle/Descending/Ascending (dead-band), folds
+/// too-short runs into Idle, and returns the regrouped runs.
+fn label_runs(velocity: &[VelocitySample], config: RepSegmentationConfig) -> Vec<Run> {
+    let raw_labels: Vec<Phase> = velocity
+        .iter()
+        .map(|s| {
+            if s.vy > config.min_velocity {
+                Phase::Descending
+            } else if s.vy < -config.min_velocity {
+                Phase::Ascending
+            } else {
+                Phase::Idle
+            }
+        })
+        .collect();
+
+    let runs = group_runs(&raw_labels);
+
+    // Fold Descending/Ascending runs shorter than min_phase_duration back
+    // into Idle (jitter, not a real phase).
+    let mut filtered_labels = raw_labels;
+    for run in &runs {
+        if run.phase == Phase::Idle {
+            continue;
+        }
+        let duration = velocity[run.end].t_seconds - velocity[run.start].t_seconds;
+        if duration < config.min_phase_duration_seconds {
+            for label in filtered_labels.iter_mut().take(run.end + 1).skip(run.start) {
+                *label = Phase::Idle;
+            }
+        }
+    }
+
+    // Regroup now that short runs have been folded into Idle, so adjacent
+    // Idle runs merge into one.
+    group_runs(&filtered_labels)
+}
+
+/// Like `segment_reps`, but honours the lift's phase order. `Deadlift` is
+/// concentric-then-eccentric: a rep is a pull, optional lockout pause, and a
+/// lowering, and ends only once the bar rests on the floor (an `Idle` run
+/// after the lowering, however brief) or the series ends. A bounce (lowering
+/// straight into another pull with no rest) stays one rep. Every other lift
+/// segments exactly like `segment_reps` (EccentricFirst).
+pub fn segment_reps_for_lift(
+    lift: LiftType,
+    velocity: &[VelocitySample],
+    config: RepSegmentationConfig,
+) -> Vec<Rep> {
+    if lift != LiftType::Deadlift {
+        return segment_reps(velocity, config);
+    }
+    if velocity.len() < 2 {
+        return Vec::new();
+    }
+    let runs = label_runs(velocity, config);
+    let big_enough = |r: &Run| run_displacement(velocity, r) >= config.min_displacement;
+
+    let mut reps = Vec::new();
+    let mut i = 0;
+    while i < runs.len() {
+        if runs[i].phase != Phase::Ascending {
+            i += 1;
+            continue;
+        }
+        let start = runs[i].start;
+        let mut j = i + 1;
+        let mut top = runs[i].end;
+        if j < runs.len() && runs[j].phase == Phase::Idle {
+            top = (runs[j].start + runs[j].end) / 2;
+            j += 1;
+        }
+        if j >= runs.len() || runs[j].phase != Phase::Descending {
+            // Pull with no lowering: incomplete.
+            i = j;
+            continue;
+        }
+        let first_pull_ok = big_enough(&runs[i]);
+        let first_lower_ok = big_enough(&runs[j]);
+        let mut end = runs[j].end;
+        j += 1;
+        // Bounce: lowering runs straight into another pull (no Idle rest).
+        // Absorb the extra pull and its lowering into the same rep.
+        while j + 1 < runs.len()
+            && runs[j].phase == Phase::Ascending
+            && runs[j + 1].phase == Phase::Descending
+        {
+            end = runs[j + 1].end;
+            j += 2;
+        }
+        if first_pull_ok && first_lower_ok {
+            reps.push(Rep {
+                order: PhaseOrder::ConcentricFirst,
+                eccentric_start: start,
+                bottom: top,
+                concentric_end: end,
+            });
+        }
+        i = j;
+    }
     reps
 }
 
@@ -544,5 +644,66 @@ mod tests {
         let reps = segment_reps(&velocity, default_config());
         assert_eq!(reps.len(), 2);
         assert!(reps[0].concentric_end < reps[1].eccentric_start);
+    }
+
+    // ---- lift-aware segmentation (deadlift = concentric first) ----
+
+    /// Pull (ascent, vy<0) then lowering (descent, vy>0), ~1s each at 30fps.
+    fn pull_and_lower() -> Vec<f64> {
+        let mut v = vec![-200.0; 30];
+        v.extend(vec![200.0; 30]);
+        v
+    }
+
+    #[test]
+    fn deadlift_rep_is_concentric_then_eccentric_with_floor_rest() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(pull_and_lower());
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].order, PhaseOrder::ConcentricFirst);
+        assert_eq!(reps[0].eccentric_start, 10);
+        assert_eq!(reps[0].bottom, 39);
+        assert_eq!(reps[0].concentric_end, 69);
+        assert_eq!(reps[0].concentric_span(), (10, 39));
+    }
+
+    #[test]
+    fn deadlift_bounce_without_rest_is_one_rep() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(pull_and_lower());
+        vys.extend(pull_and_lower());
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].concentric_end, 129);
+    }
+
+    #[test]
+    fn deadlift_with_rest_between_pulls_is_two_reps() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(pull_and_lower());
+        vys.extend(vec![0.0; 3]);
+        vys.extend(pull_and_lower());
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 2);
+    }
+
+    #[test]
+    fn squat_order_is_unchanged_from_segment_reps() {
+        let v = series(&clean_rep(30, 30));
+        let a = segment_reps(&v, default_config());
+        let b = segment_reps_for_lift(LiftType::Squat, &v, default_config());
+        assert_eq!(a, b);
+        assert_eq!(b[0].order, PhaseOrder::EccentricFirst);
+    }
+
+    #[test]
+    fn unknown_lift_falls_back_to_eccentric_first() {
+        let v = series(&clean_rep(30, 30));
+        let b = segment_reps_for_lift(LiftType::Unknown, &v, default_config());
+        assert_eq!(b, segment_reps(&v, default_config()));
     }
 }
