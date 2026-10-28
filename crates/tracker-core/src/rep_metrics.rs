@@ -98,7 +98,7 @@ pub fn rep_metrics(
         None => depth_px,
     };
 
-    let (conc_start, conc_end) = rep.concentric_span();
+    let (conc_start, conc_end) = (*rep.concentric_span().start(), *rep.concentric_span().end());
     let concentric = &velocity[conc_start..=conc_end];
     let excluded_interpolated_samples = concentric.iter().filter(|s| s.from_interpolated).count();
     let peak_concentric_speed = concentric
@@ -128,9 +128,9 @@ pub fn rep_metrics(
     };
 
     RepMetrics {
-        start_t: points[rep.eccentric_start].t_seconds,
-        bottom_t: points[rep.bottom].t_seconds,
-        end_t: points[rep.concentric_end].t_seconds,
+        start_t: points[rep.start_frame_index()].t_seconds,
+        bottom_t: points[rep.bottom_index()].t_seconds,
+        end_t: points[rep.end_index()].t_seconds,
         depth,
         peak_concentric_speed,
         mean_concentric_velocity,
@@ -316,6 +316,8 @@ mod tests {
         let m = rep_metrics(&rep, &velocity, &points, None);
         assert!((m.mean_concentric_velocity - 30.0).abs() < 1e-6);
         assert!((m.depth - 10.0).abs() < 1e-9);
+        // Deadlift bottom is the floor (pull start), not the lockout.
+        assert!((m.bottom_t - 0.0).abs() < 1e-9);
     }
 
     #[test]

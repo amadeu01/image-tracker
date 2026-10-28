@@ -297,7 +297,7 @@ pub fn render_rep_bottoms(
     let tick_half_width: i64 = 8;
     let tick_height: i64 = 3;
     for rep in reps {
-        let Some(&frame_index) = velocity_frame_indices.get(rep.bottom) else {
+        let Some(&frame_index) = velocity_frame_indices.get(rep.bottom_index()) else {
             continue;
         };
         if frame_index > current_frame_index {

@@ -269,7 +269,7 @@ fn run_rep_clip_export(job: RepClipJob, tx: &Sender<ExportMessage>) {
         burn_overlay = job.overlay.is_some(),
         "rep clip export started"
     );
-    // `rep.bottom` indexes into the velocity-aligned frame table, which
+    // `rep.bottom_index()` indexes into the velocity-aligned frame table, which
     // `render_overlay_video` builds the same way — one entry per
     // `bar_path.points()`, same order (see its own doc comment). Built once
     // here rather than per-clip since it's the same table for every rep.

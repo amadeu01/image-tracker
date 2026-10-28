@@ -37,6 +37,7 @@
 
 use crate::lift::LiftType;
 use crate::velocity::VelocitySample;
+use std::ops::RangeInclusive;
 
 /// Configuration for `segment_reps`, built via `RepSegmentationConfig::builder()`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -135,12 +136,12 @@ impl RepSegmentationConfigBuilder {
 /// `velocity` slice passed to `segment_reps`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rep {
-    /// Which phase comes first. For `ConcentricFirst` (deadlift) the field
-    /// names below keep their index positions but swap phase roles: the rep
-    /// starts at `eccentric_start` with the concentric (pull), turns at
-    /// `bottom` (the lockout), and the eccentric (lowering) ends at
-    /// `concentric_end`. Use `Rep::concentric_span` instead of reading the
-    /// fields by name when phase identity matters.
+    /// Which phase comes first. For `ConcentricFirst` (deadlift) the three
+    /// index fields below swap phase roles: the rep starts at
+    /// `eccentric_start` with the pull, turns at `bottom` (the lockout) and
+    /// the lowering ends at `concentric_end`. Do not read them by name for
+    /// phase meaning; use `start_frame_index`, `end_index`, `turn_index`,
+    /// `bottom_index`, `eccentric_span` and `concentric_span`.
     pub order: PhaseOrder,
     /// Index of the first sample of the eccentric (descent) phase.
     pub eccentric_start: usize,
@@ -162,12 +163,44 @@ pub enum PhaseOrder {
 }
 
 impl Rep {
-    /// Inclusive `(start, end)` sample indices of the concentric (upward)
-    /// phase, honouring `order`.
-    pub fn concentric_span(&self) -> (usize, usize) {
+    /// First sample of the rep, whichever phase comes first.
+    pub fn start_frame_index(&self) -> usize {
+        self.eccentric_start
+    }
+
+    /// Last sample of the rep, whichever phase comes last.
+    pub fn end_index(&self) -> usize {
+        self.concentric_end
+    }
+
+    /// Index of the turnaround between the two phases (squat: bottom of the
+    /// descent; deadlift: lockout).
+    pub fn turn_index(&self) -> usize {
+        self.bottom
+    }
+
+    /// Index of the lowest bar position: squat/bench = the turnaround,
+    /// deadlift = the start of the pull (the floor).
+    pub fn bottom_index(&self) -> usize {
         match self.order {
-            PhaseOrder::EccentricFirst => (self.bottom, self.concentric_end),
-            PhaseOrder::ConcentricFirst => (self.eccentric_start, self.bottom),
+            PhaseOrder::EccentricFirst => self.bottom,
+            PhaseOrder::ConcentricFirst => self.eccentric_start,
+        }
+    }
+
+    /// Inclusive sample range of the eccentric (downward) phase.
+    pub fn eccentric_span(&self) -> RangeInclusive<usize> {
+        match self.order {
+            PhaseOrder::EccentricFirst => self.eccentric_start..=self.bottom,
+            PhaseOrder::ConcentricFirst => self.bottom..=self.concentric_end,
+        }
+    }
+
+    /// Inclusive sample range of the concentric (upward) phase.
+    pub fn concentric_span(&self) -> RangeInclusive<usize> {
+        match self.order {
+            PhaseOrder::EccentricFirst => self.bottom..=self.concentric_end,
+            PhaseOrder::ConcentricFirst => self.eccentric_start..=self.bottom,
         }
     }
 }
@@ -285,6 +318,9 @@ fn label_runs(velocity: &[VelocitySample], config: RepSegmentationConfig) -> Vec
     group_runs(&filtered_labels)
 }
 
+/// Fraction of `min_displacement` below which a deadlift run is jitter.
+const BOUNCE_JITTER_FRACTION: f64 = 0.25;
+
 /// Like `segment_reps`, but honours the lift's phase order. `Deadlift` is
 /// concentric-then-eccentric: a rep is a pull, optional lockout pause, and a
 /// lowering, and ends only once the bar rests on the floor (an `Idle` run
@@ -303,7 +339,24 @@ pub fn segment_reps_for_lift(
         return Vec::new();
     }
     let runs = label_runs(velocity, config);
-    let big_enough = |r: &Run| run_displacement(velocity, r) >= config.min_displacement;
+    let travel = |r: &Run| run_displacement(velocity, r);
+    // Runs travelling less than this fraction of min_displacement are jitter
+    // and are never chained into a rep.
+    let jitter_floor = config.min_displacement * BOUNCE_JITTER_FRACTION;
+    // Parses `Ascending, [Idle], Descending` starting at `at`; returns
+    // (turn index, descent run index).
+    let cycle = |at: usize| -> Option<(usize, usize)> {
+        if runs.get(at)?.phase != Phase::Ascending {
+            return None;
+        }
+        let mut k = at + 1;
+        let mut turn = runs[at].end;
+        if runs.get(k)?.phase == Phase::Idle {
+            turn = (runs[k].start + runs[k].end) / 2;
+            k += 1;
+        }
+        (runs.get(k)?.phase == Phase::Descending).then_some((turn, k))
+    };
 
     let mut reps = Vec::new();
     let mut i = 0;
@@ -312,36 +365,36 @@ pub fn segment_reps_for_lift(
             i += 1;
             continue;
         }
-        let start = runs[i].start;
-        let mut j = i + 1;
-        let mut top = runs[i].end;
-        if j < runs.len() && runs[j].phase == Phase::Idle {
-            top = (runs[j].start + runs[j].end) / 2;
-            j += 1;
-        }
-        if j >= runs.len() || runs[j].phase != Phase::Descending {
+        let Some((turn, d)) = cycle(i) else {
             // Pull with no lowering: incomplete.
-            i = j;
+            i += 1;
+            continue;
+        };
+        let (mut max_pull, mut max_lower) = (travel(&runs[i]), travel(&runs[d]));
+        if max_pull < jitter_floor || max_lower < jitter_floor {
+            i = d + 1;
             continue;
         }
-        let first_pull_ok = big_enough(&runs[i]);
-        let first_lower_ok = big_enough(&runs[j]);
-        let mut end = runs[j].end;
-        j += 1;
-        // Bounce: lowering runs straight into another pull (no Idle rest).
-        // Absorb the extra pull and its lowering into the same rep.
-        while j + 1 < runs.len()
-            && runs[j].phase == Phase::Ascending
-            && runs[j + 1].phase == Phase::Descending
-        {
-            end = runs[j + 1].end;
-            j += 2;
+        let start = runs[i].start;
+        let mut end = runs[d].end;
+        let mut j = d + 1;
+        // Bounce: lowering runs straight into another real pull (no Idle
+        // rest), optionally with a lockout pause. Absorb it.
+        while let Some((_, d2)) = cycle(j) {
+            let (p, l) = (travel(&runs[j]), travel(&runs[d2]));
+            if p < jitter_floor || l < jitter_floor {
+                break;
+            }
+            max_pull = max_pull.max(p);
+            max_lower = max_lower.max(l);
+            end = runs[d2].end;
+            j = d2 + 1;
         }
-        if first_pull_ok && first_lower_ok {
+        if max_pull >= config.min_displacement && max_lower >= config.min_displacement {
             reps.push(Rep {
                 order: PhaseOrder::ConcentricFirst,
                 eccentric_start: start,
-                bottom: top,
+                bottom: turn,
                 concentric_end: end,
             });
         }
@@ -666,7 +719,10 @@ mod tests {
         assert_eq!(reps[0].eccentric_start, 10);
         assert_eq!(reps[0].bottom, 39);
         assert_eq!(reps[0].concentric_end, 69);
-        assert_eq!(reps[0].concentric_span(), (10, 39));
+        assert_eq!(reps[0].concentric_span(), 10..=39);
+        assert_eq!(reps[0].bottom_index(), 10);
+        assert_eq!(reps[0].turn_index(), 39);
+        assert_eq!(reps[0].eccentric_span(), 39..=69);
     }
 
     #[test]
@@ -705,5 +761,66 @@ mod tests {
         let v = series(&clean_rep(30, 30));
         let b = segment_reps_for_lift(LiftType::Unknown, &v, default_config());
         assert_eq!(b, segment_reps(&v, default_config()));
+    }
+
+    fn leg(vy: f64, n: usize) -> Vec<f64> {
+        vec![vy; n]
+    }
+
+    #[test]
+    fn deadlift_bounce_with_lockout_pause_in_second_pull_is_one_rep() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(pull_and_lower());
+        vys.extend(leg(-200.0, 30));
+        vys.extend(leg(0.0, 4));
+        vys.extend(leg(200.0, 30));
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].concentric_end, 133);
+    }
+
+    #[test]
+    fn chain_with_small_first_pull_and_full_second_pull_is_kept() {
+        // First pull/lower ~33 px each (below 40 gate, above jitter floor).
+        let mut vys = vec![0.0; 10];
+        vys.extend(leg(-100.0, 10));
+        vys.extend(leg(100.0, 10));
+        vys.extend(pull_and_lower());
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 1);
+    }
+
+    #[test]
+    fn jitter_pull_does_not_swallow_a_following_real_rep() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(leg(-15.0, 12));
+        vys.extend(leg(15.0, 12));
+        vys.extend(pull_and_lower());
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].start_frame_index(), 34);
+    }
+
+    #[test]
+    fn bottom_index_is_floor_for_deadlift_and_turn_for_squat() {
+        let dl = Rep {
+            order: PhaseOrder::ConcentricFirst,
+            eccentric_start: 5,
+            bottom: 20,
+            concentric_end: 40,
+        };
+        assert_eq!(dl.bottom_index(), 5);
+        assert_eq!(dl.start_frame_index(), 5);
+        assert_eq!(dl.end_index(), 40);
+        let sq = Rep {
+            order: PhaseOrder::EccentricFirst,
+            ..dl
+        };
+        assert_eq!(sq.bottom_index(), 20);
+        assert_eq!(sq.concentric_span(), 20..=40);
+        assert_eq!(sq.eccentric_span(), 5..=20);
     }
 }

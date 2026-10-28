@@ -98,7 +98,7 @@ pub fn scope_points_to_rep_frames(points: &[PathPoint], start: u64, end: u64) ->
 /// the path fed to `render_overlay` and the frame range written differ.
 ///
 /// `frame_indices` must be the *full* path's velocity-aligned frame index
-/// table (as `render_overlay_video` builds it) since `rep.bottom` indexes
+/// table (as `render_overlay_video` builds it) since `rep.bottom_index()` indexes
 /// into it; only `rep` itself is passed to `render_rep_bottoms` so no other
 /// rep's bottom tick leaks into this clip.
 ///
