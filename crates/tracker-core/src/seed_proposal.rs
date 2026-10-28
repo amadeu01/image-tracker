@@ -537,6 +537,7 @@ pub fn propose_seed(
         .into_iter()
         .filter(|t| persistence(t) >= config.min_track_persistence)
         .collect();
+    // Every persistent track with a stable stretch, moving or static.
     let mut cands: Vec<Candidate> = tracks
         .iter()
         .filter_map(|t| {
@@ -546,22 +547,26 @@ pub fn propose_seed(
                 return None;
             }
             let sleeve = use_sleeve(track, config);
-            let range_px = robust_range_px(track, sleeve);
-            let diameter_px = median_diameter(track);
-            // Static test: the track's own range in its own plate diameters.
-            (range_px / diameter_px >= config.min_vertical_travel_plates).then_some(Candidate {
+            Some(Candidate {
                 track,
                 sleeve,
-                range_px,
-                diameter_px,
+                range_px: robust_range_px(track, sleeve),
+                diameter_px: median_diameter(track),
                 travel: 0.0,
             })
         })
         .collect();
-    // One frame-level scale: the largest moving diameter. Smaller moving
-    // circles (head, hardware) never compete with a larger moving one.
+    // Bound for "too small to be the bar": the largest persistent circle,
+    // static ones included, so a head cannot become the reference merely
+    // because the real plate sits still. Limitation: a persistent static
+    // circle more than 1/min_relative_diameter times the real plate would
+    // hide it (none seen in the four real clips, see the task-15 report).
+    let bound = cands.iter().map(|c| c.diameter_px).fold(0.0, f64::max);
+    // Static test: the track's own range in its own plate diameters.
+    cands.retain(|c| c.range_px / c.diameter_px >= config.min_vertical_travel_plates);
+    cands.retain(|c| c.diameter_px >= config.min_relative_diameter * bound);
+    // Travel scale: the largest remaining (moving) diameter.
     let scale = cands.iter().map(|c| c.diameter_px).fold(0.0, f64::max);
-    cands.retain(|c| c.diameter_px >= config.min_relative_diameter * scale);
     for c in &mut cands {
         c.travel = c.range_px / scale;
     }
@@ -1264,13 +1269,7 @@ mod tests {
         assert_eq!(ok.merge_size_tolerance(), 0.1);
     }
 
-    // FINDING (see .superpowers/sdd/2026-10-28-auto-lift-detection/task-14-report.md):
-    // propose_seed returns the head-sized circle as the bar. The static plate
-    // is dropped by the static test BEFORE the shared scale is computed, so
-    // the head becomes the largest moving diameter and passes the
-    // min_relative_diameter filter. Ignored until the controller decides.
     #[test]
-    #[ignore = "real defect: head-sized mover proposed when the plate is static; see task-14-report.md"]
     fn only_a_head_sized_circle_moves_while_the_plate_is_static_is_not_proposed_as_the_bar() {
         // A static plate-sized circle in every sample plus a head-sized one
         // (0.4x the plate) moving a lot elsewhere: no moving plate-sized
@@ -1281,5 +1280,35 @@ mod tests {
             .map(|(i, h)| frame(i, vec![cand(500.0, 800.0, R), h]))
             .collect();
         assert!(propose_seed(&dets, &cfg()).is_none());
+    }
+
+    fn plate_and_static_ring(ring_radius_factor: f64) -> Vec<FrameDetections> {
+        let plate = rising_strided(0, 40, 1, 3.0, R);
+        plate
+            .into_iter()
+            .map(|(i, p)| frame(i, vec![cand(500.0, 800.0, R * ring_radius_factor), p]))
+            .collect()
+    }
+
+    #[test]
+    fn a_large_static_ring_does_not_erase_a_real_moving_plate() {
+        // Static ring 1.4x the plate, persistent in every sample.
+        let p =
+            propose_seed(&plate_and_static_ring(1.4), &cfg()).expect("moving plate still proposed");
+        assert!((p.plate_diameter_px - 2.0 * R).abs() < 1.0);
+    }
+
+    #[test]
+    fn static_ring_just_inside_the_relative_diameter_bound_keeps_the_plate() {
+        // 1 / 0.6 = 1.667: a ring 1.6x the plate leaves the plate at 0.625.
+        assert!(propose_seed(&plate_and_static_ring(1.6), &cfg()).is_some());
+    }
+
+    #[test]
+    fn static_ring_beyond_the_relative_diameter_bound_hides_the_plate() {
+        // Documented limitation: a ring 1.8x the plate (plate = 0.556 < 0.6)
+        // makes the plate "too small"; nothing is proposed rather than a
+        // wrong bar.
+        assert!(propose_seed(&plate_and_static_ring(1.8), &cfg()).is_none());
     }
 }
