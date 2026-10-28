@@ -168,7 +168,7 @@ Auto runs also write `--out/<stem>.run.json` (and print
 | `verified` | `false` for CLI auto runs (nobody confirmed the proposal) |
 | `seed_frame` | frame the proposal was made on and tracking started from |
 | `seed` | `[x, y]` Bar Point in pixels |
-| `plate_px` | apparent plate diameter in pixels, from the detections |
+| `detected_plate_px` | apparent plate diameter in pixels, from the detections (the detector's estimate; never the grading scale, which is the owner's manifest `plate_px`) |
 
 The export `<stem>.json` is unchanged (still a top-level array); `grade` reads
 the lift from this sidecar.

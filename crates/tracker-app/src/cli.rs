@@ -226,7 +226,7 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AutoSeedInfo {
     pub lift_reason: String,
-    pub plate_px: f64,
+    pub detected_plate_px: f64,
     pub confidence: f64,
 }
 
@@ -289,7 +289,7 @@ where
         lift: p.lift.lift,
         auto: Some(AutoSeedInfo {
             lift_reason: p.lift.reason,
-            plate_px: p.plate_diameter_px,
+            detected_plate_px: p.plate_diameter_px,
             confidence: p.confidence,
         }),
     })
@@ -321,7 +321,7 @@ pub fn write_run_sidecar(
             verified: false,
             seed_frame: seed.frame_index,
             seed: [seed.position.x, seed.position.y],
-            plate_px: auto.plate_px,
+            detected_plate_px: auto.detected_plate_px,
         },
     )?;
     Ok(Some(path))
@@ -383,7 +383,11 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
             );
             println!(
                 "seed proposal: frame {} at ({:.1}, {:.1}), plate {:.1} px, confidence {:.2}",
-                seed.frame_index, seed.position.x, seed.position.y, auto.plate_px, auto.confidence
+                seed.frame_index,
+                seed.position.x,
+                seed.position.y,
+                auto.detected_plate_px,
+                auto.confidence
             );
             println!("UNVERIFIED: seed was auto-proposed; confirm or pass --seed-frame/--seed");
         }
@@ -1233,7 +1237,7 @@ mod tests {
             lift: tracker_core::LiftType::Deadlift,
             auto: Some(AutoSeedInfo {
                 lift_reason: "rises from floor".into(),
-                plate_px: 88.0,
+                detected_plate_px: 88.0,
                 confidence: 0.9,
             }),
         }
@@ -1296,7 +1300,7 @@ mod tests {
             lift: tracker_core::LiftType::Deadlift,
             auto: Some(AutoSeedInfo {
                 lift_reason: "rises from floor".into(),
-                plate_px: 88.0,
+                detected_plate_px: 88.0,
                 confidence: 0.9,
             }),
         };
@@ -1305,7 +1309,7 @@ mod tests {
         assert_eq!(info.lift, "deadlift");
         assert!(!info.verified);
         assert_eq!(info.seed_frame, 12);
-        assert_eq!(info.plate_px, 88.0);
+        assert_eq!(info.detected_plate_px, 88.0);
         assert_eq!(info.seed, [3.0, 4.0]);
         assert_eq!(info.lift_reason, "rises from floor");
     }

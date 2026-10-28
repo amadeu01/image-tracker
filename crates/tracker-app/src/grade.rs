@@ -589,13 +589,13 @@ mod tests {
         let d = temp_dir("ok");
         std::fs::write(
             d.join("c.run.json"),
-            r#"{"lift":"deadlift","lift_reason":"r","verified":false,"seed_frame":1,"seed":[1.0,2.0],"plate_px":80.0}"#,
+            r#"{"lift":"deadlift","lift_reason":"r","verified":false,"seed_frame":1,"seed":[1.0,2.0],"detected_plate_px":80.0}"#,
         )
         .unwrap();
         assert_eq!(read_run_lift(&d.join("c.csv")), Ok("deadlift".to_string()));
         std::fs::write(
             d.join("u.run.json"),
-            r#"{"lift":"unknown","lift_reason":"ambiguous","verified":false,"seed_frame":1,"seed":[1.0,2.0],"plate_px":80.0}"#,
+            r#"{"lift":"unknown","lift_reason":"ambiguous","verified":false,"seed_frame":1,"seed":[1.0,2.0],"detected_plate_px":80.0}"#,
         )
         .unwrap();
         assert_eq!(

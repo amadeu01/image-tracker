@@ -19,7 +19,7 @@ pub struct RunInfo {
     pub verified: bool,
     pub seed_frame: u64,
     pub seed: [f64; 2],
-    pub plate_px: f64,
+    pub detected_plate_px: f64,
 }
 
 /// Stable lowercase name used in the sidecar and the manifest.
@@ -71,7 +71,7 @@ mod tests {
             verified: false,
             seed_frame: 40,
             seed: [123.5, 456.0],
-            plate_px: 88.25,
+            detected_plate_px: 88.25,
         };
         write_run_info(&path, &info).unwrap();
         assert_eq!(read_run_info(&path).unwrap(), Some(info));

@@ -491,7 +491,7 @@ graph LR
   manual seeding when no proposal comes back. The single-job invariant and the
   `place_seed` table are in section 4.
 - **`run_info`** - `<stem>.run.json` sidecar (`RunInfo`: `lift`,
-  `lift_reason`, `verified`, `seed_frame`, `seed`, `plate_px`). Written **only
+  `lift_reason`, `verified`, `seed_frame`, `seed`, `detected_plate_px`). Written **only
   for auto runs**; a manual run removes a stale sidecar of the same stem so
   `grade` never reads a lift for a seeded run. The existing export shapes
   (`<stem>.json` is a top-level array) are untouched; this is why the
