@@ -53,6 +53,7 @@ pub struct SeedProposalConfig {
     min_track_points: usize,
     min_stable_samples: usize,
     stable_window_samples: usize,
+    min_relative_diameter: f64,
     min_vertical_travel_plates: f64,
     sleeve_end_min_fraction: f64,
     ambiguity_ratio: f64,
@@ -76,6 +77,7 @@ impl SeedProposalConfig {
             min_track_points: 5,
             min_stable_samples: 4,
             stable_window_samples: 6,
+            min_relative_diameter: 0.6,
             min_vertical_travel_plates: 0.5,
             sleeve_end_min_fraction: 0.8,
             ambiguity_ratio: 0.5,
@@ -112,6 +114,11 @@ impl SeedProposalConfig {
     /// Length, in consecutive samples, of the stability window.
     pub fn stable_window_samples(&self) -> usize {
         self.stable_window_samples
+    }
+    /// Smallest median diameter, as a fraction of the largest moving
+    /// track's, that may still be proposed.
+    pub fn min_relative_diameter(&self) -> f64 {
+        self.min_relative_diameter
     }
     /// Minimum robust vertical range, in plate diameters, for a track.
     pub fn min_vertical_travel_plates(&self) -> f64 {
@@ -183,6 +190,10 @@ impl SeedProposalConfigBuilder {
         self.cfg.stable_window_samples = v;
         self
     }
+    pub fn min_relative_diameter(mut self, v: f64) -> Self {
+        self.cfg.min_relative_diameter = v;
+        self
+    }
     pub fn min_vertical_travel_plates(mut self, v: f64) -> Self {
         self.cfg.min_vertical_travel_plates = v;
         self
@@ -207,8 +218,13 @@ impl SeedProposalConfigBuilder {
         self.cfg.lift_classifier = v;
         self
     }
+    /// Builds the config; the stability window is clamped so that
+    /// `1 <= min_stable_samples <= stable_window_samples`.
     pub fn build(self) -> SeedProposalConfig {
-        self.cfg
+        let mut cfg = self.cfg;
+        cfg.stable_window_samples = cfg.stable_window_samples.max(1);
+        cfg.min_stable_samples = cfg.min_stable_samples.clamp(1, cfg.stable_window_samples);
+        cfg
     }
 }
 
@@ -419,20 +435,27 @@ fn first_stable(track: &[Linked], config: &SeedProposalConfig) -> Option<usize> 
     None
 }
 
-/// 10th to 90th percentile vertical range, in plate diameters.
-fn robust_travel_plates(track: &[Linked], sleeve: bool) -> f64 {
+/// 10th to 90th percentile vertical range, in pixels.
+fn robust_range_px(track: &[Linked], sleeve: bool) -> f64 {
     let mut ys: Vec<f64> = track.iter().map(|p| point_of(p, sleeve).y).collect();
     ys.sort_by(|a, b| a.total_cmp(b));
     let n = ys.len();
     let lo = ys[((n - 1) as f64 * 0.1).floor() as usize];
     let hi = ys[((n - 1) as f64 * 0.9).ceil() as usize];
+    hi - lo
+}
+
+fn median_diameter(track: &[Linked]) -> f64 {
     let mut d: Vec<f64> = track.iter().map(|p| p.diameter_px).collect();
-    (hi - lo) / median(&mut d)
+    median(&mut d)
 }
 
 struct Candidate<'a> {
     track: &'a [Linked],
     sleeve: bool,
+    range_px: f64,
+    diameter_px: f64,
+    /// Range over the shared scale; set after all tracks are known.
     travel: f64,
 }
 
@@ -454,14 +477,25 @@ pub fn propose_seed(
                 return None;
             }
             let sleeve = use_sleeve(track, config);
-            let travel = robust_travel_plates(track, sleeve);
-            (travel >= config.min_vertical_travel_plates).then_some(Candidate {
+            let range_px = robust_range_px(track, sleeve);
+            let diameter_px = median_diameter(track);
+            // Static test: the track's own range in its own plate diameters.
+            (range_px / diameter_px >= config.min_vertical_travel_plates).then_some(Candidate {
                 track,
                 sleeve,
-                travel,
+                range_px,
+                diameter_px,
+                travel: 0.0,
             })
         })
         .collect();
+    // One frame-level scale: the largest moving diameter. Smaller moving
+    // circles (head, hardware) never compete with a larger moving one.
+    let scale = cands.iter().map(|c| c.diameter_px).fold(0.0, f64::max);
+    cands.retain(|c| c.diameter_px >= config.min_relative_diameter * scale);
+    for c in &mut cands {
+        c.travel = c.range_px / scale;
+    }
     cands.sort_by(|a, b| b.travel.total_cmp(&a.travel));
     let best = cands.first()?;
     let second_travel = cands.get(1).map(|c| c.travel);
@@ -840,5 +874,69 @@ mod tests {
         let _ = propose_seed(&dets, &cfg());
         let all_bad = vec![frame(0, vec![cand(f64::NAN, f64::NAN, f64::NAN)]); 10];
         assert!(propose_seed(&all_bad, &cfg()).is_none());
+    }
+
+    /// Plate (D=120) and a second circle of radius `r2` rising together in
+    /// the same frames; the circle moves `px2` pixels, the plate `px1`.
+    fn plate_and_circle(px1: f64, r2: f64, px2: f64) -> Vec<FrameDetections> {
+        (0..40u64)
+            .map(|i| {
+                let t = i as f64 / 39.0;
+                frame(
+                    i,
+                    vec![
+                        cand(300.0, Y0 - t * px1, R),
+                        cand(380.0, Y0 - 200.0 - t * px2, r2),
+                    ],
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn head_circle_moving_with_the_bar_does_not_outrank_the_plate() {
+        // Head D=50 moves the same 120 px = 2.4 head diameters.
+        let p = propose_seed(&plate_and_circle(D, 25.0, D), &cfg()).unwrap();
+        assert!((p.plate_diameter_px - D).abs() < 1e-9);
+        assert!((p.position.x - 300.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn smaller_moving_circle_never_wins_over_a_larger_moving_one() {
+        // Circle D=60 (0.5 of the plate) moves further in pixels.
+        let p = propose_seed(&plate_and_circle(100.0, 30.0, 150.0), &cfg()).unwrap();
+        assert!((p.plate_diameter_px - D).abs() < 1e-9);
+        assert!((p.position.x - 300.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ambiguity_uses_the_shared_scale() {
+        // Documented: tracks are ranked by pixel range over one shared scale
+        // (the largest moving diameter). A much smaller moving circle is not a
+        // competitor, so it must not lower confidence; a comparable-size
+        // circle with the same travel is, and does.
+        let alone = propose_seed(&to_frames(rising(0, 40, 1.0)), &cfg()).unwrap();
+        let with_head = propose_seed(&plate_and_circle(D, 25.0, D), &cfg()).unwrap();
+        assert!((with_head.confidence - alone.confidence).abs() < 1e-9);
+        let rival = propose_seed(&plate_and_circle(D, 50.0, 0.9 * D), &cfg()).unwrap();
+        assert!(rival.confidence < alone.confidence);
+        assert!((rival.plate_diameter_px - D).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zero_stable_window_is_clamped_or_rejected() {
+        let c = SeedProposalConfig::builder()
+            .stable_window_samples(0)
+            .min_stable_samples(0)
+            .build();
+        assert!(c.stable_window_samples() >= 1);
+        assert!(c.min_stable_samples() >= 1);
+        assert!(c.min_stable_samples() <= c.stable_window_samples());
+        let _ = propose_seed(&to_frames(rising(0, 40, 3.0)), &c);
+        let c = SeedProposalConfig::builder()
+            .stable_window_samples(2)
+            .min_stable_samples(9)
+            .build();
+        assert!(c.min_stable_samples() <= c.stable_window_samples());
     }
 }
