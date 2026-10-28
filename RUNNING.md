@@ -199,6 +199,19 @@ to the manifest, and two run checks are printed:
 | `LIFT TYPE` | the run's `<stem>.run.json` lift equals the manifest `lift` | a different lift, or the run said `unknown` | no sidecar (e.g. a manual run) or it is unreadable |
 | `REP COUNT` | `<stem>.reps.json` has exactly the manifest `reps` | a different count | manifest `reps` is `null` (owner has not counted yet) or no `.reps.json` |
 
+Every report starts with `plate_px: <value> (source: manifest | --plate-px |
+default 134)`, so the plate scale behind the numbers is always visible. In
+manifest mode the report ends with the pass bar, judged on all labelled
+visible frames (a visible label the run never covered counts as a miss, so a
+late seed cannot hide the untracked part of the clip):
+
+```
+visible labels covered: 5/10 (50.0%)
+pass bar: MISS (50.0% of visible labels within tolerance, need 90%)
+```
+
+The legacy `within <tol> plate-dia` line is unchanged (scored frames only).
+
 UNKNOWN means "cannot be judged", not "wrong". The manifest is filled in by
 hand; see [groundtruth/README.md](groundtruth/README.md).
 

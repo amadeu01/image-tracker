@@ -79,6 +79,13 @@ pub struct AccuracyReport {
     /// Labels with no matching sample at all (e.g. before the seed frame,
     /// or after the session gave up). Not errors — just unmeasured.
     pub unmatched_frames: usize,
+    /// The subset of `unmatched_frames` whose label was `Visible` (not
+    /// `Blurred`): bar-visible frames the run never covered. These are the
+    /// misses a late-seeded forward-only run hides in `within_tolerance`.
+    pub unmatched_visible: usize,
+    /// How many `Visible` labels were tracked within tolerance (the
+    /// numerator of `within_tolerance`).
+    pub within_count: usize,
     /// Mean Euclidean error over `Visible` labels, in pixels.
     pub mean_error_px: Option<f64>,
     /// 95th-percentile error (nearest-rank), in pixels.
@@ -105,7 +112,30 @@ pub struct AccuracyReport {
     pub correctly_absent: usize,
 }
 
+/// The design's pass bar: at least this fraction of labelled visible frames
+/// tracked within tolerance, counting frames the run never covered as misses.
+pub const PASS_FRACTION: f64 = 0.9;
+
 impl AccuracyReport {
+    /// Number of `Visible` labels: scored plus never-covered.
+    pub fn visible_labels(&self) -> usize {
+        self.scored_frames + self.unmatched_visible
+    }
+
+    /// Fraction of ALL `Visible` labels tracked within tolerance. Unlike
+    /// `within_tolerance` (scored frames only), a visible label with no
+    /// sample counts as a miss. `None` when there are no visible labels.
+    pub fn coverage_adjusted_within(&self) -> Option<f64> {
+        let total = self.visible_labels();
+        (total > 0).then(|| self.within_count as f64 / total as f64)
+    }
+
+    /// Whether the coverage-adjusted fraction reaches [`PASS_FRACTION`];
+    /// `None` when there is nothing to judge.
+    pub fn meets_pass_bar(&self) -> Option<bool> {
+        self.coverage_adjusted_within().map(|f| f >= PASS_FRACTION)
+    }
+
     /// Mean error expressed in plate-diameters, given the plate's apparent
     /// diameter in pixels. `None` when there is no error to report or the
     /// diameter is not a usable positive number.
@@ -151,6 +181,7 @@ pub fn grade_with_confidence(
 ) -> AccuracyReport {
     let mut errors: Vec<f64> = Vec::new();
     let mut unmatched = 0usize;
+    let mut unmatched_visible = 0usize;
     let mut false_confidence = 0usize;
     let mut suspect_while_absent = 0usize;
     let mut coasted_while_absent = 0usize;
@@ -166,7 +197,11 @@ pub fn grade_with_confidence(
             }
             // Blurred labels are reportable but not scored (see LabelStatus).
             (LabelStatus::Blurred(_), Some(_)) => {}
-            (LabelStatus::Visible(_) | LabelStatus::Blurred(_), None) => unmatched += 1,
+            (LabelStatus::Visible(_), None) => {
+                unmatched += 1;
+                unmatched_visible += 1;
+            }
+            (LabelStatus::Blurred(_), None) => unmatched += 1,
 
             // Bar absent: a tracked report is false confidence only if the
             // tracker was *confident* about it. A low-confidence tracked
@@ -188,6 +223,7 @@ pub fn grade_with_confidence(
     }
 
     let scored_frames = errors.len();
+    let within_count = errors.iter().filter(|e| **e <= tolerance_px).count();
     let (mean, p95, max, within) = if errors.is_empty() {
         (None, None, None, None)
     } else {
@@ -198,14 +234,15 @@ pub fn grade_with_confidence(
         let rank = ((0.95 * sorted.len() as f64).ceil() as usize).max(1) - 1;
         let p95 = sorted[rank];
         let max = *sorted.last().expect("non-empty");
-        let within =
-            errors.iter().filter(|e| **e <= tolerance_px).count() as f64 / errors.len() as f64;
+        let within = within_count as f64 / errors.len() as f64;
         (Some(mean), Some(p95), Some(max), Some(within))
     };
 
     AccuracyReport {
         scored_frames,
         unmatched_frames: unmatched,
+        unmatched_visible,
+        within_count,
         mean_error_px: mean,
         p95_error_px: p95,
         max_error_px: max,
@@ -412,5 +449,64 @@ mod tests {
         }];
         let r = grade(&samples, &labels, 5.0);
         assert_eq!(r.false_confidence, 1);
+    }
+
+    #[test]
+    fn late_seed_with_unmatched_visible_labels_fails_the_pass_bar() {
+        // Tracking started at frame 5: the first five visible labels have no
+        // sample, the last five are tracked perfectly.
+        let samples: Vec<Sample> = (5..10).map(|i| tracked(i, 0.0, 0.0)).collect();
+        let labels: Vec<GroundTruthLabel> = (0..10).map(|i| visible(i, 0.0, 0.0)).collect();
+        let r = grade(&samples, &labels, 5.0);
+        assert_eq!(
+            r.within_tolerance,
+            Some(1.0),
+            "legacy fraction ignores coverage"
+        );
+        assert_eq!(r.coverage_adjusted_within(), Some(0.5));
+        assert_eq!((r.scored_frames, r.unmatched_visible), (5, 5));
+        assert_eq!(r.meets_pass_bar(), Some(false));
+    }
+
+    #[test]
+    fn full_coverage_all_within_tolerance_passes() {
+        let samples: Vec<Sample> = (0..10).map(|i| tracked(i, 0.0, 0.0)).collect();
+        let labels: Vec<GroundTruthLabel> = (0..10).map(|i| visible(i, 0.0, 0.0)).collect();
+        let r = grade(&samples, &labels, 5.0);
+        assert_eq!(r.coverage_adjusted_within(), Some(1.0));
+        assert_eq!(r.meets_pass_bar(), Some(true));
+    }
+
+    #[test]
+    fn unmatched_occluded_labels_do_not_count_against_coverage() {
+        let samples = vec![tracked(0, 0.0, 0.0)];
+        let labels = vec![visible(0, 0.0, 0.0), occluded(1), occluded(2)];
+        let r = grade(&samples, &labels, 5.0);
+        assert_eq!(r.unmatched_visible, 0);
+        assert_eq!(r.coverage_adjusted_within(), Some(1.0));
+    }
+
+    #[test]
+    fn unmatched_blurred_labels_do_not_count_against_coverage() {
+        let labels = vec![
+            visible(0, 0.0, 0.0),
+            GroundTruthLabel {
+                frame_index: 1,
+                status: LabelStatus::Blurred(Point::new(0.0, 0.0)),
+            },
+        ];
+        let r = grade(&[tracked(0, 0.0, 0.0)], &labels, 5.0);
+        assert_eq!(r.unmatched_frames, 1);
+        assert_eq!(r.unmatched_visible, 0);
+    }
+
+    #[test]
+    fn no_visible_labels_yields_none_not_a_pass() {
+        let r = grade(&[tracked(0, 0.0, 0.0)], &[occluded(0)], 5.0);
+        assert_eq!(r.coverage_adjusted_within(), None);
+        assert_eq!(r.meets_pass_bar(), None);
+        let all_unmatched = grade(&[], &[visible(3, 0.0, 0.0)], 5.0);
+        assert_eq!(all_unmatched.coverage_adjusted_within(), Some(0.0));
+        assert_eq!(all_unmatched.meets_pass_bar(), Some(false));
     }
 }

@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use tracker_core::{
-    accuracy::{grade, AccuracyReport, GroundTruthLabel, LabelStatus},
+    accuracy::{grade, AccuracyReport, GroundTruthLabel, LabelStatus, PASS_FRACTION},
     Point, Sample, Source,
 };
 
@@ -57,11 +57,20 @@ pub struct ClipExpectation {
     pub reps: Option<u64>,
 }
 
+/// Where the plate scale used for grading came from; printed in every report.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlateSource {
+    Manifest,
+    Flag,
+    Default,
+}
+
 #[derive(Debug, Clone)]
 pub struct GradeArgs {
     pub points_csv: PathBuf,
     pub truth_csv: PathBuf,
     pub plate_diameter_px: f64,
+    pub plate_source: PlateSource,
     pub tolerance_diameters: f64,
     /// Present only when `--manifest`/`--clip` were given.
     pub expectation: Option<ClipExpectation>,
@@ -153,6 +162,11 @@ pub fn parse_grade_args(args: &[String]) -> Result<GradeArgs, GradeError> {
                 points_csv: PathBuf::from(positional[0]),
                 truth_csv: PathBuf::from(positional[1]),
                 plate_diameter_px: plate,
+                plate_source: if plate_explicit {
+                    PlateSource::Flag
+                } else {
+                    PlateSource::Default
+                },
                 tolerance_diameters: tol,
                 expectation: None,
             })
@@ -179,6 +193,11 @@ pub fn parse_grade_args(args: &[String]) -> Result<GradeArgs, GradeError> {
                     plate
                 } else {
                     manifest_plate
+                },
+                plate_source: if plate_explicit {
+                    PlateSource::Flag
+                } else {
+                    PlateSource::Manifest
                 },
                 tolerance_diameters: tol,
                 expectation: Some(expectation),
@@ -361,6 +380,47 @@ fn print_run_checks(points_csv: &Path, exp: &ClipExpectation) {
     println!("  REP COUNT            {}", rep_check(exp.reps, reps));
 }
 
+/// The plate-scale line shown at the top of every report.
+fn plate_line(args: &GradeArgs) -> String {
+    let source = match args.plate_source {
+        PlateSource::Manifest => "manifest".to_string(),
+        PlateSource::Flag => "--plate-px".to_string(),
+        PlateSource::Default => format!("default {DEFAULT_PLATE_DIAMETER_PX}"),
+    };
+    format!("plate_px: {} (source: {source})", args.plate_diameter_px)
+}
+
+/// Manifest-mode pass-bar lines: coverage of visible labels, then PASS/MISS
+/// on the coverage-adjusted within-tolerance fraction.
+fn coverage_lines(r: &AccuracyReport) -> Vec<String> {
+    let total = r.visible_labels();
+    if total == 0 {
+        return vec![
+            "visible labels covered: 0/0".into(),
+            "pass bar: UNKNOWN (no visible labels)".into(),
+        ];
+    }
+    let pct = |n: usize| 100.0 * n as f64 / total as f64;
+    let adjusted = r.within_count as f64 / total as f64 * 100.0;
+    let verdict = if r.meets_pass_bar() == Some(true) {
+        "PASS"
+    } else {
+        "MISS"
+    };
+    vec![
+        format!(
+            "visible labels covered: {}/{} ({:.1}%)",
+            r.scored_frames,
+            total,
+            pct(r.scored_frames)
+        ),
+        format!(
+            "pass bar: {verdict} ({adjusted:.1}% of visible labels within tolerance, need {:.0}%)",
+            PASS_FRACTION * 100.0
+        ),
+    ]
+}
+
 pub fn print_report(r: &AccuracyReport, args: &GradeArgs) {
     let fmt = |v: Option<f64>| match v {
         Some(x) => format!("{x:.1}"),
@@ -372,6 +432,7 @@ pub fn print_report(r: &AccuracyReport, args: &GradeArgs) {
     };
     println!();
     println!("accuracy vs ground truth ({})", args.truth_csv.display());
+    println!("  {}", plate_line(args));
     println!("  scored frames        {}", r.scored_frames);
     println!("  unmatched labels     {}", r.unmatched_frames);
     println!(
@@ -407,6 +468,11 @@ pub fn print_report(r: &AccuracyReport, args: &GradeArgs) {
     );
     println!("  coasted while absent {}", r.coasted_while_absent);
     println!("  correctly absent     {}", r.correctly_absent);
+    if args.expectation.is_some() {
+        for line in coverage_lines(r) {
+            println!("  {line}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -587,5 +653,89 @@ mod tests {
         let d = parse_grade_args(&s(&["p.csv", "t.csv"])).unwrap();
         assert_eq!(d.plate_diameter_px, DEFAULT_PLATE_DIAMETER_PX);
         assert!(parse_grade_args(&s(&["p.csv"])).is_err());
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use tracker_core::accuracy::grade as core_grade;
+
+    fn args(source: PlateSource, plate: f64) -> GradeArgs {
+        GradeArgs {
+            points_csv: PathBuf::from("p.csv"),
+            truth_csv: PathBuf::from("t.csv"),
+            plate_diameter_px: plate,
+            plate_source: source,
+            tolerance_diameters: 0.1,
+            expectation: None,
+        }
+    }
+
+    fn report(seed_at: u64) -> AccuracyReport {
+        let samples: Vec<Sample> = (seed_at..10)
+            .map(|i| Sample {
+                frame_index: i,
+                position: Point::new(0.0, 0.0),
+                source: Source::Tracked,
+                confidence: Some(0.95),
+            })
+            .collect();
+        let labels: Vec<GroundTruthLabel> = (0..10)
+            .map(|i| GroundTruthLabel {
+                frame_index: i,
+                status: LabelStatus::Visible(Point::new(0.0, 0.0)),
+            })
+            .collect();
+        core_grade(&samples, &labels, 5.0)
+    }
+
+    #[test]
+    fn plate_line_names_the_source_of_the_scale() {
+        assert_eq!(
+            plate_line(&args(PlateSource::Default, 134.0)),
+            "plate_px: 134 (source: default 134)"
+        );
+        assert_eq!(
+            plate_line(&args(PlateSource::Manifest, 88.5)),
+            "plate_px: 88.5 (source: manifest)"
+        );
+        assert_eq!(
+            plate_line(&args(PlateSource::Flag, 100.0)),
+            "plate_px: 100 (source: --plate-px)"
+        );
+    }
+
+    #[test]
+    fn plate_source_is_tracked_while_parsing() {
+        let a = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let d = parse_grade_args(&a(&["p.csv", "t.csv"])).unwrap();
+        assert_eq!(d.plate_source, PlateSource::Default);
+        let f = parse_grade_args(&a(&["p.csv", "t.csv", "--plate-px", "9"])).unwrap();
+        assert_eq!(f.plate_source, PlateSource::Flag);
+    }
+
+    #[test]
+    fn late_seed_prints_coverage_and_a_miss() {
+        let lines = coverage_lines(&report(5));
+        assert_eq!(lines[0], "visible labels covered: 5/10 (50.0%)");
+        assert!(
+            lines[1].contains("MISS") && lines[1].contains("50.0%"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn full_coverage_prints_a_pass() {
+        let lines = coverage_lines(&report(0));
+        assert_eq!(lines[0], "visible labels covered: 10/10 (100.0%)");
+        assert!(lines[1].contains("PASS"), "{lines:?}");
+    }
+
+    #[test]
+    fn no_visible_labels_prints_unknown_not_pass() {
+        let lines = coverage_lines(&core_grade(&[], &[], 5.0));
+        assert!(lines.iter().all(|l| !l.contains("PASS")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("UNKNOWN")), "{lines:?}");
     }
 }
