@@ -21,3 +21,7 @@
 !groundtruth/v*.csv
 /groundtruth/frames/
 /groundtruth/*_verify.png
+
+# graphify: graph is rebuilt by the post-commit hook, so a tracked copy would be dirty after every commit
+/graphify-out/
+.claude/*.graphify-bak

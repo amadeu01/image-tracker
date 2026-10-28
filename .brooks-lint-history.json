@@ -3,7 +3,22 @@
     "date": "2026-07-23",
     "mode": "Architecture Audit",
     "score": 69,
-    "findings": { "critical": 1, "warning": 3, "suggestion": 1 },
+    "findings": {
+      "critical": 1,
+      "warning": 3,
+      "suggestion": 1
+    },
+    "scope": "whole workspace (crates/tracker-core, crates/tracker-app)"
+  },
+  {
+    "date": "2026-10-27",
+    "mode": "Architecture Audit",
+    "score": 84,
+    "findings": {
+      "critical": 0,
+      "warning": 3,
+      "suggestion": 1
+    },
     "scope": "whole workspace (crates/tracker-core, crates/tracker-app)"
   }
 ]

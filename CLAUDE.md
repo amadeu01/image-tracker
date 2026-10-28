@@ -32,3 +32,16 @@ Claude Code cannot use most of that machinery — treat it as follows.
 
 Net: Claude writes plain, valid, inline Mermaid and leaves the VS-Code-specific
 tooling to Copilot users.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+`graphify-out/` is gitignored (rebuilt by the post-commit hook), so a fresh clone has no graph.
+
+Rules:
+- If graphify-out/graph.json is missing, build it first with `/graphify .` (full build, uses the LLM for docs/images), then follow the rules below. After that, `graphify update .` and the post-commit hook keep it current.
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
