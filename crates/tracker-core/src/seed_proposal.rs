@@ -48,6 +48,8 @@ pub struct SeedProposal {
 pub struct SeedProposalConfig {
     link_gate_plates_per_frame: f64,
     size_ratio_tolerance: f64,
+    merge_speed_gate_plates_per_frame: f64,
+    merge_size_tolerance: f64,
     max_gap_samples: usize,
     merge_gap_samples: usize,
     min_track_points: usize,
@@ -73,6 +75,8 @@ impl SeedProposalConfig {
         Self {
             link_gate_plates_per_frame: 0.12,
             size_ratio_tolerance: 0.3,
+            merge_speed_gate_plates_per_frame: 0.2,
+            merge_size_tolerance: 0.15,
             max_gap_samples: 3,
             merge_gap_samples: 10,
             min_track_points: 5,
@@ -96,6 +100,17 @@ impl SeedProposalConfig {
     /// Allowed relative diameter deviation when linking (0.3 = +-30%).
     pub fn size_ratio_tolerance(&self) -> f64 {
         self.size_ratio_tolerance
+    }
+    /// Max speed, in plate diameters per elapsed frame, for merging a track
+    /// end to a later track start. Looser than the link gate: a fast drop is
+    /// brief and speed estimates across a gap are the least reliable.
+    pub fn merge_speed_gate_plates_per_frame(&self) -> f64 {
+        self.merge_speed_gate_plates_per_frame
+    }
+    /// Allowed relative diameter deviation when merging. Tighter than the
+    /// link tolerance so a smaller false circle cannot bridge a plate track.
+    pub fn merge_size_tolerance(&self) -> f64 {
+        self.merge_size_tolerance
     }
     /// Consecutive samples a track may miss and still be continued.
     pub fn max_gap_samples(&self) -> usize {
@@ -178,6 +193,14 @@ impl SeedProposalConfigBuilder {
         self.cfg.size_ratio_tolerance = v;
         self
     }
+    pub fn merge_speed_gate_plates_per_frame(mut self, v: f64) -> Self {
+        self.cfg.merge_speed_gate_plates_per_frame = v;
+        self
+    }
+    pub fn merge_size_tolerance(mut self, v: f64) -> Self {
+        self.cfg.merge_size_tolerance = v;
+        self
+    }
     pub fn max_gap_samples(mut self, v: usize) -> Self {
         self.cfg.max_gap_samples = v;
         self
@@ -234,6 +257,15 @@ impl SeedProposalConfigBuilder {
     /// `1 <= min_stable_samples <= stable_window_samples`.
     pub fn build(self) -> SeedProposalConfig {
         let mut cfg = self.cfg;
+        let defaults = SeedProposalConfig::default_config();
+        if !(cfg.merge_speed_gate_plates_per_frame.is_finite()
+            && cfg.merge_speed_gate_plates_per_frame > 0.0)
+        {
+            cfg.merge_speed_gate_plates_per_frame = defaults.merge_speed_gate_plates_per_frame;
+        }
+        if !(cfg.merge_size_tolerance.is_finite() && cfg.merge_size_tolerance > 0.0) {
+            cfg.merge_size_tolerance = defaults.merge_size_tolerance;
+        }
         cfg.min_track_persistence = if cfg.min_track_persistence.is_nan() {
             SeedProposalConfig::default_config().min_track_persistence
         } else {
@@ -359,7 +391,8 @@ fn link_tracks(detections: &[FrameDetections], config: &SeedProposalConfig) -> V
 }
 
 /// Bridge occlusions: join a track's end to a later track's start when the
-/// implied speed and the diameter are consistent.
+/// implied speed and the diameter are consistent (merge-only gates). Pairs are
+/// taken cheapest first by combined speed and size deviation.
 fn merge_tracks(tracks: Vec<Track>, config: &SeedProposalConfig) -> Vec<Track> {
     let n = tracks.len();
     let mut order: Vec<usize> = (0..n).collect();
@@ -380,14 +413,19 @@ fn merge_tracks(tracks: Vec<Track>, config: &SeedProposalConfig) -> Vec<Track> {
                 || !size_consistent(
                     first.diameter_px,
                     recent_diameter(&tracks[a]),
-                    config.size_ratio_tolerance,
+                    config.merge_size_tolerance,
                 )
             {
                 continue;
             }
             let per_frame = dist_plates(first.center, end.center, end.diameter_px) / elapsed as f64;
-            if per_frame <= config.link_gate_plates_per_frame {
-                pairs.push((per_frame, a, b));
+            if per_frame <= config.merge_speed_gate_plates_per_frame {
+                // Cost normalised by each gate so speed and size weigh equally;
+                // the best-fitting successor takes the slot, not the first.
+                let size_dev = (first.diameter_px / recent_diameter(&tracks[a]) - 1.0).abs();
+                let cost = per_frame / config.merge_speed_gate_plates_per_frame
+                    + size_dev / config.merge_size_tolerance;
+                pairs.push((cost, a, b));
             }
         }
     }
@@ -462,6 +500,12 @@ fn robust_range_px(track: &[Linked], sleeve: bool) -> f64 {
     hi - lo
 }
 
+/// Detected points over samples spanned by a track, in `(0, 1]`.
+fn persistence(track: &[Linked]) -> f64 {
+    let span = track[track.len() - 1].sample - track[0].sample + 1;
+    (track.len() as f64 / span as f64).min(1.0)
+}
+
 fn median_diameter(track: &[Linked]) -> f64 {
     let mut d: Vec<f64> = track.iter().map(|p| p.diameter_px).collect();
     median(&mut d)
@@ -491,10 +535,7 @@ pub fn propose_seed(
     // can neither win nor inflate the scale.
     let tracks: Vec<Track> = tracks
         .into_iter()
-        .filter(|t| {
-            let span = t[t.len() - 1].sample - t[0].sample + 1;
-            t.len() as f64 / span as f64 >= config.min_track_persistence
-        })
+        .filter(|t| persistence(t) >= config.min_track_persistence)
         .collect();
     let mut cands: Vec<Candidate> = tracks
         .iter()
@@ -543,11 +584,9 @@ pub fn propose_seed(
     let lift = classify_lift(&points, &config.lift_classifier);
 
     let first = track[0];
-    let last = track[track.len() - 1];
-    let span = (last.sample - first.sample + 1) as f64;
     let length_term = (track.len() as f64 / config.full_confidence_points.max(1) as f64).min(1.0);
     let travel_term = (best.travel / config.full_confidence_travel_plates).min(1.0);
-    let persistence_term = (track.len() as f64 / span).min(1.0);
+    let persistence_term = persistence(track);
     let mut confidence = 0.4 * length_term + 0.4 * travel_term + 0.2 * persistence_term;
     if let Some(second) = second_travel {
         let ratio = second / best.travel;
@@ -1071,5 +1110,100 @@ mod tests {
                 p.position.x
             );
         }
+    }
+
+    /// Plate standing on the floor for 30 samples, then a first lift step of
+    /// 0.14 plate/frame between two samples (stride 4), then a slow rise of
+    /// 1.5 plates. A smaller circle chain (0.72 of the plate) starts beside
+    /// the floor position after the break and would take the merge slot.
+    fn plate_with_fast_first_step() -> Vec<FrameDetections> {
+        let step = 0.14 * 4.0 * D;
+        let mut dets = Vec::new();
+        for k in 0..70u64 {
+            let y = if k < 30 {
+                Y0
+            } else {
+                Y0 - step - 1.5 * D * (k - 30) as f64 / 39.0
+            };
+            let mut cs = vec![cand(300.0, y, R)];
+            if k >= 35 {
+                cs.push(cand(300.0 + 0.6 * D, Y0, 0.72 * R));
+            }
+            dets.push(frame(k * 4, cs));
+        }
+        dets
+    }
+
+    #[test]
+    fn plate_step_above_link_gate_at_lift_start_is_still_one_track() {
+        let p = propose_seed(&plate_with_fast_first_step(), &cfg()).expect("proposed");
+        assert_eq!(p.frame_index, 0, "proposal must start at the first sample");
+        assert!((p.position.x - 300.0).abs() < 1e-9);
+        assert!((p.plate_diameter_px - D).abs() < 1e-9);
+        assert_eq!(p.lift.lift, LiftType::Deadlift);
+    }
+
+    fn linked(sample: usize, x: f64, y: f64, d: f64) -> Linked {
+        Linked {
+            sample,
+            frame_index: sample as u64,
+            center: Point::new(x, y),
+            sleeve: None,
+            diameter_px: d,
+        }
+    }
+
+    #[test]
+    fn merge_prefers_the_closest_size_and_speed_successor() {
+        let head: Track = (0..5).map(|s| linked(s, 300.0, Y0, D)).collect();
+        // Slower but 12% larger: cost 0.05 + 0.8.
+        let near_slow: Track = (6..9)
+            .map(|s| linked(s, 300.0, Y0 - 1.2, D * 1.12))
+            .collect();
+        // Faster (0.1 plate/frame) but the exact size: cost 0.5.
+        let best: Track = (6..9).map(|s| linked(s, 300.0, Y0 - 24.0, D)).collect();
+        let merged = merge_tracks(vec![head, near_slow, best], &cfg());
+        let joined = merged.iter().find(|t| t.len() == 8).expect("one join");
+        assert!((joined[5].diameter_px - D).abs() < 1e-9, "wrong successor");
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn merge_only_gates_do_not_loosen_linking() {
+        // Two stretches 0.14 plate/frame apart on consecutive samples.
+        let dets: Vec<_> = (0..8u64)
+            .map(|k| {
+                let y = if k < 4 { Y0 } else { Y0 - 0.14 * 4.0 * D };
+                frame(k * 4, vec![cand(300.0, y, R)])
+            })
+            .collect();
+        // Merge disabled: only linking happens, and it must not bridge.
+        let link_only = SeedProposalConfig::builder().merge_gap_samples(0).build();
+        assert_eq!(link_tracks(&dets, &link_only).len(), 2);
+        // Default merge bridges the short gap with its looser gate.
+        let merged = link_tracks(&dets, &cfg());
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].len(), 8);
+    }
+
+    #[test]
+    fn merge_gate_fields_reject_nan_and_non_positive() {
+        let d = SeedProposalConfig::default_config();
+        assert_eq!(d.merge_speed_gate_plates_per_frame(), 0.2);
+        assert_eq!(d.merge_size_tolerance(), 0.15);
+        for bad in [f64::NAN, 0.0, -1.0, f64::INFINITY] {
+            let c = SeedProposalConfig::builder()
+                .merge_speed_gate_plates_per_frame(bad)
+                .merge_size_tolerance(bad)
+                .build();
+            assert_eq!(c.merge_speed_gate_plates_per_frame(), 0.2);
+            assert_eq!(c.merge_size_tolerance(), 0.15);
+        }
+        let ok = SeedProposalConfig::builder()
+            .merge_speed_gate_plates_per_frame(0.3)
+            .merge_size_tolerance(0.1)
+            .build();
+        assert_eq!(ok.merge_speed_gate_plates_per_frame(), 0.3);
+        assert_eq!(ok.merge_size_tolerance(), 0.1);
     }
 }
