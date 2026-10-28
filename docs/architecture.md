@@ -462,9 +462,9 @@ graph LR
   tune a rule on.
 - **`rep`** - `PhaseOrder { EccentricFirst, ConcentricFirst }` and
   `segment_reps_for_lift(lift, velocity, config)`. A deadlift is
-  concentric-first: a rep is pull, optional lockout, lowering, and ends only
-  when the bar rests on the floor (an idle run, however brief); a bounce stays
-  one rep. **Role-swap trap:** for `ConcentricFirst` the three index fields of
+  concentric-first: a rep is one pull, optional lockout, and its lowering, and
+  ends when the bar returns to the floor, with or without rest. Each pull is
+  its own rep (owner ruling 2026-10-28), so touch-and-go counts one per pull. **Role-swap trap:** for `ConcentricFirst` the three index fields of
   `Rep` (`eccentric_start`, `bottom`, `concentric_end`) swap phase roles
   (`eccentric_start` is the start of the pull, `bottom` the lockout,
   `concentric_end` the end of the lowering). Never read them by name for

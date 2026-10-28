@@ -83,6 +83,7 @@ different scale, so plate size must be measured per clip, not assumed.
     do not. A partial attempt counts only if the owner would log it as a rep.
   - Deadlift: a new rep starts only after the bar has come to rest on the
     floor, even briefly. A bounce without rest is the same rep.
+    **Superseded by the owner ruling 2026-10-28 below.**
 - "Unknown" lift type counts as a miss on the 4-of-4 lift-type bar, but is
   preferred to a confident wrong type. Tune thresholds to say "unknown" when
   unsure, and list each "unknown" with its reason in the grading report.

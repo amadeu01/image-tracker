@@ -113,9 +113,9 @@ videos).
 3. Count the reps of each clip and fill `reps` in `clips.json`:
    - **Squat**: count only a full descent followed by a full ascent. Unracking,
      the walk-out and the re-rack are not reps.
-   - **Deadlift**: a new rep starts only after the bar has come to rest on the
-     floor, even briefly. Lowering straight into the next pull without
-     resting is the same rep.
+   - **Deadlift**: each pull is a rep. A rep ends when the bar returns to
+     the floor, whether or not it rests there, so lowering straight into the
+     next pull (touch-and-go) counts one rep per pull.
 4. Fill `plate_px` per clip: the plate's diameter in pixels in that video's
    frame, measured with two clicks on opposite edges of the plate on a frame
    where it is fully visible (in the GUI calibration tool, or from the image
