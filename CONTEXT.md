@@ -10,6 +10,15 @@ The trajectory of the barbell across a lift, as a sequence of positions over tim
 ### Seed
 A user-placed point marking the object to track (e.g., the end of the barbell) on a chosen starting frame.
 
+### Seed Proposal
+The software's own suggestion for where the bar is, shown on one frame for the user to confirm or correct. Once confirmed it becomes the Seed. A run that accepted a proposal without confirmation is marked unverified.
+
+### Lift Type
+Which movement a video shows: squat, deadlift or bench press. Inferred from the footage. When the software cannot decide it says "unknown" and asks for a manual Seed instead of guessing.
+
+### Bar Point
+The one position that stands for "the bar" in every lift: where the sleeve exits the plate face as seen in profile, not the plate-disc centre. Ground-truth labels and tracking accuracy are measured against it.
+
 ### Marker
 A physical colored dot/tape placed on the barbell before filming. Optional: when present, the Color Tracker follows it; when absent, the Template Tracker follows the bar's own appearance (e.g., the plate end-face).
 
@@ -35,7 +44,7 @@ A noise-reduction filter (e.g. Gaussian blur, median) applied to image regions b
 The full recipe used to process one video: which Tracker, which Preprocessor chain, and the tuning thresholds. Strategies are swappable per video, and can be compared on a short segment to pick what fits a particular clip.
 
 ### Rep
-One repetition of the lift, segmented from the Bar Path by vertical velocity sign: an eccentric phase (descent) followed by a concentric phase (ascent). Per-rep metrics include depth, peak concentric velocity, and mean concentric velocity.
+One cycle of the lift between rest positions, segmented from the Bar Path by vertical velocity sign. The order of phases depends on the Lift Type: squat and bench press go eccentric (descent) then concentric (ascent) between lockouts; deadlift goes concentric (pull from the floor) then eccentric (lowering back to the floor). A touch-and-go deadlift still counts one rep per pull. Per-rep metrics include depth, peak concentric velocity, and mean concentric velocity.
 
 ### Overlay Video
 The rendered output video: original frames plus the traced Bar Path, marker legend, and metrics.
