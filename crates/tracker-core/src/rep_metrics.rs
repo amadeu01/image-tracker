@@ -18,8 +18,10 @@
 //! figures would disagree on unit system.
 //!
 //! ## Concentric phase
-//! The concentric (ascent) phase of a `Rep` spans `bottom..=concentric_end`
-//! (see `rep.rs`). Per the documented axis convention (image y grows
+//! The concentric (ascent) phase of a `Rep` is `Rep::concentric_span()` and
+//! its lowest point is `Rep::bottom_index()` (see `rep.rs`); both are
+//! phase-order neutral, so eccentric-first lifts (squat, bench) and
+//! concentric-first lifts (deadlift) are measured the same way. Per the documented axis convention (image y grows
 //! downward), ascent has negative `vy`, so "upward speed" is `vy.abs()`.
 //!
 //! ## Peak vs. mean concentric velocity
@@ -30,8 +32,8 @@
 //!   (velocity-based training) industry-standard definition of "mean
 //!   concentric velocity" — not the arithmetic mean of instantaneous
 //!   samples, which would be biased by however densely frames were
-//!   sampled. Computed directly from the `bottom` and `concentric_end`
-//!   `PathPoint` positions/timestamps, independent of sampling density.
+//!   sampled. Computed directly from the `PathPoint` positions/timestamps at
+//!   the two ends of `concentric_span()`, independent of sampling density.
 //!
 //! ## Honest numbers (per CONTEXT.md's "Gap" term)
 //! Samples with `from_interpolated: true` (a velocity sample derived across
@@ -51,14 +53,14 @@ use crate::velocity::{VelocitySample, VelocityUnit};
 /// Per-rep metrics: depth, peak/mean concentric velocity (task 5.4).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RepMetrics {
-    /// Timestamp (seconds) of the rep's `eccentric_start`.
+    /// Timestamp (seconds) of the rep's first sample (`start_frame_index()`).
     pub start_t: f64,
-    /// Timestamp (seconds) of the rep's `bottom`.
+    /// Timestamp (seconds) of the rep's lowest point (`bottom_index()`).
     pub bottom_t: f64,
-    /// Timestamp (seconds) of the rep's `concentric_end`.
+    /// Timestamp (seconds) of the rep's last sample (`end_index()`).
     pub end_t: f64,
     /// Vertical displacement (max y - min y) over the whole rep span
-    /// (`eccentric_start..=concentric_end`), in px or meters (see `unit`).
+    /// (`start_frame_index()..=end_index()`), in px or meters (see `unit`).
     pub depth: f64,
     /// Maximum instantaneous upward speed during the concentric phase,
     /// excluding samples that touch a coasted-over Gap.

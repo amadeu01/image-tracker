@@ -387,7 +387,7 @@ fn draw_patch_hint(
         painter.layout_no_wrap(text, egui::FontId::proportional(12.0), egui::Color32::WHITE);
     let text_rect = egui::Align2::LEFT_CENTER.anchor_size(anchor, galley.size());
     painter.rect_filled(
-        text_rect.expand(3.0),
+        text_rect.expand(LABEL_PAD),
         3.0,
         egui::Color32::from_black_alpha(150),
     );
@@ -423,14 +423,41 @@ fn draw_proposal_marker(
         egui::FontId::proportional(12.0),
         egui::Color32::WHITE,
     );
-    let anchor = egui::pos2(center.x + radius + 8.0, center.y);
+    let anchor = label_anchor(center, radius, galley.size(), image_rect);
     let text_rect = egui::Align2::LEFT_CENTER.anchor_size(anchor, galley.size());
     painter.rect_filled(
-        text_rect.expand(3.0),
+        text_rect.expand(LABEL_PAD),
         3.0,
         egui::Color32::from_black_alpha(160),
     );
     painter.galley(text_rect.min, galley, egui::Color32::WHITE);
+}
+
+/// Gap between the proposal ring and its label, in points.
+const LABEL_GAP: f32 = 8.0;
+/// Padding the label background adds around the text, in points.
+const LABEL_PAD: f32 = 3.0;
+
+/// Left-center anchor for the proposal label: right of the ring when it fits
+/// inside `panel_rect`, otherwise left of the ring (right edge of the label
+/// at the ring's left edge minus the gap). The result is clamped so the
+/// padded label stays inside the panel horizontally whenever it can.
+fn label_anchor(
+    center: egui::Pos2,
+    radius: f32,
+    label_size: egui::Vec2,
+    panel_rect: egui::Rect,
+) -> egui::Pos2 {
+    let right_x = center.x + radius + LABEL_GAP;
+    let fits_right = right_x + label_size.x + LABEL_PAD <= panel_rect.right();
+    let x = if fits_right {
+        right_x
+    } else {
+        center.x - radius - LABEL_GAP - label_size.x
+    };
+    let min_x = panel_rect.left() + LABEL_PAD;
+    let max_x = (panel_rect.right() - LABEL_PAD - label_size.x).max(min_x);
+    egui::pos2(x.clamp(min_x, max_x), center.y)
 }
 
 /// Central-panel content when no video is loaded (10.5): a friendly prompt
@@ -499,4 +526,47 @@ fn draw_calibration_segment(
     painter.line_segment([a, b], stroke);
     painter.circle_filled(a, 4.0, color);
     painter.circle_filled(b, 4.0, color);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn panel() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 700.0))
+    }
+
+    #[test]
+    fn label_stays_right_when_there_is_room() {
+        let a = label_anchor(
+            egui::pos2(100.0, 300.0),
+            20.0,
+            egui::vec2(120.0, 14.0),
+            panel(),
+        );
+        assert_eq!(a, egui::pos2(128.0, 300.0));
+    }
+
+    #[test]
+    fn label_flips_left_near_the_right_edge() {
+        let center = egui::pos2(370.0, 300.0);
+        let a = label_anchor(center, 20.0, egui::vec2(120.0, 14.0), panel());
+        assert!(
+            a.x + 120.0 <= center.x - 20.0,
+            "label ends left of the ring"
+        );
+    }
+
+    #[test]
+    fn label_stays_inside_the_panel_rect() {
+        let size = egui::vec2(120.0, 14.0);
+        for cx in [0.0f32, 5.0, 60.0, 200.0, 340.0, 380.0, 400.0] {
+            let a = label_anchor(egui::pos2(cx, 300.0), 20.0, size, panel());
+            assert!(a.x - LABEL_PAD >= panel().left(), "cx {cx}: {a:?}");
+            assert!(
+                a.x + size.x + LABEL_PAD <= panel().right(),
+                "cx {cx}: {a:?}"
+            );
+        }
+    }
 }
