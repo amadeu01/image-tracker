@@ -35,7 +35,7 @@
 
 use super::review::SessionResults;
 use super::{AppState, EventLevel, Mode};
-use crate::compare::{BenchmarkHandle, BenchmarkMessage};
+use crate::bench::{BenchmarkHandle, BenchmarkMessage};
 use crate::export_job::{self, ExportHandle, ExportMessage};
 use crate::prepass_job::PrepassHandle;
 use crate::tracking::{self, TrackingHandle, TrackingRunState};
@@ -86,7 +86,7 @@ impl AppState {
     }
 
     /// Rows of the finished benchmark, if one has completed.
-    pub fn benchmark_rows(&self) -> Option<&Vec<crate::compare::BenchmarkRow>> {
+    pub fn benchmark_rows(&self) -> Option<&Vec<crate::bench::BenchmarkRow>> {
         self.benchmark_rows.as_ref()
     }
 
@@ -327,7 +327,7 @@ impl AppState {
     }
 
     /// Spawns the background strategy benchmark (task 11.4): the fixed
-    /// 6-strategy matrix over a `compare::DEFAULT_COMPARE_FRAMES`-frame
+    /// 6-strategy matrix over a `bench::DEFAULT_COMPARE_FRAMES`-frame
     /// segment starting at the current Seed. No-op if
     /// `can_test_strategies` is false. Reuses the current settings' tuning
     /// as the shared baseline (patch/search radius etc); only the filter
@@ -340,7 +340,7 @@ impl AppState {
         let Some(seed) = self.seed else { return };
         let tuning = self.settings.tuning();
         let coast_limit = self.settings.coast_limit;
-        let strategy_count = crate::compare::strategy_matrix().len();
+        let strategy_count = crate::bench::strategy_matrix().len();
         tracing::info!(
             video = %self.video_path.display(),
             seed_frame = seed.frame_index,
@@ -356,17 +356,17 @@ impl AppState {
         );
         // dt (17.2) for the tracker's motion model; falls back to a
         // plausible 30fps if the reported fps is degenerate, same policy as
-        // the CLI `compare` path (compare.rs).
+        // the CLI `compare` path (bench module).
         let dt = tracker_core::Timebase::new(self.metadata.fps_num, self.metadata.fps_den)
             .map(|tb| 1.0 / tb.fps())
             .unwrap_or(1.0 / 30.0);
-        let handle = crate::compare::spawn_benchmark(
+        let handle = crate::bench::spawn_benchmark(
             self.video_path.clone(),
             self.metadata.display_width(),
             self.metadata.display_height(),
             seed.frame_index,
             seed.position,
-            crate::compare::DEFAULT_COMPARE_FRAMES,
+            crate::bench::DEFAULT_COMPARE_FRAMES,
             dt,
             coast_limit,
             tuning,
@@ -400,7 +400,7 @@ impl AppState {
                     }
                 }
                 BenchmarkMessage::Done(rows) => {
-                    let winner_label = crate::compare::recommend(
+                    let winner_label = crate::bench::recommend(
                         &rows.iter().map(|r| r.metrics).collect::<Vec<_>>(),
                     )
                     .map(|i| rows[i].strategy.label());
@@ -439,9 +439,8 @@ impl AppState {
         let Some(rows) = &self.benchmark_rows else {
             return;
         };
-        let metrics: Vec<crate::compare::StrategyMetrics> =
-            rows.iter().map(|r| r.metrics).collect();
-        let Some(winner_index) = crate::compare::recommend(&metrics) else {
+        let metrics: Vec<crate::bench::StrategyMetrics> = rows.iter().map(|r| r.metrics).collect();
+        let Some(winner_index) = crate::bench::recommend(&metrics) else {
             return;
         };
         let winner = rows[winner_index].strategy;
@@ -449,12 +448,12 @@ impl AppState {
         self.settings.gaussian_enabled = false;
         self.settings.median_enabled = false;
         match winner.filter {
-            crate::compare::FilterKind::None => {}
-            crate::compare::FilterKind::Gaussian1_5 => {
+            crate::bench::FilterKind::None => {}
+            crate::bench::FilterKind::Gaussian1_5 => {
                 self.settings.gaussian_enabled = true;
                 self.settings.gaussian_sigma = 1.5;
             }
-            crate::compare::FilterKind::Median3 => {
+            crate::bench::FilterKind::Median3 => {
                 self.settings.median_enabled = true;
                 self.settings.median_k = 3;
             }

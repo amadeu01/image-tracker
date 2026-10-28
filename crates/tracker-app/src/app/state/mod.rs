@@ -343,7 +343,7 @@ pub struct AppState {
     /// `results`/`tracking_run`). Persists after the run finishes so the
     /// results table/"Apply winner" button stay visible until a new
     /// benchmark is started or the session resets.
-    benchmark_rows: Option<Vec<crate::compare::BenchmarkRow>>,
+    benchmark_rows: Option<Vec<crate::bench::BenchmarkRow>>,
     /// Every file the auto-export job has written this session (task 12.6),
     /// in write order. Fed by `poll_export`'s `ExportMessage::Written`
     /// (the paths already flowed there, just as transient events before —

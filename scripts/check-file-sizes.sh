@@ -25,10 +25,8 @@ THRESHOLD=800
 # path : reason (task that will retire this entry)
 ALLOWLIST_PATHS=(
   "crates/tracker-app/src/tracking.rs"
-  "crates/tracker-app/src/compare.rs"
 )
 ALLOWLIST_REASONS=(
-  "PLAN 20.x refactor pending"
   "PLAN 20.x refactor pending"
 )
 

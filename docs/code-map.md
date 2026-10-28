@@ -360,8 +360,8 @@ on the finished output — nobody measures them live.
 | ZNCC peak | measured, live | `metric.rs` | `TemplateTracker::step`, once per candidate |
 | anchor veto | measured, live | `tracker.rs` (17.3) | `TemplateTracker::step`, gates eligibility |
 | motion reachability | measured, live | `motion.rs` (17.2) | `TemplateTracker::step`, gates acceptance |
-| jitter | derived | `compare.rs` | `compute_metrics`, after the run |
-| gaps / reseeds | derived | `compare.rs` / `session.rs` | `compute_metrics` / live gap logic |
+| jitter | derived | `bench/strategy.rs` | `compute_metrics`, after the run |
+| gaps / reseeds | derived | `bench/strategy.rs` / `session.rs` | `compute_metrics` / live gap logic |
 
 ---
 
@@ -485,7 +485,7 @@ bootstrap the first real motion (the frame-25 false-loss regression, 17.2).
 #### (4) jitter — derived, post-hoc
 
 **When:** not live at all. Computed once, after the whole run, in
-`compare.rs::compute_metrics` — pure arithmetic on the positions the tracker
+`bench/strategy.rs::compute_metrics` — pure arithmetic on the positions the tracker
 already emitted.
 
 ```rust
@@ -510,7 +510,7 @@ across a wall scores *great* while tracking nothing (PLAN 20.3).
 #### (5) gaps / reseeds — derived counting
 
 **When:** two contexts. *Live*, `session.rs` opens a gap on a miss-streak and
-flips to `NeedsReseed` past the coast limit. *Post-hoc*, `compare.rs` recounts
+flips to `NeedsReseed` past the coast limit. *Post-hoc*, `bench/strategy.rs` recounts
 them from the outcome sequence:
 
 ```rust

@@ -353,8 +353,8 @@ fn strategy_benchmark_section(ui: &mut egui::Ui, state: &mut AppState) {
     let Some(rows) = state.benchmark_rows().cloned() else {
         return;
     };
-    let metrics: Vec<crate::compare::StrategyMetrics> = rows.iter().map(|r| r.metrics).collect();
-    let winner = crate::compare::recommend(&metrics);
+    let metrics: Vec<crate::bench::StrategyMetrics> = rows.iter().map(|r| r.metrics).collect();
+    let winner = crate::bench::recommend(&metrics);
 
     egui::Grid::new("strategy_benchmark_results")
         .num_columns(3)

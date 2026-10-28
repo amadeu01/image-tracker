@@ -53,7 +53,7 @@ graph TD
     subgraph App_Adapters["tracker-app :: adapters, jobs, workers"]
         Cli["cli.rs — headless entry (fan-out 6)"]
         Tracking["tracking.rs — tracking worker thread"]
-        Compare["compare.rs — strategy shootout"]
+        Compare["bench/ — strategy shootout"]
         Decode["decode_worker.rs — display decode thread"]
         ThumbW[thumbnail_worker.rs]
         ExportJob[export_job.rs]
@@ -140,7 +140,7 @@ Warning, 🟢 clean. See §7.
 |-------|----------|---------------|----------------------|
 | **Domain** | `tracker-core/src/*` | `std` only | anything — the `[dependencies]` table is empty and stays empty |
 | **Ports** | `tracker-core`: `FrameSource`, `VideoSink`, `CorrelationMetric`, `Tracker` | domain types | any concrete adapter |
-| **Adapters / jobs** | `tracker-app`: `ffmpeg_*`, `*_worker`, `*_job`, `compare`, `grade` | domain + ports + crates.io | the `app::` UI modules |
+| **Adapters / jobs** | `tracker-app`: `ffmpeg_*`, `*_worker`, `*_job`, `bench`, `grade` | domain + ports + crates.io | the `app::` UI modules |
 | **Presentation** | `tracker-app/src/app/*` | adapters, domain | nothing above it — it *is* the top |
 | **Composition roots** | `main.rs`, `cli.rs`, `app::run` | everything | — |
 
@@ -295,7 +295,7 @@ size does not need a package hierarchy, and flat means every concept is one
   requests: a burst of stale "want frame N" messages is drained and only the
   newest serviced, so a worker can never fall more than one unit of work behind.
 - `*_job.rs` — one-shot, spawned and joined (`export_job`).
-- `tracking.rs` / `compare.rs` — the long-running tracking thread and the
+- `tracking.rs` / `bench/` — the long-running tracking thread and the
   strategy shootout that drives it repeatedly.
 - Everything else is synchronous and called from wherever.
 
@@ -396,7 +396,7 @@ chart + headline cards, and education copy moved to
 
 ### ✅ Resolved: two more files past the size threshold — PLAN 19.6, guardrail landed 20.2
 
-`tracking.rs` (2043 lines, 1076-line body) and `compare.rs` (1640 lines,
+`tracking.rs` (2043 lines, 1076-line body) and `compare.rs` (1640 lines, since moved to `bench/`,
 1066-line body) are on the same trajectory `state.rs` took; the audit that
 flagged `app.rs` at 872 lines was right early. Rather than refactor two
 stable, well-tested files this milestone, `scripts/check-file-sizes.sh` now
@@ -407,7 +407,7 @@ manual audit and instead gets caught at the PR that introduces new bloat.
 ### ✅ Resolved: two disproven tracker strategies in the compare matrix — PLAN 17.6, closed by 20.3
 
 `color_tracker.rs`/`circle_tracker.rs` stay (this was a gating change, not a
-deletion), but `compare.rs`'s benchmark table/JSON now marks both `[GATED]`
+deletion), but the `bench` module's benchmark table/JSON now marks both `[GATED]`
 with a reason and excludes them from `recommend`/`recommend_viable`'s
 candidate pool — Color when `suggest_tracker` doesn't return `Color` for the
 seed, Circle unconditionally (a documented negative result). See PLAN 20.3.

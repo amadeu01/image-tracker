@@ -1,8 +1,8 @@
 //! tracker-app: adapters (ffmpeg IO, egui UI, overlay render, CSV/JSON export).
 
 pub mod app;
+pub mod bench;
 pub mod cli;
-pub mod compare;
 pub mod decode_worker;
 pub mod export_job;
 pub mod ffmpeg_sink;

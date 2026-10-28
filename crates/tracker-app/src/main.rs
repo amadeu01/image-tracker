@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 
-use tracker_app::{app, cli, compare, ffprobe, grade, telemetry};
+use tracker_app::{app, bench, cli, ffprobe, grade, telemetry};
 
 fn main() {
     let (_telemetry_guard, log_path) = telemetry::init();
@@ -96,7 +96,7 @@ fn main() {
     }
 
     if !args.is_empty() && args[0] == "compare" {
-        let compare_args = match compare::parse_compare_args(&args[1..]) {
+        let compare_args = match bench::parse_compare_args(&args[1..]) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!(
@@ -106,7 +106,7 @@ fn main() {
                 std::process::exit(2);
             }
         };
-        if let Err(e) = compare::run_compare(compare_args) {
+        if let Err(e) = bench::run_compare(compare_args) {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
