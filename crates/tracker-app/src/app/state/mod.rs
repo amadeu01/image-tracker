@@ -5,10 +5,14 @@
 //!
 //! Task 20.1 split this file (2708 lines, `AppState` 27 public fields /
 //! ~48 methods) into a directory by *concern*, not by sub-struct: `AppState`
-//! stays one flat struct here so every existing call site
-//! (`state.job`, `state.results`, `state.seed`, …) keeps compiling
-//! unchanged — only the `impl AppState` blocks that touch each area moved
-//! into their own file, plus the standalone types those areas own. See each
+//! stays one flat struct here — only the `impl AppState` blocks that touch
+//! each area moved into their own file, plus the standalone types those
+//! areas own. All of its fields are private: call sites outside `state/`
+//! read through accessors (`video_path()`, `metadata()`, `current_frame()`,
+//! `seed()`, `calibration()`, `tracking_run()`, `bar_path()`, `results()`,
+//! `selected_rep()`, `events()`) and change it through the state-transition
+//! methods (`place_seed`, `start_tracking`, `confirm_proposal`, …), so the
+//! single-job invariant on `job` cannot be bypassed. See each
 //! submodule's doc comment for exactly what it holds; this file keeps the
 //! struct itself, construction, and the cross-cutting status/banner/session
 //! plumbing that legitimately touches every area at once (`current_step`,

@@ -64,7 +64,7 @@ Rules that fall out of the model:
    render loop.
 5. **`Drop` must tear down child processes** (`kill()` + `wait()`), so an
    early stop never leaks an ffmpeg. (See the 2026-07-22 deadlock fix in
-   `tracking.rs`: reaping a *still-running* child with an undrained stdout pipe
+   `tracking/`: reaping a *still-running* child with an undrained stdout pipe
    deadlocks — only reap after a real EOF; otherwise let `Drop` kill it.)
 6. **Keep `tracker-core` out of all of this.** Threading, processes, and egui
    live only in `tracker-app` (CONTEXT.md / ADR-0001 layering). The core stays
@@ -168,6 +168,6 @@ None of these touch `tracker-core`. 18.1 is the one that removes the freeze;
 - macOS specifically requires window/GPU work on the main thread, which is why
   a blocked `update` is fatal there, not merely janky.
 
-When in doubt, prefer the pattern already used by `tracking.rs` /
+When in doubt, prefer the pattern already used by `tracking/` /
 `thumbnail_worker.rs` in this repo: a `spawn` that returns a handle holding the
 channels, drained non-blocking from `update`.

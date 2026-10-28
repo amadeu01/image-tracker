@@ -48,13 +48,13 @@ Three layers, dependencies point inward (see architecture.md §3):
 
 ```
 egui panels  ─read/write─►  AppState  ─spawns─►  worker thread  ─calls─►  tracker-core (domain)
-(app/*.rs)                 (app/state/*)         (tracking.rs)            (session.rs, tracker.rs, …)
+(app/*.rs)                 (app/state/*)         (tracking/)              (session.rs, tracker.rs, …)
 ```
 
 - **The GUI never calls `Tracker::step` or `TrackingSession::step` directly.**
   It calls `AppState::start_tracking()`, which spawns the worker and returns a
   `TrackingHandle` (a channel sender + receiver).
-- Communication is **one channel, three message types** (`tracking.rs:254`):
+- Communication is **one channel, three message types** (`tracking/state.rs`, `TrackingMessage`):
 
 ```rust
 pub enum TrackingMessage {
@@ -78,7 +78,7 @@ messages. Full rules: [docs/gui-threading.md](gui-threading.md).
 Separate from tracking, scrubbing the video needs single frames on demand.
 That's a *second* worker (`decode_worker.rs`) with its own tiny 16-frame cache.
 Don't confuse the two:
-- `tracking.rs` worker = sequential decode for a whole run (fast, streaming).
+- `tracking/` worker = sequential decode for a whole run (fast, streaming).
 - `decode_worker.rs` = random-access single-frame decode for the scrub bar.
 
 ---
@@ -144,7 +144,7 @@ So, answering the obvious question directly:
 
 - **`Lost` DOES terminate.** It is *not* the state that keeps asking you to
   reseed — that's `NeedsReseed`. When Lost fires, the worker ends the run right
-  there (`tracking.rs:953`, "terminal, unlike NeedsReseed below") and hands back
+  there (`tracking/run_loop.rs`, "terminal, unlike NeedsReseed below") and hands back
   whatever bar path it had up to that frame. No reseed prompt.
 - **`NeedsReseed` is the one that pauses and asks**, and never terminates on its
   own — it waits on the reseed channel (a user Stop is the only thing that ends
@@ -179,9 +179,9 @@ overlap. So Lost is **off by default**:
 
 ## 5. The main algorithm, box by box
 
-### 5.1 The run loop — `tracking.rs`
+### 5.1 The run loop — `tracking/` (`worker.rs`, `run_loop.rs`)
 
-`run_tracking_worker` (`tracking.rs:594`) sets up ffmpeg, decodes to the seed
+`run_tracking_worker` (`tracking/worker.rs`) sets up ffmpeg, decodes to the seed
 frame, builds the tracker, then `finish_tracking_run` → `run_tracking_loop`
 does the cycle:
 
@@ -316,6 +316,11 @@ up); `rep_metrics` aggregates each concentric phase:
 - **Mean velocity** = concentric displacement ÷ concentric duration (the VBT default)
 - **Peak velocity** = max `speed` in the phase
 - **Velocity loss** = drop from rep 1's mean to the worst rep (fatigue proxy)
+
+A deadlift is concentric-first, so the app calls `segment_reps_for_lift`
+(rep ends when the bar rests on the floor) and reads phases through the
+phase-neutral accessors (`concentric_span()`, `bottom_index()`, ...), never
+the raw `Rep` index fields; see architecture.md section 6b.
 
 ```mermaid
 graph TD
@@ -540,15 +545,27 @@ did — never a verdict on whether it was right.
 | GUI starts a run / reads progress | `crates/tracker-app/src/app/state/jobs.rs` | `start_tracking`, `poll_tracking` |
 | Background jobs as a state (`Job` enum) | `crates/tracker-app/src/app/state/jobs.rs` | `Job` |
 | Review/results state, rep clips | `crates/tracker-app/src/app/state/review.rs` | `SessionResults`, `advance_rep_clip` |
-| Seed / calibration / frame position | `crates/tracker-app/src/app/state/session.rs` | `place_seed`, `set_frame` |
-| decode + orchestration | `crates/tracker-app/src/tracking.rs` | `run_tracking_worker`, `run_tracking_loop` |
+| Seed / calibration / frame position (accessors `seed()`, `calibration()`, ...) | `crates/tracker-app/src/app/state/session.rs` | `place_seed`, `can_place_seed`, `set_frame` |
+| decode + orchestration | `crates/tracker-app/src/tracking/{worker,run_loop}.rs` | `run_tracking_worker`, `run_tracking_loop` |
+| tracking run state / messages | `crates/tracker-app/src/tracking/{state,config}.rs` | `TrackingMessage`, `TrackingRunState` |
+| strategy shootout (`compare`) | `crates/tracker-app/src/bench/{strategy,runner,report,command}.rs` | `compare` command |
+| tuning -> config mapping | `crates/tracker-core/src/tuning.rs` | `session_config`, `tracker_config`, `rep_segmentation_config` |
+| find plates in a frame (no seed) | `crates/tracker-core/src/plate_finder.rs` | `find_plates` |
+| pick the moving plate from detections | `crates/tracker-core/src/seed_proposal.rs` | `propose_seed` |
+| squat / deadlift / unknown | `crates/tracker-core/src/lift.rs` | `classify_lift` |
+| lift-aware rep segmentation, phase accessors | `crates/tracker-core/src/rep.rs` | `segment_reps_for_lift`, `PhaseOrder` |
+| unseeded pre-pass (stride, cancel) | `crates/tracker-app/src/prepass.rs` | `run_prepass` |
+| background pre-pass job | `crates/tracker-app/src/prepass_job.rs` | `spawn_prepass`, `PrepassHandle` |
+| proposal state, banner, confirm / reject | `crates/tracker-app/src/app/state/proposal.rs` | `start_prepass`, `poll_prepass` |
+| `<stem>.run.json` provenance sidecar | `crates/tracker-app/src/run_info.rs` | `write_run_info`, `read_run_info` |
+| grade lift type + rep count vs manifest | `crates/tracker-app/src/grade.rs` | `lift_check`, `rep_check` |
 | the search ("where did it go") | `crates/tracker-core/src/tracker.rs` | `TemplateTracker::step` |
 | ZNCC similarity metric | `crates/tracker-core/src/metric.rs` | `Zncc::score` |
 | trust/veto/gaps/state machine | `crates/tracker-core/src/session.rs` | `TrackingSession::step` |
 | motion model / reachability gate | `crates/tracker-core/src/motion.rs` | — |
 | the trajectory aggregate | `crates/tracker-core/src/bar_path.rs` | `PathPoint`, `BarPath::new` |
 | **velocity maths** | `crates/tracker-core/src/velocity.rs` | `velocity_series` |
-| rep segmentation | `crates/tracker-core/src/rep.rs` | `segment_reps` |
+| rep segmentation | `crates/tracker-core/src/rep.rs` | `segment_reps`, `segment_reps_for_lift` |
 | per-rep metrics (mean/peak/loss) | `crates/tracker-core/src/rep_metrics.rs` | — |
 | pixel↔metre calibration | `crates/tracker-core/src/calibration.rs` | `px_to_meters` |
 | ground-truth grading | `crates/tracker-core/src/accuracy.rs`, `crates/tracker-app/src/grade.rs` | `grade` |
@@ -565,7 +582,7 @@ did — never a verdict on whether it was right.
 1. `CONTEXT.md` — learn the words.
 2. This file §1–§2 — the mental model + the GUI↔core boundary.
 3. `bar_path.rs` — the aggregate everything flows through; small, central.
-4. `tracking.rs` `run_tracking_loop` — the cycle that drives everything.
+4. `tracking/run_loop.rs` `run_tracking_loop` — the cycle that drives everything.
 5. `tracker.rs` `TemplateTracker::step` — the actual CV.
 6. `session.rs` `TrackingSession::step` — the trust logic + state machine.
 7. `velocity.rs` then `rep.rs` — how numbers come out the other end.
@@ -586,7 +603,7 @@ chain.)
 > down "sticker was here at this time," and asks for the next photo. Do that a
 > few thousand times and you've drawn the whole [bar path](../CONTEXT.md#bar-path).
 
-1. **A frame appears.** `run_tracking_loop` (`tracking.rs`) calls
+1. **A frame appears.** `run_tracking_loop` (`tracking/run_loop.rs`) calls
    `source.next_frame()` — one owned RGB buffer, display-space dimensions
    (§5.1). Watch: `frame.width`, `frame.height`. If this is wrong you get the
    scrambled-rows rotation bug ([e2e-results.md](e2e-results.md), 3.5).
@@ -635,5 +652,5 @@ The load-bearing "why we picked A over B" calls, each with where to read more.
 | **Lost is opt-in, default OFF** | Confidence can't reliably separate a dim-but-correct track from a false lock; a wrong terminal fire kills a good run. So the terminal state stays off unless footage has reliable confidence. | [§4](#the-two-lost-the-bar-outcomes--they-are-opposites-dont-conflate-them) |
 | **Worker thread** for tracking, never in `update` | A synchronous decode in the egui loop froze the window (the OS "not responding" dialog). The render loop must never block. | [gui-threading.md](gui-threading.md) |
 | **Ground truth grades correctness**, self-metrics only steer | ZNCC score / jitter / gap-count are all *maxed* by a confident false lock. They can't referee themselves. | [§6](#6-confidence-vs-correctness--the-load-bearing-lesson) |
-| **`tracker-core` dependency-free**, IO only in `tracker-app` | Keeps the domain testable without ffmpeg (233 pure tests run in 0.1s) and makes the layering compiler-enforced. | [architecture §3](architecture.md#3-layers-and-the-dependency-rule) |
+| **`tracker-core` dependency-free**, IO only in `tracker-app` | Keeps the domain testable without ffmpeg (310 pure tests run in under a second) and makes the layering compiler-enforced. | [architecture §3](architecture.md#3-layers-and-the-dependency-rule) |
 | **No video stabilization (yet)**, tripod guidance instead | Small shake is absorbed by the moving search window; real stabilization warps pixels (its own noise) and must be graded before trusting. A frame-source decorator is the clean place if we build it. | [theory §10.4](theory.md#104-what-if-the-video-shakes-can-we-stabilize-first) |

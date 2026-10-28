@@ -13,6 +13,9 @@ A user-placed point marking the object to track (e.g., the end of the barbell) o
 ### Seed Proposal
 The software's own suggestion for where the bar is, shown on one frame for the user to confirm or correct. Once confirmed it becomes the Seed. A run that accepted a proposal without confirmation is marked unverified.
 
+### Unverified Run
+A tracking run whose Seed was proposed by the software and never confirmed by a person. Its results are real output, but nobody has checked that the tracked point is the bar.
+
 ### Lift Type
 Which movement a video shows: squat, deadlift or bench press. Inferred from the footage. When the software cannot decide it says "unknown" and asks for a manual Seed instead of guessing.
 
@@ -44,7 +47,7 @@ A noise-reduction filter (e.g. Gaussian blur, median) applied to image regions b
 The full recipe used to process one video: which Tracker, which Preprocessor chain, and the tuning thresholds. Strategies are swappable per video, and can be compared on a short segment to pick what fits a particular clip.
 
 ### Rep
-One cycle of the lift between rest positions, segmented from the Bar Path by vertical velocity sign. The order of phases depends on the Lift Type: squat and bench press go eccentric (descent) then concentric (ascent) between lockouts; deadlift goes concentric (pull from the floor) then eccentric (lowering back to the floor). A touch-and-go deadlift still counts one rep per pull. Per-rep metrics include depth, peak concentric velocity, and mean concentric velocity.
+One cycle of the lift between rest positions, segmented from the Bar Path by vertical velocity sign. The order of phases depends on the Lift Type: squat and bench press go eccentric (descent) then concentric (ascent) between lockouts; deadlift goes concentric (pull from the floor) then eccentric (lowering back to the floor). A deadlift rep ends only once the bar rests on the floor, even briefly; lowering straight into the next pull (a bounce) stays one rep. Per-rep metrics include depth, peak concentric velocity, and mean concentric velocity.
 
 ### Overlay Video
 The rendered output video: original frames plus the traced Bar Path, marker legend, and metrics.
