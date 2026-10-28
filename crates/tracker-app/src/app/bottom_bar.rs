@@ -30,20 +30,20 @@ pub fn show_status_bar(ctx: &egui::Context, state: Option<&AppState>) {
                 ui.label(
                     egui::RichText::new(format!(
                         "{}  ·  frame {}/{}  ·  {}",
-                        state.video_path.display(),
-                        state.current_frame,
-                        state.metadata.frame_count.unwrap_or(0).saturating_sub(1),
+                        state.video_path().display(),
+                        state.current_frame(),
+                        state.metadata().frame_count.unwrap_or(0).saturating_sub(1),
                         state.status_line(),
                     ))
                     .monospace(),
                 );
                 let tracking_active = state.is_tracking()
-                    || state.tracking_run.error.is_some()
-                    || state.bar_path.is_some();
+                    || state.tracking_run().error.is_some()
+                    || state.bar_path().is_some();
                 if tracking_active {
                     ui.separator();
-                    let is_error = state.tracking_run.error.is_some();
-                    let is_paused = state.tracking_run.session_state
+                    let is_error = state.tracking_run().error.is_some();
+                    let is_paused = state.tracking_run().session_state
                         == Some(tracker_core::SessionState::NeedsReseed);
                     let color = if is_error {
                         egui::Color32::RED
@@ -53,7 +53,7 @@ pub fn show_status_bar(ctx: &egui::Context, state: Option<&AppState>) {
                         egui::Color32::LIGHT_GREEN
                     };
                     ui.label(
-                        egui::RichText::new(state.tracking_run.status_line())
+                        egui::RichText::new(state.tracking_run().status_line())
                             .monospace()
                             .color(color),
                     );
@@ -119,8 +119,8 @@ pub fn show_scrub_bar(ctx: &egui::Context, state: Option<&mut AppState>) {
             {
                 state.prev_frame();
             }
-            let max = state.metadata.frame_count.unwrap_or(1).saturating_sub(1);
-            let mut frame_val = state.current_frame;
+            let max = state.metadata().frame_count.unwrap_or(1).saturating_sub(1);
+            let mut frame_val = state.current_frame();
             let slider = ui
                 .add(egui::Slider::new(&mut frame_val, 0..=max))
                 .on_hover_text("scrub to a frame (←/→ = ±1, Shift+←/→ = ±10)");
@@ -166,7 +166,7 @@ pub fn show_scrub_bar(ctx: &egui::Context, state: Option<&mut AppState>) {
 /// coarse seek (the design notes' deviation: the slider below stays for
 /// fine scrub).
 fn show_rep_segments(ui: &mut egui::Ui, state: &mut AppState) {
-    let bounds: Vec<(u64, u64)> = match &state.results {
+    let bounds: Vec<(u64, u64)> = match state.results() {
         Some(results) if !results.reps.is_empty() => (0..results.reps.len())
             .filter_map(|i| results.rep_frame_bounds(i))
             .collect(),
@@ -175,7 +175,7 @@ fn show_rep_segments(ui: &mut egui::Ui, state: &mut AppState) {
     if bounds.is_empty() {
         return;
     }
-    let total = state.metadata.frame_count.unwrap_or(1).saturating_sub(1);
+    let total = state.metadata().frame_count.unwrap_or(1).saturating_sub(1);
     if total == 0 {
         return;
     }
@@ -205,7 +205,7 @@ fn show_rep_segments(ui: &mut egui::Ui, state: &mut AppState) {
             egui::pos2(frac_x(left), rect.top() + SEGMENT_INSET),
             egui::pos2(frac_x(left + width), rect.bottom() - SEGMENT_INSET),
         );
-        let selected = state.selected_rep == Some(i);
+        let selected = state.selected_rep() == Some(i);
         let fill = chrome
             .accent
             .gamma_multiply(if selected { 0.45 } else { 0.16 });
@@ -218,7 +218,7 @@ fn show_rep_segments(ui: &mut egui::Ui, state: &mut AppState) {
     }
 
     // Playhead: 2px vline at the current frame.
-    let playhead_x = frac_x((state.current_frame as f64 / total as f64).clamp(0.0, 1.0) as f32);
+    let playhead_x = frac_x((state.current_frame() as f64 / total as f64).clamp(0.0, 1.0) as f32);
     painter.rect_filled(
         egui::Rect::from_min_max(
             egui::pos2(playhead_x - 1.0, rect.top()),
@@ -232,7 +232,7 @@ fn show_rep_segments(ui: &mut egui::Ui, state: &mut AppState) {
     // sets `rep_clip`; nothing arms it yet, but the drawing seam is 13.2's).
     if let Some(clip_bounds) = state
         .rep_clip()
-        .and_then(|i| state.results.as_ref()?.rep_frame_bounds(i))
+        .and_then(|i| state.results()?.rep_frame_bounds(i))
     {
         let (left, width) = segment_fraction(clip_bounds.0, clip_bounds.1, total);
         for frac in [left, left + width] {

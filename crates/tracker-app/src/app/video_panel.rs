@@ -21,14 +21,14 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
             return;
         };
         let texture = texture.clone();
-        // 18.1 (finding G2): the wanted frame (`state.current_frame`) may
+        // 18.1 (finding G2): the wanted frame (`state.current_frame()`) may
         // not be the one `texture` currently shows — the decode worker just
         // hasn't replied yet (fast scrub, or tracking-follow outrunning
         // ffmpeg). Draw the stale texture rather than block, but say so.
         let decoding_current = app
             .state
             .as_ref()
-            .is_some_and(|state| app.texture_frame != Some(state.current_frame));
+            .is_some_and(|state| app.texture_frame != Some(state.current_frame()));
         let Some(state) = &mut app.state else {
             return;
         };
@@ -68,12 +68,12 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
                 if let Some(image_px) = screen_to_image_px(
                     click_pos,
                     image_rect,
-                    state.metadata.display_width(),
-                    state.metadata.display_height(),
+                    state.metadata().display_width(),
+                    state.metadata().display_height(),
                 ) {
                     if state.mode() == Mode::PlacingSeed {
                         state.place_seed(image_px);
-                        if let Some(seed) = state.seed {
+                        if let Some(seed) = state.seed() {
                             // 18.1 (finding G2): this used to call
                             // `cache.get(seed.frame_index)` synchronously,
                             // spawning ffmpeg on the UI thread if the seed
@@ -132,8 +132,8 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
                 if let Some(image_px) = screen_to_image_px(
                     hover_pos,
                     image_rect,
-                    state.metadata.display_width(),
-                    state.metadata.display_height(),
+                    state.metadata().display_width(),
+                    state.metadata().display_height(),
                 ) {
                     draw_patch_region(
                         ui.painter(),
@@ -151,7 +151,7 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         // Proposed bar (not yet a Seed): a ring the size of the proposed plate
         // plus a label, only on the frame it was found on.
         if let (Some(p), Some(headline)) = (state.proposal(), state.proposal_headline()) {
-            if p.frame_index == state.current_frame {
+            if p.frame_index == state.current_frame() {
                 draw_proposal_marker(
                     ui.painter(),
                     image_rect,
@@ -163,8 +163,8 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
             }
         }
 
-        if let Some(seed) = state.seed {
-            if seed.frame_index == state.current_frame {
+        if let Some(seed) = state.seed() {
+            if seed.frame_index == state.current_frame() {
                 // 15.3: the seed region IS the template patch — draw the
                 // exact square the Template tracker will cut (side
                 // 2*r + 1 source px), so radius changes are visible live.
@@ -208,11 +208,11 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         // and render gray, honestly showing "lost" rather than a confident
         // green lock.
         if let (Some(idx), Some(pos)) = (
-            state.tracking_run.last_frame_index,
-            state.tracking_run.last_tracked_position,
+            state.tracking_run().last_frame_index,
+            state.tracking_run().last_tracked_position,
         ) {
-            if idx == state.current_frame {
-                let color = if state.tracking_run.is_searching() {
+            if idx == state.current_frame() {
+                let color = if state.tracking_run().is_searching() {
                     egui::Color32::from_rgb(150, 150, 150)
                 } else {
                     egui::Color32::from_rgb(60, 255, 120)
@@ -248,11 +248,11 @@ pub fn show(app: &mut TrackerApp, ctx: &egui::Context) {
         // The *live* tracking crosshair above and the Seed marker are
         // deliberately not gated: lock-on feedback stays visible even with
         // the path hidden.
-        if let Some(results) = &state.results {
-            let points = results.path_points_to_draw(state.selected_rep, state.show_path());
+        if let Some(results) = state.results() {
+            let points = results.path_points_to_draw(state.selected_rep(), state.show_path());
             if !points.is_empty() {
                 draw_bar_path(ui.painter(), image_rect, tex_size, points);
-                if let Some(point) = results.bar_path.position_at(state.current_frame) {
+                if let Some(point) = results.bar_path.position_at(state.current_frame()) {
                     draw_crosshair(
                         ui.painter(),
                         image_rect,

@@ -74,6 +74,16 @@ pub enum Job {
 }
 
 impl AppState {
+    /// Reducer state of the (possibly finished) tracking run.
+    pub fn tracking_run(&self) -> &TrackingRunState {
+        &self.tracking_run
+    }
+
+    /// The completed bar path, once a run reached clean end-of-video.
+    pub fn bar_path(&self) -> Option<&tracker_core::BarPath> {
+        self.bar_path.as_ref()
+    }
+
     /// User-editable tracking configuration.
     pub fn settings(&self) -> &super::TrackingSettings {
         &self.settings

@@ -89,7 +89,7 @@ fn banner_kind(state: &AppState) -> BannerKind {
         Phase::Review => BannerKind::Done,
         Phase::Idle => match state.mode() {
             Mode::PlacingSeed => BannerKind::ActionNeeded,
-            Mode::ViewOnly if state.prepass_notice().is_some() && state.seed.is_none() => {
+            Mode::ViewOnly if state.prepass_notice().is_some() && state.seed().is_none() => {
                 BannerKind::ActionNeeded
             }
             Mode::Calibrating { .. } => BannerKind::ActionNeeded,

@@ -21,7 +21,7 @@ const REP_COL_X: [f32; 6] = [8.0, 26.0, 64.0, 102.0, 140.0, 178.0];
 const REP_PLAY_WIDTH: f32 = 24.0;
 
 /// What a click inside the rep table asked for, resolved after the render
-/// loop (the rows borrow `state.results` immutably while drawing).
+/// loop (the rows borrow `state.results()` immutably while drawing).
 enum RepTableAction {
     /// Row click: select + jump (the mock's `onSelect`).
     Select(usize),
@@ -43,7 +43,7 @@ pub fn rep_table(ui: &mut egui::Ui, state: &mut AppState) {
     }
 
     let rows: Vec<Row> = {
-        let Some(results) = &state.results else {
+        let Some(results) = state.results() else {
             return;
         };
         if results.metrics.is_empty() {
@@ -63,7 +63,7 @@ pub fn rep_table(ui: &mut egui::Ui, state: &mut AppState) {
                 format!("{}", v.round() as i64)
             }
         };
-        let (num, den) = (state.metadata.fps_num, state.metadata.fps_den);
+        let (num, den) = (state.metadata().fps_num, state.metadata().fps_den);
         results
             .metrics
             .iter()
@@ -84,7 +84,7 @@ pub fn rep_table(ui: &mut egui::Ui, state: &mut AppState) {
                     })
                     .unwrap_or_else(|| "—".to_string()),
                 clip_armed: state.rep_clip() == Some(i),
-                selected: state.selected_rep == Some(i),
+                selected: state.selected_rep() == Some(i),
             })
             .collect()
     };

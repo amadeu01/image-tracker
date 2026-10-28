@@ -132,7 +132,7 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
 
                 ui.separator();
 
-                let paused = state.tracking_run.session_state
+                let paused = state.tracking_run().session_state
                     == Some(tracker_core::SessionState::NeedsReseed);
                 if paused {
                     // Nudge the user straight into placing a new seed on the
@@ -141,8 +141,8 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                         state.set_mode(Mode::PlacingSeed);
                     }
                     let ready = state
-                        .seed
-                        .map(|s| Some(s.frame_index) == state.tracking_run.last_frame_index)
+                        .seed()
+                        .map(|s| Some(s.frame_index) == state.tracking_run().last_frame_index)
                         .unwrap_or(false);
                     ui.colored_label(egui::Color32::YELLOW, "tracking paused: click a new seed");
                     if ui

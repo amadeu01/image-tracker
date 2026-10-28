@@ -245,6 +245,16 @@ pub fn format_clip_time(frame: u64, fps_num: u64, fps_den: u64) -> String {
 }
 
 impl AppState {
+    /// Derived velocity/reps/metrics, once a run is done.
+    pub fn results(&self) -> Option<&SessionResults> {
+        self.results.as_ref()
+    }
+
+    /// The selected rep (0-based), if any.
+    pub fn selected_rep(&self) -> Option<usize> {
+        self.selected_rep
+    }
+
     pub fn display_mode(&self) -> DisplayMode {
         self.display_mode
     }

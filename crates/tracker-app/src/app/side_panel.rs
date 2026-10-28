@@ -133,7 +133,7 @@ pub fn show(ctx: &egui::Context, state: Option<&mut AppState>) {
                 section_card(ui, |ui| {
                     super::settings_section::tracking_settings_section(ui, state)
                 });
-                if state.results.is_some() {
+                if state.results().is_some() {
                     ui.add_space(12.0);
                     section_card(ui, |ui| results_section(ui, state));
                 }
@@ -201,29 +201,29 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
 
     ui.label(egui::RichText::new("Video").strong());
     let name = state
-        .video_path
+        .video_path()
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| state.video_path.display().to_string());
+        .unwrap_or_else(|| state.video_path().display().to_string());
     kv_row(ui, "file", &name);
     kv_row(
         ui,
         "frame",
         &format!(
             "{} / {}",
-            state.current_frame,
-            state.metadata.frame_count.unwrap_or(0).saturating_sub(1)
+            state.current_frame(),
+            state.metadata().frame_count.unwrap_or(0).saturating_sub(1)
         ),
     );
     kv_row(
         ui,
         "fps",
-        &format!("{}/{}", state.metadata.fps_num, state.metadata.fps_den),
+        &format!("{}/{}", state.metadata().fps_num, state.metadata().fps_den),
     );
 
     ui.add_space(6.0);
     ui.label(egui::RichText::new("Seed").strong());
-    match &state.seed {
+    match state.seed() {
         Some(seed) => {
             kv_row(
                 ui,
@@ -245,14 +245,14 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
 
     ui.add_space(6.0);
     ui.label(egui::RichText::new("Calibration").strong());
-    match &state.calibration {
+    match state.calibration() {
         Some(cal) => kv_row(ui, "scale", &format!("{:.1} px/m", cal.px_per_meter())),
         None => kv_row(ui, "scale", "not set"),
     }
 
     ui.add_space(6.0);
     ui.label(egui::RichText::new("Tracking").strong());
-    let run = &state.tracking_run;
+    let run = &state.tracking_run();
     let is_error = run.error.is_some();
     let is_paused = run.session_state == Some(tracker_core::SessionState::NeedsReseed);
     let is_searching = run.is_searching();
@@ -318,7 +318,7 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
 
 /// Results section (task 10.3, headline cards + stop-set banner + loss
 /// column added 13.5), shown only once a run has finished
-/// (`state.results.is_some()`, the Review step). Three headline cards
+/// (`state.results().is_some()`, the Review step). Three headline cards
 /// (REPS / SET TIME / VEL. LOSS, per the design), a "Stop set recommended"
 /// banner once any rep's loss crosses `state.settings().stop_threshold_pct`,
 /// an uncalibrated-units chip, a per-rep depth/peak/mean/loss table, a
@@ -326,7 +326,7 @@ fn status_section(ui: &mut egui::Ui, state: &AppState) {
 /// failed (10.9's GUI seam) — a warning in place of the table rather than a
 /// silent empty one.
 fn results_section(ui: &mut egui::Ui, state: &mut AppState) {
-    let Some(results) = &state.results else {
+    let Some(results) = state.results() else {
         return;
     };
     let velocity_ok = results.velocity.is_ok();
@@ -448,11 +448,7 @@ fn results_section(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(6.0);
     // Re-borrowed (`ResultsQuality` is `Copy`) rather than reusing the
     // `results` binding from above: `rep_table` needed `&mut state`.
-    let q = state
-        .results
-        .as_ref()
-        .map(|r| r.quality)
-        .unwrap_or_default();
+    let q = state.results().map(|r| r.quality).unwrap_or_default();
     ui.label(egui::RichText::new("Quality").strong());
     kv_row(ui, "gaps", &q.gap_count.to_string());
     kv_row(ui, "reseeds", &q.reseed_count.to_string());
@@ -537,12 +533,12 @@ fn open_containing_folder(path: &std::path::Path) {
 
 fn events_section(ui: &mut egui::Ui, state: &AppState) {
     section_label(ui, "Events");
-    if state.events.is_empty() {
+    if state.events().is_empty() {
         ui.weak("(none yet)");
         return;
     }
     let dark_mode = ui.visuals().dark_mode;
-    for event in state.events.iter().rev() {
+    for event in state.events().iter().rev() {
         let color = match event.level {
             EventLevel::Error => palette::status_color(dark_mode, StatusKind::Error),
             EventLevel::Warn => palette::status_color(dark_mode, StatusKind::Warn),

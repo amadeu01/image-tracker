@@ -23,7 +23,7 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
     if frame_indices.is_empty() {
         return;
     }
-    let current_frame = app.state.as_ref().map(|s| s.current_frame).unwrap_or(0);
+    let current_frame = app.state.as_ref().map(|s| s.current_frame()).unwrap_or(0);
     let highlighted = thumbnail_strip::nearest_slot(&frame_indices, current_frame);
 
     // Task 13.7: once results exist the rep-segment scrub is the primary
@@ -33,7 +33,7 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
     let has_results = app
         .state
         .as_ref()
-        .map(|s| s.results.is_some())
+        .map(|s| s.results().is_some())
         .unwrap_or(false);
     let open = app.filmstrip_override.unwrap_or(!has_results);
 

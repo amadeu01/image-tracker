@@ -58,6 +58,29 @@ impl WorkflowStep {
 }
 
 impl AppState {
+    /// Path of the video this session is for.
+    pub fn video_path(&self) -> &std::path::Path {
+        &self.video_path
+    }
+
+    pub fn metadata(&self) -> &crate::ffprobe::VideoMetadata {
+        &self.metadata
+    }
+
+    /// The frame currently shown / scrubbed to.
+    pub fn current_frame(&self) -> u64 {
+        self.current_frame
+    }
+
+    /// The Seed, once placed.
+    pub fn seed(&self) -> Option<Seed> {
+        self.seed
+    }
+
+    pub fn calibration(&self) -> Option<&tracker_core::Calibration> {
+        self.calibration.as_ref()
+    }
+
     /// The current click mode.
     pub fn mode(&self) -> Mode {
         self.mode

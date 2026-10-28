@@ -254,18 +254,18 @@ impl TrackingSettings {
 /// group) rather than separate structs, so every field stays directly on
 /// `AppState` and no call site changed.
 pub struct AppState {
-    pub video_path: PathBuf,
-    pub metadata: VideoMetadata,
+    video_path: PathBuf,
+    metadata: VideoMetadata,
     // -- session.rs: mode / seed / calibration / frame position ---------
     mode: Mode,
-    pub current_frame: u64,
+    current_frame: u64,
     /// The Seed, once placed (task 2.4). `None` until the user clicks in
     /// `Mode::PlacingSeed`.
-    pub seed: Option<Seed>,
+    seed: Option<Seed>,
     /// The resolved Calibration (task 2.5), once both points have been
     /// clicked and the segment accepted. `None` until then; overwritten each
     /// time a new pair is completed.
-    pub calibration: Option<tracker_core::Calibration>,
+    calibration: Option<tracker_core::Calibration>,
     /// The two points of the most recently completed calibration pair
     /// (success or failure), so the UI can draw a line between them even
     /// after the pair has reset for a potential third click.
@@ -290,15 +290,15 @@ pub struct AppState {
     /// reasoning as `bar_path`/`results`), since callers such as the bottom
     /// status bar read `tracking_run.error`/`session_state` after `job` has
     /// already gone back to `Job::Idle`.
-    pub tracking_run: TrackingRunState,
+    tracking_run: TrackingRunState,
     /// The completed `BarPath`, once a tracking run reaches clean
     /// end-of-video. Consumed by milestone 3 (overlay render / export).
-    pub bar_path: Option<tracker_core::BarPath>,
+    bar_path: Option<tracker_core::BarPath>,
     /// Velocity/reps/metrics derived from `bar_path` once a run reaches
     /// `Done` (task 10.3) — `None` until then, and again on a fresh
     /// "New session" reset. The Review step's Results section is built
     /// from this, not from re-deriving anything from `bar_path` itself.
-    pub results: Option<SessionResults>,
+    results: Option<SessionResults>,
     /// The tracker `suggest_tracker` recommends for the current Seed (task
     /// 4.3), computed as soon as the Seed is placed so the status bar can
     /// tell the user which tracker Track will use before they click it.
@@ -329,7 +329,7 @@ pub struct AppState {
     /// Fed from the same call sites that already emit `tracing` breadcrumbs,
     /// so the side panel gives on-screen visibility into the same history
     /// the log file has.
-    pub events: VecDeque<AppEvent>,
+    events: VecDeque<AppEvent>,
     /// When this `AppState` was created; used to timestamp `events`.
     start_time: Instant,
     /// User-editable tracker kind/filter chain/tuning (task 11.3), read by
@@ -366,7 +366,7 @@ pub struct AppState {
     /// read this same field. `None` when nothing is selected; cleared with
     /// `results` on retrack/new session/discard (a stale index into a new
     /// run's reps would silently select the wrong rep).
-    pub selected_rep: Option<usize>,
+    selected_rep: Option<usize>,
     /// The rep whose *clip* is active (13.3's ▶ per-rep playback) — drives
     /// the scrub bar's in/out markers, which 13.2 already draws. Distinct
     /// from `selected_rep` per the design mock: clicking a segment/row
@@ -388,6 +388,11 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Recent app events, newest last.
+    pub fn events(&self) -> &VecDeque<AppEvent> {
+        &self.events
+    }
+
     pub fn new(video_path: PathBuf, metadata: VideoMetadata) -> Self {
         Self {
             video_path,

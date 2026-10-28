@@ -233,7 +233,7 @@ impl TrackerApp {
 
     /// Drains the decode worker's reply channel (task 18.1), uploading a
     /// texture when the arriving frame is the one currently wanted
-    /// (`state.current_frame`) and resolving a pending seed suggestion
+    /// (`state.current_frame()`) and resolving a pending seed suggestion
     /// (the G2 fix — see `pending_seed_suggestion`'s doc comment) when its
     /// frame arrives. Returns `true` if anything was processed, so `update`
     /// knows to request a repaint, mirroring `poll_thumbnails`.
@@ -252,7 +252,7 @@ impl TrackerApp {
                 DecodeMessage::Decoded { frame_index, frame } => {
                     self.remember_frame(frame_index, frame.clone());
                     if let Some(state) = &mut self.state {
-                        if frame_index == state.current_frame {
+                        if frame_index == state.current_frame() {
                             let size = [frame.width() as usize, frame.height() as usize];
                             let image = egui::ColorImage::from_rgb(size, frame.rgb());
                             let handle = ctx.load_texture(
@@ -283,7 +283,7 @@ impl TrackerApp {
                 } => {
                     tracing::error!(frame = frame_index, error = %message, "failed to decode frame");
                     if let Some(state) = &mut self.state {
-                        if frame_index == state.current_frame {
+                        if frame_index == state.current_frame() {
                             state.set_status(format!(
                                 "failed to decode frame {frame_index}: {message}"
                             ));
@@ -404,7 +404,7 @@ impl TrackerApp {
     }
 
     /// Requests the currently-wanted frame from the decode worker if the
-    /// displayed texture doesn't already match `state.current_frame` (task
+    /// displayed texture doesn't already match `state.current_frame()` (task
     /// 18.1, replacing the synchronous `FrameCache::get` this used to call
     /// directly — see `docs/gui-threading.md` finding G1). Never decodes
     /// anything itself: if the UI-side `frames` cache already has the
@@ -417,20 +417,20 @@ impl TrackerApp {
         let Some(state) = &mut self.state else {
             return;
         };
-        if self.texture_frame == Some(state.current_frame) {
+        if self.texture_frame == Some(state.current_frame()) {
             return; // already showing the right frame
         }
-        if let Some(frame) = self.frames.get(&state.current_frame).cloned() {
+        if let Some(frame) = self.frames.get(&state.current_frame()).cloned() {
             let size = [frame.width() as usize, frame.height() as usize];
             let image = egui::ColorImage::from_rgb(size, frame.rgb());
             let handle = ctx.load_texture("current-frame", image, egui::TextureOptions::LINEAR);
             self.texture = Some(handle);
-            self.texture_frame = Some(state.current_frame);
+            self.texture_frame = Some(state.current_frame());
             state.clear_status();
             return;
         }
         if let Some(decode) = &self.decode {
-            decode.want(state.current_frame);
+            decode.want(state.current_frame());
         }
     }
 }
@@ -491,13 +491,16 @@ impl eframe::App for TrackerApp {
             // otherwise the loop outruns the async decode and every
             // texture reply arrives for an already-stale `current_frame`,
             // which `poll_decode` then silently drops (see that method's
-            // `frame_index == state.current_frame` check), leaving the
+            // `frame_index == state.current_frame()` check), leaving the
             // video frame frozen under a still-advancing path overlay.
             // While waiting on a still-in-flight decode, keep repainting
             // so the wait doesn't stall on some unrelated input event.
             if state.rep_clip().is_some() {
                 if state.advance_rep_clip(self.texture_frame) {
-                    let (num, den) = (state.metadata.fps_num.max(1), state.metadata.fps_den.max(1));
+                    let (num, den) = (
+                        state.metadata().fps_num.max(1),
+                        state.metadata().fps_den.max(1),
+                    );
                     ctx.request_repaint_after(std::time::Duration::from_secs_f64(
                         den as f64 / num as f64,
                     ));
@@ -518,7 +521,7 @@ impl eframe::App for TrackerApp {
         // show up promptly instead of waiting for some unrelated input to
         // trigger the next repaint.
         if let Some(state) = &self.state {
-            if self.texture_frame != Some(state.current_frame) {
+            if self.texture_frame != Some(state.current_frame()) {
                 ctx.request_repaint();
             }
         }
@@ -564,10 +567,10 @@ fn handle_frame_step_shortcuts(ctx: &egui::Context, state: Option<&mut AppState>
     });
     let step: i64 = if shift { 10 } else { 1 };
     if left {
-        state.set_frame(state.current_frame as i64 - step);
+        state.set_frame(state.current_frame() as i64 - step);
     }
     if right {
-        state.set_frame(state.current_frame as i64 + step);
+        state.set_frame(state.current_frame() as i64 + step);
     }
 }
 

@@ -90,7 +90,7 @@ fn chart_value_range(means: &[f64], thresholds: &[f64]) -> (f64, f64) {
 /// shared selection the rep table rows and scrub segments use.
 pub fn velocity_chart(ui: &mut egui::Ui, state: &mut AppState) {
     let (means, losses, calibrated, unit_label) = {
-        let Some(results) = &state.results else {
+        let Some(results) = state.results() else {
             return;
         };
         if results.metrics.is_empty() {
@@ -113,7 +113,7 @@ pub fn velocity_chart(ui: &mut egui::Ui, state: &mut AppState) {
     };
     let n = means.len();
     let threshold = state.settings().stop_threshold_pct;
-    let selected = state.selected_rep;
+    let selected = state.selected_rep();
     let dark_mode = ui.visuals().dark_mode;
     let chrome = palette::chrome_palette(dark_mode);
     let weak_color = ui.visuals().weak_text_color();
