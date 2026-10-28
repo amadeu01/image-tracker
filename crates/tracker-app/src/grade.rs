@@ -25,6 +25,18 @@ use tracker_core::{
 
 pub type GradeError = String;
 
+/// A plate diameter must be a positive finite pixel count: it is a divisor
+/// (errors are expressed in plate-diameters) and the tolerance scale.
+fn check_plate_px(v: f64, what: &str) -> Result<f64, GradeError> {
+    if v.is_finite() && v > 0.0 {
+        Ok(v)
+    } else {
+        Err(format!(
+            "{what}: plate_px must be a positive finite number of pixels, got {v}"
+        ))
+    }
+}
+
 /// Apparent plate diameter in pixels, used to express errors in
 /// plate-diameters. Default measured on the v3/v4 rig (464x832 footage):
 /// the circle fit in `docs/design/tracking-audit-2026-07-21.md` put the
@@ -77,6 +89,7 @@ fn lookup_clip(manifest_text: &str, clip: &str) -> Result<(ClipExpectation, f64)
                 "clip `{clip}`: plate_px is not set in the manifest; the owner must fill plate_px (no default is assumed)"
             )
         })?;
+    let plate = check_plate_px(plate, &format!("clip `{clip}`"))?;
     let lift = entry
         .get("lift")
         .and_then(serde_json::Value::as_str)
@@ -106,6 +119,7 @@ pub fn parse_grade_args(args: &[String]) -> Result<GradeArgs, GradeError> {
             "--plate-px" => {
                 let v = args.get(i + 1).ok_or("--plate-px needs a value")?;
                 plate = v.parse().map_err(|_| format!("bad --plate-px: {v}"))?;
+                check_plate_px(plate, "--plate-px")?;
                 plate_explicit = true;
                 i += 2;
             }
@@ -284,26 +298,25 @@ fn sibling(points_csv: &Path, suffix: &str) -> PathBuf {
     points_csv.with_extension(suffix.trim_start_matches('.'))
 }
 
-/// What the auto run reported for the lift: `Ok(name)` or `Err(reason)` when
+/// What the auto run reported for the lift (from the `<stem>.run.json` sidecar): `Ok(name)` or `Err(reason)` when
 /// unknown / not recorded. An `Err` starting with `unknown:` means the run
 /// itself said unknown (a MISS); any other `Err` means no data (UNKNOWN).
-fn read_run_lift(json_path: &Path) -> Result<String, String> {
-    let text =
-        std::fs::read_to_string(json_path).map_err(|_| format!("no {}", json_path.display()))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| "bad export json".to_string())?;
-    let Some(lift) = v.get("lift").and_then(serde_json::Value::as_str) else {
-        return Err("export has no lift field".into());
+fn read_run_lift(points_csv: &Path) -> Result<String, String> {
+    let sidecar = crate::run_info::sidecar_path(points_csv);
+    let info = match crate::run_info::read_run_info(&sidecar) {
+        Ok(Some(info)) => info,
+        Ok(None) => return Err("no run info: export has no .run.json sidecar".into()),
+        Err(e) => return Err(format!("unreadable run info: {e}")),
     };
-    if let Some(rest) = lift.strip_prefix("unknown") {
-        let rest = rest.trim_start_matches([':', ' ']);
-        let reason = v
-            .get("lift_reason")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(rest);
+    if let Some(rest) = info.lift.strip_prefix("unknown") {
+        let reason = if info.lift_reason.is_empty() {
+            rest.trim_start_matches([':', ' '])
+        } else {
+            info.lift_reason.as_str()
+        };
         return Err(format!("unknown:{reason}"));
     }
-    Ok(lift.to_string())
+    Ok(info.lift)
 }
 
 /// Result line for the LIFT TYPE check.
@@ -340,7 +353,7 @@ fn read_run_reps(path: &Path) -> Option<usize> {
 }
 
 fn print_run_checks(points_csv: &Path, exp: &ClipExpectation) {
-    let lift = read_run_lift(&sibling(points_csv, ".json"));
+    let lift = read_run_lift(points_csv);
     let reps = read_run_reps(&sibling(points_csv, ".reps.json"));
     println!();
     println!("run checks ({})", exp.clip);
@@ -497,6 +510,71 @@ mod tests {
             rep_check(None, Some(4)),
             "UNKNOWN (manifest reps not filled)"
         );
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("grade-run-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn read_run_lift_reads_lift_and_reason_from_the_sidecar() {
+        let d = temp_dir("ok");
+        std::fs::write(
+            d.join("c.run.json"),
+            r#"{"lift":"deadlift","lift_reason":"r","verified":false,"seed_frame":1,"seed":[1.0,2.0],"plate_px":80.0}"#,
+        )
+        .unwrap();
+        assert_eq!(read_run_lift(&d.join("c.csv")), Ok("deadlift".to_string()));
+        std::fs::write(
+            d.join("u.run.json"),
+            r#"{"lift":"unknown","lift_reason":"ambiguous","verified":false,"seed_frame":1,"seed":[1.0,2.0],"plate_px":80.0}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_run_lift(&d.join("u.csv")),
+            Err("unknown:ambiguous".to_string())
+        );
+    }
+
+    #[test]
+    fn read_run_lift_without_sidecar_is_unknown_no_run_info() {
+        let d = temp_dir("absent");
+        let e = read_run_lift(&d.join("nope.csv")).unwrap_err();
+        assert!(
+            !e.starts_with("unknown:") && e.contains("no run info"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn read_run_lift_corrupt_sidecar_is_a_clear_message() {
+        let d = temp_dir("bad");
+        std::fs::write(d.join("c.run.json"), "{not json").unwrap();
+        let e = read_run_lift(&d.join("c.csv")).unwrap_err();
+        assert!(
+            e.contains("c.run.json") && !e.starts_with("unknown:"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn non_positive_or_non_finite_plate_px_is_a_clear_error() {
+        for bad in ["0", "-5", "NaN", "inf"] {
+            let e = parse_grade_args(&s(&["p.csv", "t.csv", "--plate-px", bad])).unwrap_err();
+            assert!(e.contains("plate"), "{bad}: {e}");
+        }
+        let m = temp_manifest("zeroplate", r#"{"v1": {"lift": "squat", "plate_px": 0}}"#);
+        let e = parse_grade_args(&s(&[
+            "--manifest",
+            m.to_str().unwrap(),
+            "--clip",
+            "v1",
+            "x.csv",
+        ]))
+        .unwrap_err();
+        assert!(e.contains("v1") && e.contains("plate_px"), "{e}");
     }
 
     #[test]

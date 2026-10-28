@@ -12,6 +12,7 @@ pub mod frame_cache;
 pub mod grade;
 pub mod overlay_export;
 pub mod prepass;
+pub mod run_info;
 pub mod screen_map;
 pub mod seek_source;
 pub mod telemetry;
