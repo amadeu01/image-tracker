@@ -164,6 +164,7 @@ impl AppState {
             fps_den: self.metadata.fps_den,
             seed_frame_index: seed.frame_index,
             seed_position: seed.position,
+            lift: tracker_core::LiftType::Unknown,
             tracker_config: tracking::tracker_config(tuning.clone()),
             session_config: tracking::session_config(tuning.clone()),
             tracker_selection: self.settings.tracker_selection,

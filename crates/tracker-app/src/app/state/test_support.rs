@@ -138,6 +138,7 @@ pub(super) fn dummy_tracking_handle() -> TrackingHandle {
         fps_den: 1,
         seed_frame_index: 0,
         seed_position: tracker_core::Point::new(0.0, 0.0),
+        lift: tracker_core::LiftType::Unknown,
         tracker_config: tracking::default_tracker_config(),
         session_config: tracking::default_session_config(),
         tracker_selection: tracking::TrackerSelection::Auto,

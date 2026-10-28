@@ -75,6 +75,7 @@ fn run_tracking_worker(
         fps_den,
         seed_frame_index,
         seed_position,
+        lift: _,
         tracker_config,
         session_config,
         tracker_selection,

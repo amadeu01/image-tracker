@@ -12,8 +12,8 @@ use std::path::PathBuf;
 
 use tracker_core::{
     all_rep_metrics, export_csv, export_json, export_reps_csv, export_reps_json, hue_histogram,
-    recommend_marker_hues, segment_reps, velocity_series, Calibration, HueHistogramConfig, Point,
-    Preprocessor, Source,
+    recommend_marker_hues, segment_reps_for_lift, velocity_series, Calibration, HueHistogramConfig,
+    LiftType, Point, Preprocessor, Source,
 };
 
 use crate::ffprobe;
@@ -26,8 +26,10 @@ use crate::tracking;
 #[derive(Debug)]
 pub struct TrackArgs {
     pub video_path: PathBuf,
-    pub seed_frame: u64,
-    pub seed: Point,
+    /// `--seed-frame`/`--seed` are given together (manual) or not at all
+    /// (auto: the pre-pass proposes the seed and the lift type).
+    pub seed_frame: Option<u64>,
+    pub seed: Option<Point>,
     pub out_dir: PathBuf,
     /// Optional tracker tuning overrides (task 3.6): `--patch-radius`,
     /// `--search-radius`, `--min-score`, `--update-threshold`,
@@ -201,16 +203,134 @@ pub fn parse_track_args(args: &[String]) -> Result<TrackArgs, CliError> {
         }
     }
 
+    if seed_frame.is_some() != seed.is_some() {
+        return Err(
+            "--seed-frame and --seed must be given together (or neither, to auto-detect the bar)"
+                .into(),
+        );
+    }
+
     Ok(TrackArgs {
         video_path: video_path.ok_or("missing <video> argument")?,
-        seed_frame: seed_frame.ok_or("missing --seed-frame")?,
-        seed: seed.ok_or("missing --seed")?,
+        seed_frame,
+        seed,
         out_dir: out_dir.ok_or("missing --out")?,
         tuning,
         tracker_selection,
         cal_points,
         cal_length_m,
     })
+}
+
+/// What the auto pre-pass decided, beyond the seed itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoSeedInfo {
+    pub lift_reason: String,
+    pub plate_px: f64,
+    pub confidence: f64,
+}
+
+/// The seed a run tracks from, plus the lift it implies. `auto` is `Some`
+/// only when the pre-pass proposed the seed (such a run is unverified).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedSeed {
+    pub frame_index: u64,
+    pub position: Point,
+    pub lift: LiftType,
+    pub auto: Option<AutoSeedInfo>,
+}
+
+impl ResolvedSeed {
+    /// A user-supplied seed: lift unknown (today's behaviour), no provenance.
+    pub fn manual(frame_index: u64, position: Point) -> Self {
+        Self {
+            frame_index,
+            position,
+            lift: LiftType::Unknown,
+            auto: None,
+        }
+    }
+}
+
+/// Resolves the seed for a run. `Some(manual)` is used as-is without
+/// touching the decoder; `None` runs the unseeded pre-pass over
+/// `frame_count` frames and accepts its proposal. No proposal is a clean
+/// error, never a panic.
+pub fn resolve_seed<D>(
+    manual: Option<(u64, Point)>,
+    decoder: &mut D,
+    frame_count: u64,
+    on_progress: impl FnMut(u64, u64),
+) -> Result<ResolvedSeed, CliError>
+where
+    D: FrameDecoder<Frame = tracker_core::Frame>,
+    D::Error: std::fmt::Display,
+{
+    if let Some((frame_index, position)) = manual {
+        return Ok(ResolvedSeed::manual(frame_index, position));
+    }
+    let proposal = crate::prepass::run_prepass(
+        decoder,
+        frame_count,
+        crate::prepass::DEFAULT_PREPASS_STRIDE,
+        on_progress,
+    )?;
+    let Some(p) = proposal else {
+        return Err(
+            "no bar could be found automatically (no moving plate-like circle); \
+             pass --seed-frame and --seed to track manually"
+                .into(),
+        );
+    };
+    Ok(ResolvedSeed {
+        frame_index: p.frame_index,
+        position: p.position,
+        lift: p.lift.lift,
+        auto: Some(AutoSeedInfo {
+            lift_reason: p.lift.reason,
+            plate_px: p.plate_diameter_px,
+            confidence: p.confidence,
+        }),
+    })
+}
+
+/// Writes `<stem>.run.json` for auto runs; manual runs write nothing
+/// (`Ok(None)`), and a missing sidecar reads back as "verified".
+pub fn write_run_sidecar(
+    out_dir: &std::path::Path,
+    stem: &str,
+    seed: &ResolvedSeed,
+) -> Result<Option<PathBuf>, CliError> {
+    let Some(auto) = &seed.auto else {
+        return Ok(None);
+    };
+    let path = out_dir.join(format!("{stem}.run.json"));
+    crate::run_info::write_run_info(
+        &path,
+        &crate::run_info::RunInfo {
+            lift: crate::run_info::lift_name(seed.lift).to_string(),
+            lift_reason: auto.lift_reason.clone(),
+            verified: false,
+            seed_frame: seed.frame_index,
+            seed: [seed.position.x, seed.position.y],
+            plate_px: auto.plate_px,
+        },
+    )?;
+    Ok(Some(path))
+}
+
+/// Rep segmentation honouring the lift's phase order (a deadlift is
+/// concentric-first); `Unknown` keeps the eccentric-first default.
+fn segment_run_reps(
+    lift: LiftType,
+    velocity: &[tracker_core::VelocitySample],
+    calibrated: bool,
+) -> Vec<tracker_core::Rep> {
+    segment_reps_for_lift(
+        lift,
+        velocity,
+        tracking::rep_segmentation_config(calibrated),
+    )
 }
 
 /// Runs the `track` subcommand: probe -> track (blocking, on this thread) ->
@@ -223,14 +343,54 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
     std::fs::create_dir_all(&args.out_dir)
         .map_err(|e| format!("failed to create out dir {}: {e}", args.out_dir.display()))?;
 
+    let manual = args.seed_frame.zip(args.seed);
+    let seed = if let Some((frame_index, position)) = manual {
+        ResolvedSeed::manual(frame_index, position)
+    } else {
+        let frame_count = metadata.frame_count.ok_or_else(|| {
+            "could not determine the video's frame count for auto-detection; \
+             pass --seed-frame and --seed manually"
+                .to_string()
+        })?;
+        let mut decoder = SeekingFrameDecoder::new(
+            args.video_path.clone(),
+            metadata.display_width(),
+            metadata.display_height(),
+            metadata.fps_num,
+            metadata.fps_den,
+        );
+        let mut last_decile = 0;
+        let seed = resolve_seed(None, &mut decoder, frame_count, |done, total| {
+            let decile = done * 10 / total.max(1);
+            if decile > last_decile {
+                last_decile = decile;
+                eprintln!("pre-pass: {}% ({done}/{total} samples)", decile * 10);
+            }
+        })?;
+        if let Some(auto) = &seed.auto {
+            println!(
+                "lift: {} ({})",
+                crate::run_info::lift_name(seed.lift),
+                auto.lift_reason
+            );
+            println!(
+                "seed proposal: frame {} at ({:.1}, {:.1}), plate {:.1} px, confidence {:.2}",
+                seed.frame_index, seed.position.x, seed.position.y, auto.plate_px, auto.confidence
+            );
+            println!("UNVERIFIED: seed was auto-proposed; confirm or pass --seed-frame/--seed");
+        }
+        seed
+    };
+
     let handle = tracking::spawn_tracking(tracking::TrackingJob {
         video_path: args.video_path.clone(),
         width: metadata.display_width(),
         height: metadata.display_height(),
         fps_num: metadata.fps_num,
         fps_den: metadata.fps_den,
-        seed_frame_index: args.seed_frame,
-        seed_position: args.seed,
+        seed_frame_index: seed.frame_index,
+        seed_position: seed.position,
+        lift: seed.lift,
         tracker_config: tracking::tracker_config(args.tuning.clone()),
         session_config: tracking::session_config(args.tuning.clone()),
         tracker_selection: args.tracker_selection,
@@ -373,10 +533,9 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
     // m/s, so with a `Calibration` the dead-band must be overridden much
     // smaller (per `rep.rs`'s own doc comment) or every sample stays
     // `Idle` and zero reps are ever detected.
-    let rep_config = tracking::rep_segmentation_config(cal.is_some());
     let reps = velocity
         .as_ref()
-        .map(|v| segment_reps(v, rep_config))
+        .map(|v| segment_run_reps(seed.lift, v, cal.is_some()))
         .unwrap_or_default();
     let metrics = velocity
         .as_ref()
@@ -403,6 +562,9 @@ pub fn run_track(args: TrackArgs) -> Result<(), CliError> {
         .map_err(|e| format!("failed to write {}: {e}", reps_csv_path.display()))?;
     std::fs::write(&reps_json_path, export_reps_json(&metrics))
         .map_err(|e| format!("failed to write {}: {e}", reps_json_path.display()))?;
+    if let Some(p) = write_run_sidecar(&args.out_dir, stem, &seed)? {
+        println!("run info (UNVERIFIED) -> {}", p.display());
+    }
     tracing::info!(
         csv_path = %csv_path.display(),
         json_path = %json_path.display(),
@@ -598,8 +760,8 @@ mod tests {
 
         let parsed = parse_track_args(&args).unwrap();
         assert_eq!(parsed.video_path, PathBuf::from("video.mp4"));
-        assert_eq!(parsed.seed_frame, 42);
-        assert_eq!(parsed.seed, Point::new(10.5, 20.25));
+        assert_eq!(parsed.seed_frame, Some(42));
+        assert_eq!(parsed.seed, Some(Point::new(10.5, 20.25)));
         assert_eq!(parsed.out_dir, PathBuf::from("out/dir"));
         assert_eq!(parsed.tuning.patch_radius, None);
         assert_eq!(parsed.tuning.search_radius, None);
@@ -959,5 +1121,144 @@ mod tests {
             .map(String::from)
             .collect();
         assert!(parse_advise_args(&args).is_err());
+    }
+
+    // --- auto mode (no seed) ---
+
+    fn sv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn track_args_without_seed_means_auto() {
+        let a = parse_track_args(&sv(&["v.mp4", "--out", "o"])).unwrap();
+        assert_eq!(a.seed_frame, None);
+        assert_eq!(a.seed, None);
+    }
+
+    #[test]
+    fn track_args_with_only_one_of_seed_and_seed_frame_is_a_usage_error() {
+        let e = parse_track_args(&sv(&["v.mp4", "--seed-frame", "3", "--out", "o"])).unwrap_err();
+        assert!(e.contains("--seed-frame") && e.contains("--seed"), "{e}");
+        let e = parse_track_args(&sv(&["v.mp4", "--seed", "1,2", "--out", "o"])).unwrap_err();
+        assert!(e.contains("--seed-frame") && e.contains("--seed"), "{e}");
+    }
+
+    #[test]
+    fn track_args_with_seed_is_unchanged() {
+        let a = parse_track_args(&sv(&[
+            "v.mp4",
+            "--seed-frame",
+            "3",
+            "--seed",
+            "1.5,2",
+            "--out",
+            "o",
+        ]))
+        .unwrap();
+        assert_eq!(
+            (a.seed_frame, a.seed),
+            (Some(3), Some(Point::new(1.5, 2.0)))
+        );
+    }
+
+    struct NoPlate;
+    impl FrameDecoder for NoPlate {
+        type Error = String;
+        type Frame = tracker_core::Frame;
+        fn decode_frame(&mut self, _i: u64) -> Result<Self::Frame, String> {
+            Ok(tracker_core::Frame::new(120, 160, vec![90; 120 * 160 * 3]).unwrap())
+        }
+    }
+
+    #[test]
+    fn auto_run_with_no_proposal_returns_clear_error_not_panic() {
+        let err = resolve_seed(None, &mut NoPlate, 40, |_, _| {}).unwrap_err();
+        assert!(
+            err.contains("no bar") && err.contains("--seed-frame"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn manual_seed_resolves_without_touching_the_decoder() {
+        struct Panics;
+        impl FrameDecoder for Panics {
+            type Error = String;
+            type Frame = tracker_core::Frame;
+            fn decode_frame(&mut self, _i: u64) -> Result<Self::Frame, String> {
+                panic!("manual seed must not run the pre-pass");
+            }
+        }
+        let r = resolve_seed(Some((7, Point::new(1.0, 2.0))), &mut Panics, 40, |_, _| {}).unwrap();
+        assert_eq!((r.frame_index, r.position), (7, Point::new(1.0, 2.0)));
+        assert!(r.auto.is_none());
+        assert_eq!(r.lift, tracker_core::LiftType::Unknown);
+    }
+
+    #[test]
+    fn manual_run_writes_no_sidecar() {
+        let dir = std::env::temp_dir().join(format!("cli-nosidecar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = ResolvedSeed {
+            frame_index: 0,
+            position: Point::new(0.0, 0.0),
+            lift: tracker_core::LiftType::Unknown,
+            auto: None,
+        };
+        assert_eq!(write_run_sidecar(&dir, "clip", &r).unwrap(), None);
+        assert!(!dir.join("clip.run.json").exists());
+    }
+
+    #[test]
+    fn auto_run_writes_unverified_sidecar() {
+        let dir = std::env::temp_dir().join(format!("cli-sidecar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = ResolvedSeed {
+            frame_index: 12,
+            position: Point::new(3.0, 4.0),
+            lift: tracker_core::LiftType::Deadlift,
+            auto: Some(AutoSeedInfo {
+                lift_reason: "rises from floor".into(),
+                plate_px: 88.0,
+                confidence: 0.9,
+            }),
+        };
+        let p = write_run_sidecar(&dir, "clip", &r).unwrap().unwrap();
+        let info = crate::run_info::read_run_info(&p).unwrap().unwrap();
+        assert_eq!(info.lift, "deadlift");
+        assert!(!info.verified);
+        assert_eq!(info.seed_frame, 12);
+    }
+
+    #[test]
+    fn deadlift_lift_threads_concentric_first_reps_through_segmentation() {
+        use tracker_core::{LiftType, PhaseOrder, VelocitySample, VelocityUnit};
+        let mut vys = vec![0.0; 10];
+        vys.extend(vec![-200.0; 30]); // pull
+        vys.extend(vec![200.0; 30]); // lower
+        vys.extend(vec![0.0; 10]);
+        let velocity: Vec<VelocitySample> = vys
+            .iter()
+            .enumerate()
+            .map(|(i, &vy)| VelocitySample {
+                frame_index: i as u64,
+                t_seconds: i as f64 / 30.0,
+                vx: 0.0,
+                vy,
+                speed: vy.abs(),
+                unit: VelocityUnit::PixelsPerSecond,
+                from_interpolated: false,
+            })
+            .collect();
+        let dl = segment_run_reps(LiftType::Deadlift, &velocity, false);
+        assert_eq!(dl.len(), 1);
+        assert_eq!(dl[0].order, PhaseOrder::ConcentricFirst);
+        assert_eq!(dl[0].bottom_index(), 10);
+        assert_eq!(*dl[0].concentric_span().start(), 10);
+        // Unknown keeps today's eccentric-first behaviour.
+        for r in segment_run_reps(LiftType::Unknown, &velocity, false) {
+            assert_eq!(r.order, PhaseOrder::EccentricFirst);
+        }
     }
 }
