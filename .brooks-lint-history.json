@@ -20,5 +20,16 @@
       "suggestion": 1
     },
     "scope": "whole workspace (crates/tracker-core, crates/tracker-app)"
+  },
+  {
+    "date": "2026-10-28",
+    "mode": "Architecture Audit",
+    "score": 87,
+    "findings": {
+      "critical": 0,
+      "warning": 2,
+      "suggestion": 3
+    },
+    "scope": "whole workspace after auto-lift-detection (feat/auto-lift-detection @ 39d104e)"
   }
 ]

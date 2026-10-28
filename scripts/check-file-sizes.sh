@@ -23,12 +23,8 @@ cd "$REPO_ROOT"
 THRESHOLD=800
 
 # path : reason (task that will retire this entry)
-ALLOWLIST_PATHS=(
-  "crates/tracker-app/src/tracking.rs"
-)
-ALLOWLIST_REASONS=(
-  "PLAN 20.x refactor pending"
-)
+ALLOWLIST_PATHS=()
+ALLOWLIST_REASONS=()
 
 is_allowlisted() {
   local target="$1"
