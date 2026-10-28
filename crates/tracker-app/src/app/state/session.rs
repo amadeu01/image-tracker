@@ -86,11 +86,28 @@ impl AppState {
         self.status.clear();
     }
 
-    /// Toggle between `ViewOnly` and `PlacingSeed`.
+    /// Whether a manual seed click may take effect right now. A running or
+    /// user-paused tracking run owns its seed (overwriting it would also be
+    /// meaningless), and the strategy benchmark cannot use one; but a run
+    /// the tracker itself paused with `NeedsReseed` is waiting for exactly
+    /// this click. Every other job (idle, bar search, export) allows it.
+    pub fn can_place_seed(&self) -> bool {
+        match self.job {
+            Job::Tracking { .. } => {
+                self.tracking_run.session_state == Some(tracker_core::SessionState::NeedsReseed)
+            }
+            Job::Benchmarking { .. } => false,
+            Job::Idle | Job::FindingBar { .. } | Job::Exporting { .. } => true,
+        }
+    }
+
+    /// Toggle between `ViewOnly` and `PlacingSeed`. Never arms
+    /// `PlacingSeed` while a seed click would be refused.
     pub fn toggle_placing_seed(&mut self) {
         self.mode = match self.mode {
             Mode::PlacingSeed => Mode::ViewOnly,
-            _ => Mode::PlacingSeed,
+            _ if self.can_place_seed() => Mode::PlacingSeed,
+            other => other,
         };
         tracing::info!(mode = ?self.mode, "mode changed");
     }
@@ -129,17 +146,30 @@ impl AppState {
         }
         // Overwriting the seed while a tracking/strategy run is using it is
         // nonsensical and would also reset the confirmed lift the run's
-        // results depend on, so refuse. (Every other case is unchanged.)
-        if matches!(self.job, Job::Tracking { .. } | Job::Benchmarking { .. }) {
+        // results depend on, so refuse -- and disarm the mode so the UI does
+        // not stay in a "Placing Seed" state that silently does nothing.
+        if !self.can_place_seed() {
+            self.mode = Mode::ViewOnly;
             self.push_event(
                 EventLevel::Warn,
                 "cannot place a new seed while a run is in progress".to_string(),
             );
             return;
         }
+        // A reseed after the tracker lost the bar (`NeedsReseed`) only
+        // replaces the seed: it never changes which lift this is, so the
+        // confirmed lift (and any proposal) must survive.
+        if matches!(self.job, Job::Tracking { .. }) {
+            self.set_seed_at_current_frame(position);
+            return;
+        }
         // A manual seed always wins: stop any automatic search and forget any
         // proposal and its lift (a manual seed carries no lift type).
         self.clear_seed_proposal_state();
+        self.set_seed_at_current_frame(position);
+    }
+
+    fn set_seed_at_current_frame(&mut self, position: tracker_core::Point) {
         self.seed = Some(Seed {
             position,
             frame_index: self.current_frame,

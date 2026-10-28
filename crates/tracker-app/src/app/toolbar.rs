@@ -63,10 +63,17 @@ pub fn show(ctx: &egui::Context, app: &mut TrackerApp) {
                     Mode::PlacingSeed => "Placing Seed... (click frame)",
                     Mode::Calibrating { .. } => "Place Seed",
                 };
+                // Disabled while a seed click would be refused (a run in
+                // progress, or the benchmark); `toggle_placing_seed` also
+                // refuses to arm in those states, covering the S key.
                 if ui
-                    .selectable_label(state.mode() == Mode::PlacingSeed, label)
+                    .add_enabled(
+                        state.can_place_seed(),
+                        egui::SelectableLabel::new(state.mode() == Mode::PlacingSeed, label),
+                    )
                     .on_hover_text(
-                        "click a frame to mark the object to track (S toggles this mode)",
+                        "click a frame to mark the object to track (S toggles this mode); \
+                         unavailable while a run is in progress",
                     )
                     .clicked()
                 {

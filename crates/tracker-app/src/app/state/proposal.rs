@@ -517,6 +517,121 @@ mod tests {
         assert_eq!(results.reps[0].order, PhaseOrder::ConcentricFirst);
     }
 
+    fn confirmed_tracking_state(lift: LiftType, needs_reseed: bool) -> AppState {
+        let mut state = state_with_proposal(lift);
+        state.confirm_proposal().unwrap();
+        state.job = Job::Tracking {
+            handle: super::super::test_support::dummy_tracking_handle(),
+            paused: false,
+        };
+        state.tracking_run = crate::tracking::TrackingRunState::started();
+        if needs_reseed {
+            state.tracking_run.session_state = Some(tracker_core::SessionState::NeedsReseed);
+            state.tracking_run.last_frame_index = Some(20);
+            state.set_frame(20);
+        }
+        state
+    }
+
+    /// The toolbar's "Resume enabled" predicate.
+    fn resume_ready(state: &AppState) -> bool {
+        state
+            .seed
+            .map(|s| Some(s.frame_index) == state.tracking_run.last_frame_index)
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn place_seed_during_needs_reseed_succeeds_and_enables_resume() {
+        let mut state = confirmed_tracking_state(LiftType::Deadlift, true);
+        assert!(!resume_ready(&state));
+        state.set_mode(Mode::PlacingSeed);
+        state.place_seed(Point::new(55.0, 66.0));
+        let seed = state.seed.expect("seed stored");
+        assert_eq!(seed.position, Point::new(55.0, 66.0));
+        assert_eq!(seed.frame_index, 20);
+        assert!(resume_ready(&state));
+    }
+
+    #[test]
+    fn reseed_keeps_the_confirmed_lift() {
+        let mut state = confirmed_tracking_state(LiftType::Deadlift, true);
+        state.set_mode(Mode::PlacingSeed);
+        state.place_seed(Point::new(55.0, 66.0));
+        assert_eq!(state.confirmed_lift(), LiftType::Deadlift);
+        let results = state.build_results(deadlift_bar_path());
+        assert_eq!(results.reps[0].order, PhaseOrder::ConcentricFirst);
+    }
+
+    #[test]
+    fn refused_seed_does_not_leave_placing_seed_armed() {
+        let mut state = confirmed_tracking_state(LiftType::Deadlift, false);
+        state.set_mode(Mode::PlacingSeed);
+        state.place_seed(Point::new(99.0, 99.0));
+        assert_eq!(state.mode(), Mode::ViewOnly, "refusal disarms the mode");
+        // And it cannot be armed in the first place.
+        state.toggle_placing_seed();
+        assert_eq!(state.mode(), Mode::ViewOnly);
+        assert!(!state.can_place_seed());
+    }
+
+    #[test]
+    fn benchmarking_job_still_refuses_seed() {
+        let mut state = state_with_proposal(LiftType::Squat);
+        state.confirm_proposal().unwrap();
+        let seed = state.seed;
+        state.job = Job::Benchmarking {
+            handle: super::super::test_support::dummy_benchmark_handle(&state),
+            progress: None,
+        };
+        state.toggle_placing_seed();
+        assert_eq!(state.mode(), Mode::ViewOnly);
+        state.set_mode(Mode::PlacingSeed);
+        state.place_seed(Point::new(9.0, 9.0));
+        assert_eq!(state.seed, seed);
+        assert_eq!(state.confirmed_lift(), LiftType::Squat);
+        assert_eq!(state.mode(), Mode::ViewOnly);
+    }
+
+    #[test]
+    fn place_seed_behaviour_for_every_job_variant() {
+        let mut paused = confirmed_tracking_state(LiftType::Squat, false);
+        paused.pause_tracking();
+        assert!(paused.is_paused());
+        let mut exporting = state_with_proposal(LiftType::Squat);
+        exporting.job = Job::Exporting {
+            handle: super::super::test_support::dummy_export_handle(),
+        };
+        let mut idle = state_with_proposal(LiftType::Squat);
+        idle.job = Job::Idle;
+        let cases: Vec<(&str, AppState, bool)> = vec![
+            ("Idle", idle, true),
+            ("FindingBar", state_finding_bar().0, true),
+            (
+                "Tracking running",
+                confirmed_tracking_state(LiftType::Squat, false),
+                false,
+            ),
+            ("Tracking user-paused", paused, false),
+            (
+                "Tracking NeedsReseed",
+                confirmed_tracking_state(LiftType::Squat, true),
+                true,
+            ),
+            ("Exporting", exporting, true),
+        ];
+        for (name, mut state, accepted) in cases {
+            state.set_mode(Mode::PlacingSeed);
+            let p = Point::new(123.0, 45.0);
+            state.place_seed(p);
+            assert_eq!(
+                state.seed.map(|s| s.position) == Some(p),
+                accepted,
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn progress_shows_in_the_banner() {
         let (mut state, tx, _) = state_finding_bar();

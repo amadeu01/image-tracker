@@ -182,3 +182,36 @@ pub(super) fn state_with_active_run() -> AppState {
     state.tracking_run = TrackingRunState::started();
     state
 }
+
+/// A real `BenchmarkHandle` for gating tests; points at a nonexistent video
+/// so the worker fails fast (same trick as `dummy_tracking_handle`).
+pub(super) fn dummy_benchmark_handle(state: &AppState) -> crate::bench::BenchmarkHandle {
+    crate::bench::spawn_benchmark(
+        PathBuf::from("/definitely/does/not/exist-9c.mp4"),
+        4,
+        4,
+        0,
+        tracker_core::Point::new(0.0, 0.0),
+        1,
+        1.0 / 30.0,
+        10,
+        state.settings.tuning(),
+    )
+}
+
+/// A real `ExportHandle` for gating tests. The output dir does not exist and
+/// the export never creates directories, so nothing is written.
+pub(super) fn dummy_export_handle() -> crate::export_job::ExportHandle {
+    crate::export_job::spawn_export(crate::export_job::ExportJob {
+        video_path: PathBuf::from("/definitely/does/not/exist-9c/x.mp4"),
+        width: 4,
+        height: 4,
+        fps_num: 30,
+        fps_den: 1,
+        bar_path: one_rep_bar_path(),
+        calibration: None,
+        velocity: None,
+        metrics: Vec::new(),
+        reps: Vec::new(),
+    })
+}
