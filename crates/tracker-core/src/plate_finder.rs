@@ -39,7 +39,10 @@ pub struct PlateCandidate {
     /// Centre of the small inner collar circle, when found. This is the point
     /// the Bar Point maps to.
     pub sleeve_end: Option<Point>,
-    /// Rim edge support in `[0, 1]`.
+    /// Rim score: thin radial edge pixels within 1.5 px of the refined circle,
+    /// divided by its circumference. About 1 for a complete clean rim, lower
+    /// for occluded or weak ones; deliberately not clamped, so it is a
+    /// monotone measure of rim evidence comparable across frames.
     pub score: f64,
 }
 
@@ -50,6 +53,7 @@ pub struct PlateFinderConfig {
     max_radius_fraction: f64,
     edge_threshold: f64,
     min_support: f64,
+    min_score: f64,
     max_candidates: usize,
 }
 
@@ -78,6 +82,10 @@ impl PlateFinderConfig {
     pub fn min_support(&self) -> f64 {
         self.min_support
     }
+    /// Candidates whose final score is below this are dropped.
+    pub fn min_score(&self) -> f64 {
+        self.min_score
+    }
     /// Maximum number of candidates returned.
     pub fn max_candidates(&self) -> usize {
         self.max_candidates
@@ -97,16 +105,18 @@ pub struct PlateFinderConfigBuilder {
     max_radius_fraction: f64,
     edge_threshold: f64,
     min_support: f64,
+    min_score: f64,
     max_candidates: usize,
 }
 
 impl Default for PlateFinderConfigBuilder {
     fn default() -> Self {
         Self {
-            min_radius_fraction: 0.05,
+            min_radius_fraction: 0.12,
             max_radius_fraction: 0.30,
-            edge_threshold: 8.0,
-            min_support: 0.45,
+            edge_threshold: 4.0,
+            min_support: 0.25,
+            min_score: 0.4,
             max_candidates: 5,
         }
     }
@@ -129,6 +139,10 @@ impl PlateFinderConfigBuilder {
         self.min_support = v;
         self
     }
+    pub fn min_score(mut self, v: f64) -> Self {
+        self.min_score = v;
+        self
+    }
     pub fn max_candidates(mut self, v: usize) -> Self {
         self.max_candidates = v;
         self
@@ -139,6 +153,7 @@ impl PlateFinderConfigBuilder {
             max_radius_fraction: self.max_radius_fraction,
             edge_threshold: self.edge_threshold,
             min_support: self.min_support,
+            min_score: self.min_score,
             max_candidates: self.max_candidates,
         }
     }
@@ -153,10 +168,24 @@ struct Gray {
 
 impl Gray {
     fn from_frame(frame: &Frame, scale: usize) -> Self {
+        let r = Rect {
+            x0: 0,
+            y0: 0,
+            x1: frame.width() as i64,
+            y1: frame.height() as i64,
+        };
+        Self::from_frame_rect(frame, r, scale).0
+    }
+
+    /// Box-downsampled luma of the `rect` crop (clamped to the frame).
+    /// Returns the image and the full-resolution origin of its pixel (0, 0).
+    fn from_frame_rect(frame: &Frame, rect: Rect, scale: usize) -> (Self, (i64, i64)) {
         let fw = frame.width() as usize;
         let fh = frame.height() as usize;
-        let w = (fw / scale).max(1);
-        let h = (fh / scale).max(1);
+        let rect = rect.clamp_to(fw, fh);
+        let (ox, oy) = (rect.x0 as usize, rect.y0 as usize);
+        let w = (rect.w() / scale).max(1);
+        let h = (rect.h() / scale).max(1);
         let rgb = frame.rgb();
         let mut data = vec![0f32; w * h];
         let norm = 1.0 / (scale * scale) as f32;
@@ -164,9 +193,9 @@ impl Gray {
             for x in 0..w {
                 let mut sum = 0f32;
                 for dy in 0..scale {
-                    let row = (y * scale + dy).min(fh - 1) * fw;
+                    let row = (oy + y * scale + dy).min(fh - 1) * fw;
                     for dx in 0..scale {
-                        let i = (row + (x * scale + dx).min(fw - 1)) * 3;
+                        let i = (row + (ox + x * scale + dx).min(fw - 1)) * 3;
                         sum += 0.299 * rgb[i] as f32
                             + 0.587 * rgb[i + 1] as f32
                             + 0.114 * rgb[i + 2] as f32;
@@ -175,7 +204,7 @@ impl Gray {
                 data[y * w + x] = sum * norm;
             }
         }
-        Self { w, h, data }
+        (Self { w, h, data }, (ox as i64, oy as i64))
     }
 
     #[inline]
@@ -309,22 +338,7 @@ fn edge_points(gray: &Gray, rect: Rect, edge_threshold: f64) -> Vec<EdgePt> {
 
 /// Least-squares circle refinement (Kasa fit) on edge points lying within
 /// `band` of the rough circle, with two outlier-trimming passes.
-fn refine_circle(
-    gray: &Gray,
-    cx: f64,
-    cy: f64,
-    r: f64,
-    band: f64,
-    thr: f64,
-) -> Option<(f64, f64, f64)> {
-    let reach = (r + band).ceil() as i64 + 1;
-    let rect = Rect {
-        x0: cx.round() as i64 - reach,
-        y0: cy.round() as i64 - reach,
-        x1: cx.round() as i64 + reach + 1,
-        y1: cy.round() as i64 + reach + 1,
-    };
-    let pts = edge_points(gray, rect, thr);
+fn refine_circle(pts: &[EdgePt], cx: f64, cy: f64, r: f64, band: f64) -> Option<(f64, f64, f64)> {
     let (mut cx, mut cy, mut r) = (cx, cy, r);
     let mut band = band;
     let mut fitted = None;
@@ -399,8 +413,8 @@ fn hough(
     center_rect: Rect,
     (r_min, r_max): (usize, usize),
     edge_threshold: f64,
-    min_support: f64,
-    max_peaks: usize,
+    (min_support, max_peaks): (f64, usize),
+    radius_weight: f64,
 ) -> Vec<Peak> {
     let edge_rect = edge_rect.clamp_to(gray.w, gray.h);
     let cw = center_rect.w();
@@ -429,21 +443,23 @@ fn hough(
     for cy in 0..ch {
         for cx in 0..cw {
             let mut best = (0.0f64, 0usize);
+            let mut best_key = 0.0f64;
             for ri in 0..nr {
                 let mut sum = 0u32;
-                let rj = ri;
                 for dy in -1i64..=1 {
                     for dx in -1i64..=1 {
                         let x = cx as i64 + dx;
                         let y = cy as i64 + dy;
                         if x >= 0 && y >= 0 && (x as usize) < cw && (y as usize) < ch {
-                            sum += acc[(rj * ch + y as usize) * cw + x as usize] as u32;
+                            sum += acc[(ri * ch + y as usize) * cw + x as usize] as u32;
                         }
                     }
                 }
                 let r = (r_min + ri) as f64;
-                let support = (sum as f64 / (2.0 * std::f64::consts::PI * r)).min(1.0);
-                if support > best.0 {
+                let support = sum as f64 / (2.0 * std::f64::consts::PI * r);
+                let k = support * r.powf(radius_weight);
+                if k > best_key {
+                    best_key = k;
                     best = (support, ri);
                 }
             }
@@ -457,7 +473,8 @@ fn hough(
             }
         }
     }
-    cells.sort_by(|a, b| b.support.total_cmp(&a.support));
+    let key = |p: &Peak| p.support * p.r.powf(radius_weight);
+    cells.sort_by(|a, b| key(b).total_cmp(&key(a)));
 
     let mut out: Vec<Peak> = Vec::new();
     for c in cells {
@@ -475,11 +492,77 @@ fn hough(
     out
 }
 
-/// Find plates anywhere in `frame`, best (highest rim support) first.
+/// Rim score of a circle: radial thin edge pixels within 1.5 px of it per
+/// unit of circumference.
+fn rim_score(pts: &[EdgePt], cx: f64, cy: f64, r: f64) -> f64 {
+    if r <= 0.0 {
+        return 0.0;
+    }
+    let n = pts
+        .iter()
+        .filter(|e| {
+            let dx = e.x as f64 - cx;
+            let dy = e.y as f64 - cy;
+            let d = dx.hypot(dy);
+            d > 1e-6
+                && (d - r).abs() <= 1.5
+                && ((dx * e.ux as f64 + dy * e.uy as f64) / d).abs() >= 0.7
+        })
+        .count();
+    n as f64 / (2.0 * std::f64::consts::PI * r)
+}
+
+/// Fit a circle near (`cx`, `cy`, `r`) (full-frame pixels) on a full-resolution
+/// crop around it. Returns the refined circle (falling back to the input if the
+/// fit is unusable or drifts more than `max_shift`) and its rim score.
+fn refine_in_crop(
+    frame: &Frame,
+    (cx, cy, r): (f64, f64, f64),
+    band: f64,
+    max_shift: f64,
+    thr: f64,
+) -> ((f64, f64, f64), f64) {
+    let reach = (r + band + max_shift).ceil() as i64 + 2;
+    let rect = Rect {
+        x0: cx.round() as i64 - reach,
+        y0: cy.round() as i64 - reach,
+        x1: cx.round() as i64 + reach + 1,
+        y1: cy.round() as i64 + reach + 1,
+    };
+    let (crop, (ox, oy)) = Gray::from_frame_rect(frame, rect, 1);
+    let (ox, oy) = (ox as f64, oy as f64);
+    let whole = Rect {
+        x0: 0,
+        y0: 0,
+        x1: crop.w as i64,
+        y1: crop.h as i64,
+    };
+    let pts = edge_points(&crop, whole, thr);
+    let (lx, ly) = (cx - ox, cy - oy);
+    let (fx, fy, fr) = match refine_circle(&pts, lx, ly, r, band) {
+        Some((fx, fy, fr))
+            if (fx - lx).hypot(fy - ly) <= max_shift && (fr - r).abs() <= max_shift =>
+        {
+            (fx, fy, fr)
+        }
+        _ => (lx, ly, r),
+    };
+    let score = rim_score(&pts, fx, fy, fr);
+    ((fx + ox, fy + oy, fr), score)
+}
+
+/// Find plates anywhere in `frame`, best (highest rim score) first.
 ///
-/// Internally the frame is box-downsampled by an integer factor so the shorter
-/// side is about 96 px for the coarse search; centres and radii are then
-/// refined and the collar searched at full resolution.
+/// Pass 1 (outer plate): the frame is box-downsampled by an integer factor so
+/// its shorter side is about 96 px, and a gradient-directed circular Hough runs
+/// over the configured radius range. Each peak is then refined by a
+/// least-squares fit on a full-resolution crop around it (never the whole
+/// frame) and scored; candidates below `min_score` are dropped.
+///
+/// Pass 2 (collar/hub): for each kept plate, a small-radius Hough inside the
+/// plate (radius 0.1 to 0.55 of the plate radius) on the same downsampled
+/// image, so its cost does not grow with the plate size; the hub centre is
+/// refined on a crop and becomes `sleeve_end`.
 pub fn find_plates(frame: &Frame, config: &PlateFinderConfig) -> Vec<PlateCandidate> {
     let fw = frame.width() as usize;
     let fh = frame.height() as usize;
@@ -505,71 +588,62 @@ pub fn find_plates(frame: &Frame, config: &PlateFinderConfig) -> Vec<PlateCandid
         whole,
         (rmin, rmax),
         config.edge_threshold,
-        config.min_support,
-        config.max_candidates,
+        (config.min_support, config.max_candidates),
+        0.0,
     );
-    if coarse.is_empty() {
-        return Vec::new();
-    }
-
-    let full = if scale == 1 {
-        None
-    } else {
-        Some(Gray::from_frame(frame, 1))
-    };
-    let full_ref = full.as_ref().unwrap_or(&small);
 
     let mut out = Vec::new();
     for p in coarse {
-        // Coarse pixel (cx) covers full pixels [cx*s, (cx+1)*s): centre at (cx+0.5)*s - 0.5.
+        // Coarse pixel i covers full pixels [i*s, (i+1)*s): centre (i+0.5)*s - 0.5.
         let ccx = (p.cx + 0.5) * s - 0.5;
         let ccy = (p.cy + 0.5) * s - 0.5;
-        let cr = p.r * s;
-        let (center, radius) = match refine_circle(
-            full_ref,
-            ccx,
-            ccy,
-            cr,
+        let ((cx, cy, r), score) = refine_in_crop(
+            frame,
+            (ccx, ccy, p.r * s),
             (s * 2.5).max(2.0),
+            s * 3.0,
             config.edge_threshold,
-        ) {
-            Some((fx, fy, fr))
-                if (fx - ccx).hypot(fy - ccy) <= s * 3.0 && (fr - cr).abs() <= s * 3.0 =>
-            {
-                (Point::new(fx, fy), fr)
-            }
-            _ => (Point::new(ccx, ccy), cr),
-        };
-        let score = p.support;
-
-        let sleeve_end = find_collar(full_ref, center, radius, config);
+        );
+        if score < config.min_score {
+            continue;
+        }
+        let center = Point::new(cx, cy);
+        let sleeve_end = find_collar(frame, &small, scale, center, r, config);
         out.push(PlateCandidate {
             center,
-            radius_px: radius,
+            radius_px: r,
             sleeve_end,
             score,
         });
     }
-    out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    out.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then(b.radius_px.total_cmp(&a.radius_px))
+    });
     out
 }
 
-/// Search for a small bright/dark collar circle at the plate centre.
+/// Search for the collar/hub circle inside a plate, at the coarse scale.
 fn find_collar(
-    gray: &Gray,
+    frame: &Frame,
+    small: &Gray,
+    scale: usize,
     center: Point,
     plate_r: f64,
     config: &PlateFinderConfig,
 ) -> Option<Point> {
-    let r_lo = (0.06 * plate_r).round().max(3.0) as usize;
-    let r_hi = (0.35 * plate_r).round() as usize;
-    if r_hi < r_lo {
+    let s = scale as f64;
+    let rc = plate_r / s;
+    let r_lo = ((0.10 * rc).round() as usize).max(2);
+    let r_hi = (0.55 * rc).round() as usize;
+    if r_hi < r_lo + 1 {
         return None;
     }
-    let cx = center.x.round() as i64;
-    let cy = center.y.round() as i64;
-    let slack = (0.25 * plate_r).ceil() as i64;
-    let reach = r_hi as i64 + slack + 2;
+    let cx = ((center.x + 0.5) / s - 0.5).round() as i64;
+    let cy = ((center.y + 0.5) / s - 0.5).round() as i64;
+    let slack = ((0.25 * rc).ceil() as i64).max(1);
+    let reach = r_hi as i64 + slack + 1;
     let center_rect = Rect {
         x0: cx - slack,
         y0: cy - slack,
@@ -583,19 +657,25 @@ fn find_collar(
         y1: cy + reach + 1,
     };
     let peaks = hough(
-        gray,
+        small,
         edge_rect,
-        center_rect,
+        center_rect.clamp_to(small.w, small.h),
         (r_lo, r_hi),
         config.edge_threshold,
-        config.min_support,
-        1,
+        (config.min_support, 1),
+        // Rank by absolute vote count so the hub beats the tiny axle circle.
+        1.0,
     );
     let p = peaks.first()?;
-    match refine_circle(gray, p.cx, p.cy, p.r, 2.5, config.edge_threshold) {
-        Some((fx, fy, _)) if (fx - p.cx).hypot(fy - p.cy) <= 3.0 => Some(Point::new(fx, fy)),
-        _ => Some(Point::new(p.cx, p.cy)),
-    }
+    let (hx, hy) = ((p.cx + 0.5) * s - 0.5, (p.cy + 0.5) * s - 0.5);
+    let ((fx, fy, _), _) = refine_in_crop(
+        frame,
+        (hx, hy, p.r * s),
+        (s * 2.0).max(2.0),
+        s * 2.0,
+        config.edge_threshold,
+    );
+    Some(Point::new(fx, fy))
 }
 
 #[cfg(test)]
@@ -680,7 +760,7 @@ mod tests {
         }
         let found = find_plates(&f, &PlateFinderConfig::default_config());
         assert!(found.len() >= 2, "{:?}", found);
-        assert!(found[0].score >= found[1].score);
+        assert!(found[0].score > found[1].score, "{:?}", found);
         assert!(dist(found[0].center, 90.0, 100.0) <= 2.5, "{:?}", found);
         assert!(dist(found[1].center, 200.0, 290.0) <= 6.0, "{:?}", found);
     }
@@ -721,5 +801,184 @@ mod tests {
         eprintln!("find_plates: {:?}/frame", t.elapsed() / n);
         assert!(!found.is_empty());
         assert!(dist(found[0].center, 300.0, 500.0) <= 3.0, "{:?}", found[0]);
+    }
+
+    fn lcg_noise(f: &mut Frame, amp: i32, seed: u64) {
+        let mut st = seed;
+        let (w, h) = (f.width() as i64, f.height() as i64);
+        for y in 0..h {
+            for x in 0..w {
+                st = st
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let n = ((st >> 33) as i32 % (2 * amp + 1)) - amp;
+                let p = f.pixel(x as u32, y as u32).unwrap();
+                let q = [
+                    (p[0] as i32 + n).clamp(0, 255) as u8,
+                    (p[1] as i32 + n).clamp(0, 255) as u8,
+                    (p[2] as i32 + n).clamp(0, 255) as u8,
+                ];
+                f.set_pixel(x, y, q);
+            }
+        }
+    }
+
+    #[test]
+    fn noisy_texture_scene_yields_only_the_real_disc() {
+        let mut f = blank(300, 400, 120);
+        fill_disc(&mut f, 150.0, 200.0, 60.0, [20, 40, 200]);
+        for y in 0..400 {
+            f.set_pixel(30, y, [250, 250, 250]);
+            f.set_pixel(31, y, [250, 250, 250]);
+        }
+        for x in 0..300 {
+            f.set_pixel(x, 350, [10, 10, 10]);
+            f.set_pixel(x, 351, [10, 10, 10]);
+        }
+        lcg_noise(&mut f, 8, 7);
+        let found = find_plates(&f, &PlateFinderConfig::builder().min_score(0.4).build());
+        assert_eq!(found.len(), 1, "{:?}", found);
+        assert!(dist(found[0].center, 150.0, 200.0) <= 2.5, "{:?}", found);
+    }
+
+    #[test]
+    fn pure_speckle_floor_has_no_candidates_above_min_score() {
+        let mut f = blank(300, 400, 120);
+        lcg_noise(&mut f, 10, 99);
+        let found = find_plates(&f, &PlateFinderConfig::builder().min_score(0.4).build());
+        assert!(found.is_empty(), "{:?}", found);
+    }
+
+    #[test]
+    fn same_scene_at_two_resolutions_scales_radius() {
+        for k in [1.0f64, 2.0, 3.0] {
+            let (w, h) = ((300.0 * k) as u32, (400.0 * k) as u32);
+            let mut f = blank(w, h, 90);
+            fill_disc(&mut f, 140.0 * k, 210.0 * k, 50.0 * k, [20, 40, 200]);
+            let found = find_plates(&f, &PlateFinderConfig::default_config());
+            assert!(!found.is_empty(), "k={k}");
+            assert!(
+                dist(found[0].center, 140.0 * k, 210.0 * k) <= 1.0 + k,
+                "k={k} {:?}",
+                found[0]
+            );
+            assert!(
+                (found[0].radius_px - 50.0 * k).abs() <= 2.0 * k + 1.0,
+                "k={k} {:?}",
+                found[0]
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_radius_discs_are_not_returned() {
+        let mut small = blank(300, 400, 90);
+        fill_disc(&mut small, 150.0, 200.0, 18.0, [20, 40, 200]);
+        assert!(find_plates(&small, &PlateFinderConfig::default_config()).is_empty());
+        let mut big = blank(300, 400, 90);
+        fill_disc(&mut big, 150.0, 200.0, 140.0, [20, 40, 200]);
+        let found = find_plates(&big, &PlateFinderConfig::default_config());
+        assert!(
+            found.iter().all(|c| c.radius_px <= 0.30 * 300.0 + 3.0),
+            "{:?}",
+            found
+        );
+    }
+
+    #[test]
+    fn degenerate_frames_do_not_panic() {
+        for (w, h) in [
+            (1u32, 1u32),
+            (3, 3),
+            (15, 200),
+            (200, 15),
+            (2000, 20),
+            (20, 2000),
+            (16, 16),
+        ] {
+            let mut f = blank(w, h, 100);
+            fill_disc(
+                &mut f,
+                w as f64 / 2.0,
+                h as f64 / 2.0,
+                (w.min(h) as f64) / 3.0,
+                [250, 10, 10],
+            );
+            let _ = find_plates(&f, &PlateFinderConfig::default_config());
+        }
+    }
+
+    #[test]
+    fn disc_partly_off_frame_does_not_panic_and_stays_in_range() {
+        let mut f = blank(300, 400, 90);
+        fill_disc(&mut f, 12.0, 200.0, 60.0, [20, 40, 200]);
+        let found = find_plates(&f, &PlateFinderConfig::default_config());
+        for c in &found {
+            assert!(c.radius_px >= 30.0 && c.radius_px <= 100.0, "{:?}", c);
+        }
+    }
+
+    #[test]
+    fn outer_plate_radius_not_hub_radius() {
+        let mut f = blank(300, 400, 90);
+        fill_disc(&mut f, 150.0, 200.0, 70.0, [20, 40, 200]);
+        fill_disc(&mut f, 152.0, 201.0, 30.0, [225, 215, 180]);
+        let found = find_plates(&f, &PlateFinderConfig::default_config());
+        assert!(!found.is_empty());
+        let best = &found[0];
+        assert!((best.radius_px - 70.0).abs() <= 4.0, "{:?}", best);
+        assert!(dist(best.center, 150.0, 200.0) <= 2.5, "{:?}", best);
+        let sleeve = best.sleeve_end.expect("hub should give a sleeve_end");
+        assert!(dist(sleeve, 152.0, 201.0) <= 3.0, "{:?}", sleeve);
+    }
+
+    #[test]
+    fn candidates_below_min_score_are_dropped() {
+        let mut f = blank(300, 400, 90);
+        fill_disc(&mut f, 150.0, 200.0, 60.0, [20, 40, 200]);
+        let all = find_plates(&f, &PlateFinderConfig::builder().min_score(0.0).build());
+        assert!(!all.is_empty());
+        let none = find_plates(&f, &PlateFinderConfig::builder().min_score(100.0).build());
+        assert!(none.is_empty(), "{:?}", none);
+        let cfg = PlateFinderConfig::default_config();
+        assert!(cfg.min_score() > 0.0);
+    }
+
+    #[test]
+    fn scores_are_not_saturated_at_one() {
+        // A clean full disc and a half-occluded one must score differently.
+        let mut f = blank(300, 400, 90);
+        fill_disc(&mut f, 90.0, 100.0, 45.0, [20, 40, 200]);
+        fill_disc(&mut f, 200.0, 290.0, 45.0, [250, 220, 20]);
+        for y in 290..340 {
+            for x in 150..250 {
+                f.set_pixel(x, y, [90, 90, 90]);
+            }
+        }
+        let found = find_plates(&f, &PlateFinderConfig::builder().min_score(0.0).build());
+        assert!(found.len() >= 2);
+        assert!(found[0].score != found[1].score);
+    }
+
+    #[test]
+    fn timing_on_1080x1920() {
+        let mut f = blank(1080, 1920, 90);
+        fill_disc(&mut f, 540.0, 900.0, 190.0, [20, 40, 200]);
+        fill_disc(&mut f, 540.0, 900.0, 80.0, [225, 215, 180]);
+        for y in 0..1920 {
+            for x in 80..130 {
+                f.set_pixel(x, y, [200, 200, 200]);
+            }
+        }
+        let t = std::time::Instant::now();
+        let found = find_plates(&f, &PlateFinderConfig::default_config());
+        let el = t.elapsed();
+        let bound = if cfg!(debug_assertions) { 1500 } else { 50 };
+        eprintln!("1080x1920: {el:?}");
+        assert!(el.as_millis() < bound, "{el:?}");
+        assert!(!found.is_empty());
+        assert!((found[0].radius_px - 190.0).abs() <= 8.0, "{:?}", found[0]);
+        let sl = found[0].sleeve_end.expect("hub");
+        assert!(dist(sl, 540.0, 900.0) <= 8.0, "{:?}", sl);
     }
 }
