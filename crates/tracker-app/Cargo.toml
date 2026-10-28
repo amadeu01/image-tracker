@@ -12,7 +12,7 @@ egui = "0.29"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
-directories = "5"
+directories = "6"
 # async-std backend: self-contained executor — the tokio feature panics
 # ("no reactor running") unless a tokio runtime is active, which a plain
 # eframe app doesn't have. See crash log 2026-07-16.
