@@ -676,7 +676,8 @@ mod tests {
 
     #[test]
     fn poll_tracking_done_populates_results_and_starts_export() {
-        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(30)));
+        let video = super::super::test_support::TempVideo::new("populates");
+        let mut state = AppState::new(video.path.clone(), meta(Some(30)));
         let (handle, tx) = tracking::TrackingHandle::for_test();
         state.job = Job::Tracking {
             handle,
@@ -696,7 +697,8 @@ mod tests {
 
     #[test]
     fn poll_tracking_done_segments_reps_for_the_confirmed_lift() {
-        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(30)));
+        let video = super::super::test_support::TempVideo::new("segments");
+        let mut state = AppState::new(video.path.clone(), meta(Some(30)));
         state.confirmed_lift = tracker_core::LiftType::Deadlift;
         let (handle, tx) = tracking::TrackingHandle::for_test();
         state.job = Job::Tracking {
@@ -945,7 +947,8 @@ mod tests {
         // reversed (or skipped), the job would still read as `Tracking`, or
         // `start_export` would silently clobber a live tracking handle. Both
         // are exactly the illegal-overlap states `Job` exists to rule out.
-        let mut state = AppState::new(PathBuf::from("x.mp4"), meta(Some(30)));
+        let video = super::super::test_support::TempVideo::new("exporting");
+        let mut state = AppState::new(video.path.clone(), meta(Some(30)));
         state.tracking_run = TrackingRunState::started();
         state.tracking_run.gap_count = 0;
         let bar_path = one_rep_bar_path();

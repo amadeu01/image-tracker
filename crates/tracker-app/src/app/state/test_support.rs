@@ -12,6 +12,29 @@ use super::{AppState, Job};
 use crate::ffprobe::VideoMetadata;
 use crate::tracking::{self, TrackingHandle, TrackingRunState};
 
+/// A video path inside a unique temp dir, removed on drop. Tests whose flow
+/// starts the auto-export job use it so the exports (`<stem>.csv`, ...) land in
+/// the temp dir instead of the crate directory.
+pub(super) struct TempVideo {
+    dir: PathBuf,
+    pub(super) path: PathBuf,
+}
+
+impl TempVideo {
+    pub(super) fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("image-tracker-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("x.mp4");
+        Self { dir, path }
+    }
+}
+
+impl Drop for TempVideo {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 pub(super) fn meta(frame_count: Option<u64>) -> VideoMetadata {
     VideoMetadata {
         width: 4,
