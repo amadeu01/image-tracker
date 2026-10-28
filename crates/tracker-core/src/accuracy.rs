@@ -469,6 +469,22 @@ mod tests {
     }
 
     #[test]
+    fn pass_bar_boundary_is_inclusive_at_exactly_ninety_percent() {
+        // 10 visible labels, 9 within tolerance: exactly 0.9 -> pass.
+        let labels: Vec<GroundTruthLabel> = (0..10).map(|i| visible(i, 0.0, 0.0)).collect();
+        let samples: Vec<Sample> = (0..10)
+            .map(|i| tracked(i, if i < 9 { 0.0 } else { 100.0 }, 0.0))
+            .collect();
+        assert_eq!(grade(&samples, &labels, 5.0).meets_pass_bar(), Some(true));
+        // 9 visible labels, 8 within tolerance: 0.888... -> miss.
+        let labels: Vec<GroundTruthLabel> = (0..9).map(|i| visible(i, 0.0, 0.0)).collect();
+        let samples: Vec<Sample> = (0..9)
+            .map(|i| tracked(i, if i < 8 { 0.0 } else { 100.0 }, 0.0))
+            .collect();
+        assert_eq!(grade(&samples, &labels, 5.0).meets_pass_bar(), Some(false));
+    }
+
+    #[test]
     fn full_coverage_all_within_tolerance_passes() {
         let samples: Vec<Sample> = (0..10).map(|i| tracked(i, 0.0, 0.0)).collect();
         let labels: Vec<GroundTruthLabel> = (0..10).map(|i| visible(i, 0.0, 0.0)).collect();

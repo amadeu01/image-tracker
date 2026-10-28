@@ -390,18 +390,19 @@ fn plate_line(args: &GradeArgs) -> String {
     format!("plate_px: {} (source: {source})", args.plate_diameter_px)
 }
 
-/// Manifest-mode pass-bar lines: coverage of visible labels, then PASS/MISS
-/// on the coverage-adjusted within-tolerance fraction.
+/// Manifest-mode pass-bar lines: how many visible labels the run tracked,
+/// then PASS/MISS on the coverage-adjusted within-tolerance fraction. The
+/// percentages come from the report's own counts/accessors; the pass line
+/// prints the integer counts and two decimals so a near-miss never rounds up
+/// to the bar ("90.0%" next to MISS).
 fn coverage_lines(r: &AccuracyReport) -> Vec<String> {
     let total = r.visible_labels();
-    if total == 0 {
+    let Some(adjusted) = r.coverage_adjusted_within() else {
         return vec![
-            "visible labels covered: 0/0".into(),
+            "visible labels tracked: 0/0".into(),
             "pass bar: UNKNOWN (no visible labels)".into(),
         ];
-    }
-    let pct = |n: usize| 100.0 * n as f64 / total as f64;
-    let adjusted = r.within_count as f64 / total as f64 * 100.0;
+    };
     let verdict = if r.meets_pass_bar() == Some(true) {
         "PASS"
     } else {
@@ -409,13 +410,16 @@ fn coverage_lines(r: &AccuracyReport) -> Vec<String> {
     };
     vec![
         format!(
-            "visible labels covered: {}/{} ({:.1}%)",
+            "visible labels tracked: {}/{} ({:.1}% coverage)",
             r.scored_frames,
             total,
-            pct(r.scored_frames)
+            100.0 * r.scored_frames as f64 / total as f64
         ),
         format!(
-            "pass bar: {verdict} ({adjusted:.1}% of visible labels within tolerance, need {:.0}%)",
+            "pass bar: {verdict} ({}/{} visible labels within tolerance = {:.2}%, need {:.0}%)",
+            r.within_count,
+            total,
+            adjusted * 100.0,
             PASS_FRACTION * 100.0
         ),
     ]
@@ -654,11 +658,7 @@ mod tests {
         assert_eq!(d.plate_diameter_px, DEFAULT_PLATE_DIAMETER_PX);
         assert!(parse_grade_args(&s(&["p.csv"])).is_err());
     }
-}
 
-#[cfg(test)]
-mod coverage_tests {
-    use super::*;
     use tracker_core::accuracy::grade as core_grade;
 
     fn args(source: PlateSource, plate: f64) -> GradeArgs {
@@ -718,18 +718,50 @@ mod coverage_tests {
     #[test]
     fn late_seed_prints_coverage_and_a_miss() {
         let lines = coverage_lines(&report(5));
-        assert_eq!(lines[0], "visible labels covered: 5/10 (50.0%)");
-        assert!(
-            lines[1].contains("MISS") && lines[1].contains("50.0%"),
-            "{lines:?}"
+        assert_eq!(lines[0], "visible labels tracked: 5/10 (50.0% coverage)");
+        assert_eq!(
+            lines[1],
+            "pass bar: MISS (5/10 visible labels within tolerance = 50.00%, need 90%)"
+        );
+    }
+
+    #[test]
+    fn a_near_miss_never_prints_as_the_bar_itself() {
+        // 449 of 499 visible labels within tolerance = 89.98%: one decimal
+        // would read "90.0%" beside MISS.
+        let labels: Vec<GroundTruthLabel> = (0..499)
+            .map(|i| GroundTruthLabel {
+                frame_index: i,
+                status: LabelStatus::Visible(Point::new(0.0, 0.0)),
+            })
+            .collect();
+        let samples: Vec<Sample> = (0..499)
+            .map(|i| Sample {
+                frame_index: i,
+                position: Point::new(if i < 449 { 0.0 } else { 100.0 }, 0.0),
+                source: Source::Tracked,
+                confidence: Some(0.95),
+            })
+            .collect();
+        let lines = coverage_lines(&core_grade(&samples, &labels, 5.0));
+        assert_eq!(
+            lines[0],
+            "visible labels tracked: 499/499 (100.0% coverage)"
+        );
+        assert_eq!(
+            lines[1],
+            "pass bar: MISS (449/499 visible labels within tolerance = 89.98%, need 90%)"
         );
     }
 
     #[test]
     fn full_coverage_prints_a_pass() {
         let lines = coverage_lines(&report(0));
-        assert_eq!(lines[0], "visible labels covered: 10/10 (100.0%)");
-        assert!(lines[1].contains("PASS"), "{lines:?}");
+        assert_eq!(lines[0], "visible labels tracked: 10/10 (100.0% coverage)");
+        assert_eq!(
+            lines[1],
+            "pass bar: PASS (10/10 visible labels within tolerance = 100.00%, need 90%)"
+        );
     }
 
     #[test]
