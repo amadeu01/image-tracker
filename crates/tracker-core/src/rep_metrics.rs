@@ -21,7 +21,10 @@
 //! The concentric (ascent) phase of a `Rep` is `Rep::concentric_span()` and
 //! its lowest point is `Rep::bottom_index()` (see `rep.rs`); both are
 //! phase-order neutral, so eccentric-first lifts (squat, bench) and
-//! concentric-first lifts (deadlift) are measured the same way. Per the documented axis convention (image y grows
+//! concentric-first lifts (deadlift) are measured the same way. A deadlift rep
+//! is exactly one pull (touch-and-go sets give one rep per pull), so its
+//! concentric span is that pull alone and velocity loss across a set is
+//! meaningful. Per the documented axis convention (image y grows
 //! downward), ascent has negative `vy`, so "upward speed" is `vy.abs()`.
 //!
 //! ## Peak vs. mean concentric velocity
@@ -320,6 +323,55 @@ mod tests {
         assert!((m.depth - 10.0).abs() < 1e-9);
         // Deadlift bottom is the floor (pull start), not the lockout.
         assert!((m.bottom_t - 0.0).abs() < 1e-9);
+    }
+
+    /// Touch-and-go deadlift set: three pulls of different speed, bar
+    /// touching the floor (y = 100) between them with no rest.
+    #[test]
+    fn touch_and_go_set_has_a_meaningful_velocity_loss() {
+        use crate::lift::LiftType;
+        use crate::rep::{segment_reps_for_lift, RepSegmentationConfig};
+        let mut ys = vec![100.0; 10];
+        for pull_frames in [20usize, 25, 30] {
+            for k in 1..=pull_frames {
+                ys.push(100.0 - 100.0 * k as f64 / pull_frames as f64);
+            }
+            for k in 1..=20 {
+                ys.push(100.0 * k as f64 / 20.0);
+            }
+        }
+        ys.extend(vec![100.0; 10]);
+        let points: Vec<PathPoint> = ys
+            .iter()
+            .enumerate()
+            .map(|(i, &y)| PathPoint {
+                frame_index: i as u64,
+                t_seconds: i as f64 / 30.0,
+                position: Point::new(0.0, y),
+                source: Source::Tracked,
+                confidence: None,
+            })
+            .collect();
+        let velocity = crate::velocity::velocity_series(&points, 1, None).unwrap();
+        let config = RepSegmentationConfig::builder()
+            .min_velocity(5.0)
+            .min_phase_duration_seconds(0.15)
+            .build();
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &velocity, config);
+        assert_eq!(reps.len(), 3);
+        let metrics: Vec<RepMetrics> = reps
+            .iter()
+            .map(|r| rep_metrics(r, &velocity, &points, None))
+            .collect();
+        // Each mean is that pull alone: 100 px over 20/25/30 frames at 30 fps.
+        for (m, frames) in metrics.iter().zip([20.0, 25.0, 30.0]) {
+            let expected = 100.0 / (frames / 30.0);
+            assert!((m.mean_concentric_velocity - expected).abs() < 1.0);
+        }
+        let losses = velocity_loss_percent(&metrics);
+        assert_eq!(losses[0], None);
+        let last = losses[2].expect("loss of last rep vs first");
+        assert!((last - 33.3).abs() < 1.0, "loss was {last}");
     }
 
     #[test]

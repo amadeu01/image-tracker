@@ -3,8 +3,11 @@
 //!
 //! Per `velocity.rs`'s documented axis convention (image y grows downward),
 //! a descending bar (eccentric phase) has `vy > 0` and an ascending bar
-//! (concentric phase) has `vy < 0`. A rep is one eccentric phase followed
-//! by one concentric phase.
+//! (concentric phase) has `vy < 0`. A squat/bench rep is one eccentric phase
+//! followed by one concentric phase. A deadlift rep is one concentric pull
+//! followed by its eccentric lowering to the floor; every pull is its own
+//! rep (owner ruling 2026-10-28), so a touch-and-go set counts one rep per
+//! pull (see `segment_reps_for_lift`).
 //!
 //! ## Robustness
 //! Real velocity series are noisy, so a naive "first sign change starts a
@@ -137,11 +140,13 @@ impl RepSegmentationConfigBuilder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rep {
     /// Which phase comes first. For `ConcentricFirst` (deadlift) the three
-    /// index fields below swap phase roles: the rep starts at
-    /// `eccentric_start` with the pull, turns at `bottom` (the lockout) and
-    /// the lowering ends at `concentric_end`. Do not read them by name for
-    /// phase meaning; use `start_frame_index`, `end_index`, `turn_index`,
-    /// `bottom_index`, `eccentric_span` and `concentric_span`.
+    /// index fields below swap phase roles: `eccentric_start` is the start
+    /// of the pull (the floor), `bottom` is the turnaround (the lockout),
+    /// and `concentric_end` is the end of the lowering back to the floor.
+    /// The field names keep their `EccentricFirst` meaning, so do not read
+    /// them by name for phase meaning; use `start_frame_index`, `end_index`,
+    /// `turn_index`, `bottom_index`, `eccentric_span` and `concentric_span`.
+    /// A `ConcentricFirst` rep is exactly one pull and its own lowering.
     pub order: PhaseOrder,
     /// Index of the first sample of the eccentric (descent) phase.
     pub eccentric_start: usize,
@@ -318,15 +323,17 @@ fn label_runs(velocity: &[VelocitySample], config: RepSegmentationConfig) -> Vec
     group_runs(&filtered_labels)
 }
 
-/// Fraction of `min_displacement` below which a deadlift run is jitter.
-const BOUNCE_JITTER_FRACTION: f64 = 0.25;
-
 /// Like `segment_reps`, but honours the lift's phase order. `Deadlift` is
-/// concentric-then-eccentric: a rep is a pull, optional lockout pause, and a
-/// lowering, and ends only once the bar rests on the floor (an `Idle` run
-/// after the lowering, however brief) or the series ends. A bounce (lowering
-/// straight into another pull with no rest) stays one rep. Every other lift
-/// segments exactly like `segment_reps` (EccentricFirst).
+/// concentric-then-eccentric and every pull is its own rep (owner ruling
+/// 2026-10-28): a rep is one pull, an optional lockout pause, and the
+/// lowering back to the floor. A rep ends when the bar returns to the floor,
+/// whether or not it rests there, so a touch-and-go set counts one rep per
+/// pull and each rep's `concentric_span()` is that pull alone. A pull or
+/// lowering shorter than `min_displacement` is jitter: that candidate is
+/// skipped without affecting its neighbours. A pull with no lowering before
+/// the series ends is incomplete and dropped, like a squat descent with no
+/// ascent. Every other lift segments exactly like `segment_reps`
+/// (EccentricFirst).
 pub fn segment_reps_for_lift(
     lift: LiftType,
     velocity: &[VelocitySample],
@@ -339,25 +346,6 @@ pub fn segment_reps_for_lift(
         return Vec::new();
     }
     let runs = label_runs(velocity, config);
-    let travel = |r: &Run| run_displacement(velocity, r);
-    // Runs travelling less than this fraction of min_displacement are jitter
-    // and are never chained into a rep.
-    let jitter_floor = config.min_displacement * BOUNCE_JITTER_FRACTION;
-    // Parses `Ascending, [Idle], Descending` starting at `at`; returns
-    // (turn index, descent run index).
-    let cycle = |at: usize| -> Option<(usize, usize)> {
-        if runs.get(at)?.phase != Phase::Ascending {
-            return None;
-        }
-        let mut k = at + 1;
-        let mut turn = runs[at].end;
-        if runs.get(k)?.phase == Phase::Idle {
-            turn = (runs[k].start + runs[k].end) / 2;
-            k += 1;
-        }
-        (runs.get(k)?.phase == Phase::Descending).then_some((turn, k))
-    };
-
     let mut reps = Vec::new();
     let mut i = 0;
     while i < runs.len() {
@@ -365,40 +353,30 @@ pub fn segment_reps_for_lift(
             i += 1;
             continue;
         }
-        let Some((turn, d)) = cycle(i) else {
+        // Parse `Ascending, [Idle], Descending`; the turn is the end of the
+        // pull, or the midpoint of the lockout pause.
+        let mut k = i + 1;
+        let mut turn = runs[i].end;
+        if runs.get(k).is_some_and(|r| r.phase == Phase::Idle) {
+            turn = (runs[k].start + runs[k].end) / 2;
+            k += 1;
+        }
+        let Some(lowering) = runs.get(k).filter(|r| r.phase == Phase::Descending) else {
             // Pull with no lowering: incomplete.
             i += 1;
             continue;
         };
-        let (mut max_pull, mut max_lower) = (travel(&runs[i]), travel(&runs[d]));
-        if max_pull < jitter_floor || max_lower < jitter_floor {
-            i = d + 1;
-            continue;
-        }
-        let start = runs[i].start;
-        let mut end = runs[d].end;
-        let mut j = d + 1;
-        // Bounce: lowering runs straight into another real pull (no Idle
-        // rest), optionally with a lockout pause. Absorb it.
-        while let Some((_, d2)) = cycle(j) {
-            let (p, l) = (travel(&runs[j]), travel(&runs[d2]));
-            if p < jitter_floor || l < jitter_floor {
-                break;
-            }
-            max_pull = max_pull.max(p);
-            max_lower = max_lower.max(l);
-            end = runs[d2].end;
-            j = d2 + 1;
-        }
-        if max_pull >= config.min_displacement && max_lower >= config.min_displacement {
+        if run_displacement(velocity, &runs[i]) >= config.min_displacement
+            && run_displacement(velocity, lowering) >= config.min_displacement
+        {
             reps.push(Rep {
                 order: PhaseOrder::ConcentricFirst,
-                eccentric_start: start,
+                eccentric_start: runs[i].start,
                 bottom: turn,
-                concentric_end: end,
+                concentric_end: lowering.end,
             });
         }
-        i = j;
+        i = k + 1;
     }
     reps
 }
@@ -725,19 +703,29 @@ mod tests {
         assert_eq!(reps[0].eccentric_span(), 39..=69);
     }
 
+    /// Owner ruling 2026-10-28: each pull is a rep, even when the bar only
+    /// touches the floor between pulls (touch-and-go).
     #[test]
-    fn deadlift_bounce_without_rest_is_one_rep() {
+    fn touch_and_go_deadlift_counts_one_rep_per_pull() {
         let mut vys = vec![0.0; 10];
+        vys.extend(pull_and_lower());
         vys.extend(pull_and_lower());
         vys.extend(pull_and_lower());
         vys.extend(vec![0.0; 10]);
         let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
-        assert_eq!(reps.len(), 1);
-        assert_eq!(reps[0].concentric_end, 129);
+        assert_eq!(reps.len(), 3);
+        for (k, rep) in reps.iter().enumerate() {
+            let s = 10 + 60 * k;
+            assert_eq!(rep.order, PhaseOrder::ConcentricFirst);
+            assert_eq!(rep.concentric_span(), s..=s + 29);
+            assert_eq!(rep.eccentric_span(), s + 29..=s + 59);
+            assert_eq!(rep.bottom_index(), s);
+            assert_eq!(rep.end_index(), s + 59);
+        }
     }
 
     #[test]
-    fn deadlift_with_rest_between_pulls_is_two_reps() {
+    fn deadlift_with_rest_between_pulls_is_still_one_rep_per_pull() {
         let mut vys = vec![0.0; 10];
         vys.extend(pull_and_lower());
         vys.extend(vec![0.0; 3]);
@@ -745,6 +733,8 @@ mod tests {
         vys.extend(vec![0.0; 10]);
         let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
         assert_eq!(reps.len(), 2);
+        assert_eq!(reps[0].concentric_span(), 10..=39);
+        assert_eq!(reps[1].concentric_span(), 73..=102);
     }
 
     #[test]
@@ -768,7 +758,21 @@ mod tests {
     }
 
     #[test]
-    fn deadlift_bounce_with_lockout_pause_in_second_pull_is_one_rep() {
+    fn lockout_pause_inside_one_pull_is_still_one_rep() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(leg(-200.0, 30));
+        vys.extend(leg(0.0, 4));
+        vys.extend(leg(200.0, 30));
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].concentric_span(), 10..=41);
+        assert_eq!(reps[0].turn_index(), 41);
+        assert_eq!(reps[0].eccentric_span(), 41..=73);
+    }
+
+    #[test]
+    fn touch_and_go_with_lockout_pause_in_second_pull_is_two_reps() {
         let mut vys = vec![0.0; 10];
         vys.extend(pull_and_lower());
         vys.extend(leg(-200.0, 30));
@@ -776,13 +780,14 @@ mod tests {
         vys.extend(leg(200.0, 30));
         vys.extend(vec![0.0; 10]);
         let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
-        assert_eq!(reps.len(), 1);
-        assert_eq!(reps[0].concentric_end, 133);
+        assert_eq!(reps.len(), 2);
+        assert_eq!(reps[1].concentric_span(), 70..=101);
+        assert_eq!(reps[1].end_index(), 133);
     }
 
     #[test]
-    fn chain_with_small_first_pull_and_full_second_pull_is_kept() {
-        // First pull/lower ~33 px each (below 40 gate, above jitter floor).
+    fn small_first_pull_is_dropped_and_full_second_pull_is_its_own_rep() {
+        // First pull/lower ~33 px each (below the 40 px gate): not a rep.
         let mut vys = vec![0.0; 10];
         vys.extend(leg(-100.0, 10));
         vys.extend(leg(100.0, 10));
@@ -790,6 +795,22 @@ mod tests {
         vys.extend(vec![0.0; 10]);
         let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
         assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].start_frame_index(), 30);
+    }
+
+    #[test]
+    fn jitter_pull_between_real_pulls_is_not_a_rep_and_does_not_merge_neighbours() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(pull_and_lower());
+        vys.extend(leg(-15.0, 12));
+        vys.extend(leg(15.0, 12));
+        vys.extend(pull_and_lower());
+        vys.extend(vec![0.0; 10]);
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 2);
+        assert_eq!(reps[0].end_index(), 69);
+        assert_eq!(reps[1].start_frame_index(), 94);
+        assert_eq!(reps[1].end_index(), 153);
     }
 
     #[test]
@@ -802,6 +823,31 @@ mod tests {
         let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
         assert_eq!(reps.len(), 1);
         assert_eq!(reps[0].start_frame_index(), 34);
+    }
+
+    /// A pull with no lowering before the data ends is incomplete and is
+    /// dropped, like a squat descent with no ascent; the complete pulls
+    /// before it are kept.
+    #[test]
+    fn trailing_pull_without_lowering_is_handled() {
+        let mut vys = vec![0.0; 10];
+        vys.extend(pull_and_lower());
+        vys.extend(leg(-200.0, 30));
+        let reps = segment_reps_for_lift(LiftType::Deadlift, &series(&vys), default_config());
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps[0].end_index(), 69);
+    }
+
+    #[test]
+    fn squat_segmentation_is_unchanged_by_deadlift_rules() {
+        // Descent-ascent pairs back to back are separate squat reps and
+        // equal the lift-agnostic segmentation.
+        let mut vys = clean_rep(10, 0);
+        vys.extend(clean_rep(0, 10));
+        let v = series(&vys);
+        let reps = segment_reps_for_lift(LiftType::Squat, &v, default_config());
+        assert_eq!(reps, segment_reps(&v, default_config()));
+        assert!(reps.iter().all(|r| r.order == PhaseOrder::EccentricFirst));
     }
 
     #[test]
