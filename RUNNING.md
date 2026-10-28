@@ -53,6 +53,33 @@ so opening a second video mid-session resets the workspace (seed,
 calibration, tracking run) exactly the way a fresh launch on that video
 would.
 
+#### Auto bar finding in the GUI
+
+When a video opens (and no Seed exists yet), the app searches for the bar in
+the background; the window stays responsive.
+
+1. The hint banner reads **"Finding the bar… N%"** with a **Cancel** button.
+   Cancelling (or placing a seed by hand) stops the search and returns to
+   manual seeding.
+2. If it finds a moving plate, the banner shows
+   **"Proposed bar · Squat · confidence 87% — <reason>"** and a ring is drawn
+   on the frame at the proposed spot, with a label. Nothing is a Seed yet.
+   - **Confirm** makes the proposal the Seed (jumping to its frame) and keeps
+     the lift type for rep counting. Then calibrate and **Track** as usual.
+   - **Not the bar** discards it and arms click-to-seed.
+3. If the lift is unknown the banner says so and asks you to confirm only if
+   the ring is on the bar. If nothing is found (or the clip length is
+   unknown) the banner reads "Could not find the bar automatically — click on
+   the bar end to seed manually".
+
+While the search runs, Track and the benchmark are refused. While a track is
+running or paused by you, clicking a new seed is refused too; after the
+tracker loses the bar (the reseed prompt) a click is accepted as before.
+
+Status: implemented and unit-tested, but the on-screen details (ring position
+and size, label legibility, banner layout) have not been checked by eye yet;
+step 9 of the manual test script below is the check to do.
+
 ### Headless CLI (`track` subcommand)
 
 Runs the same tracking pipeline the GUI drives, without a window, and writes
@@ -62,7 +89,7 @@ painfully.
 
 ```bash
 cargo run --release -p tracker-app -- track <video> \
-  --seed-frame N --seed X,Y --out <dir> \
+  [--seed-frame N --seed X,Y] --out <dir> \
   [--tracker auto|template|color] \
   [--patch-radius N] [--search-radius N] [--min-score F] \
   [--update-threshold F] [--coast-limit N] \
@@ -74,8 +101,8 @@ Flags:
 | Flag | Required | Meaning |
 |------|----------|---------|
 | `<video>` | yes | Positional path to the input video. |
-| `--seed-frame N` | yes | Frame index to seed the tracker on. |
-| `--seed X,Y` | yes | Pixel coordinates of the seed point on that frame. |
+| `--seed-frame N` | with `--seed` | Frame index to seed the tracker on. Omit both seed flags for auto mode (below). |
+| `--seed X,Y` | with `--seed-frame` | Pixel coordinates of the seed point on that frame. |
 | `--out <dir>` | yes | Output directory (created if missing). |
 | `--tracker auto\|template\|color` | no | Which tracker to run; `auto` (default) suggests one from the seed patch. |
 | `--patch-radius N` | no | Template tracker patch radius override. |
@@ -95,6 +122,85 @@ pause and counts the reseed events, rather than stopping the run.
 
 Output written to `--out/<video-stem>.{csv,json,overlay.mp4}` and
 `--out/<video-stem>.reps.{csv,json}`.
+
+#### Auto mode: no seed
+
+Leave out **both** `--seed-frame` and `--seed` and `track` finds the bar
+itself:
+
+```bash
+cargo run --release -p tracker-app -- track <video> --out <dir>
+```
+
+It samples the clip (every 4th frame), looks for plate-like circles, picks the
+moving plate, names the lift, and then tracks from there. Progress goes to
+stderr (`pre-pass: 10% (…)`); stdout gets three lines:
+
+```
+lift: deadlift (starts at its lowest point and rises 1.32 plate diameters)
+seed proposal: frame 0 at (178.3, 664.2), plate 196.2 px, confidence 0.84
+UNVERIFIED: seed was auto-proposed; confirm or pass --seed-frame/--seed
+```
+
+- `lift:` is `squat`, `deadlift` or `unknown`, with the reason in brackets
+  (bench press is never auto-detected). Deadlift reps are segmented
+  pull-first, and a rep ends only when the bar rests on the floor.
+- `seed proposal:` is the frame, Bar Point (pixels), apparent plate diameter in
+  pixels and a 0-1 confidence. Low confidence or `unknown` means: check the
+  overlay, or rerun with a manual seed.
+- `UNVERIFIED` is always printed: the CLI accepts the proposal without a
+  human looking at it. Check `<stem>.overlay.mp4` before trusting the numbers.
+- If no moving plate is found, the command exits with status 1 and
+  `error: no bar could be found automatically (no moving plate-like circle);
+  pass --seed-frame and --seed to track manually`. A seed given on only one of
+  the two flags is a usage error (exit 2).
+- A seed you give always wins: no pre-pass runs, no sidecar is written, and a
+  stale `<stem>.run.json` from an earlier auto run of the same stem is
+  removed.
+
+Auto runs also write `--out/<stem>.run.json` (and print
+`run info (UNVERIFIED) -> <path>`):
+
+| Field | Meaning |
+|-------|---------|
+| `lift` | `deadlift`, `squat`, `bench` or `unknown` |
+| `lift_reason` | why the classifier said so (also the reason for `unknown`) |
+| `verified` | `false` for CLI auto runs (nobody confirmed the proposal) |
+| `seed_frame` | frame the proposal was made on and tracking started from |
+| `seed` | `[x, y]` Bar Point in pixels |
+| `plate_px` | apparent plate diameter in pixels, from the detections |
+
+The export `<stem>.json` is unchanged (still a top-level array); `grade` reads
+the lift from this sidecar.
+
+Known limit: tracking runs forward from the proposed frame, so a proposal made
+late in the clip drops the reps before it. The thresholds behind auto mode
+were tuned on four clips and have not yet been checked against hand labels
+(see [docs/architecture.md section 6b](docs/architecture.md)).
+
+#### Grading a run: `grade`
+
+```bash
+cargo run -p tracker-app -- grade <export.csv> [<truth.csv>] \
+  [--plate-px N] [--tolerance-dia F] [--manifest groundtruth/clips.json --clip v5]
+```
+
+Without `--manifest` it prints the positional accuracy against the truth CSV
+(`--plate-px` default 134, `--tolerance-dia` default 0.1).
+
+With `--manifest` and `--clip` (both, or neither) it also reads the clip's
+entry in `clips.json`: `plate_px` becomes the plate diameter (an explicit
+`--plate-px` overrides it; a missing or non-positive `plate_px` is an error,
+there is no default), the truth CSV defaults to `groundtruth/<clip>.csv` next
+to the manifest, and two run checks are printed:
+
+| Check | PASS | MISS | UNKNOWN |
+|-------|------|------|---------|
+| `LIFT TYPE` | the run's `<stem>.run.json` lift equals the manifest `lift` | a different lift, or the run said `unknown` | no sidecar (e.g. a manual run) or it is unreadable |
+| `REP COUNT` | `<stem>.reps.json` has exactly the manifest `reps` | a different count | manifest `reps` is `null` (owner has not counted yet) or no `.reps.json` |
+
+UNKNOWN means "cannot be judged", not "wrong". The manifest is filled in by
+hand; see [groundtruth/README.md](groundtruth/README.md).
 
 ### Tests
 
@@ -254,3 +360,21 @@ result.
    check off the boxes, fill in tester/platform/notes, and commit the
    report. See [docs/smoke/README.md](docs/smoke/README.md) and
    [docs/smoke/](docs/smoke/) for prior runs.
+9. **Auto bar finding (GUI)** — open a clip of a squat or deadlift (not yet
+   seeded) and watch.
+   *Expected*: the banner shows "Finding the bar… N%" with Cancel; then
+   "Proposed bar · <lift> · confidence N%" with a ring on the plate, plus
+   Confirm / Not the bar. Look at it: is the ring on the moving plate, is the
+   label readable, does the banner fit on one row? Confirm, calibrate, Track:
+   the reps should be counted pull-first for a deadlift. Also try Cancel
+   mid-search and "Not the bar" (click-to-seed should arm). *These GUI details
+   have not been verified by eye yet; record what you see.*
+10. **CLI auto mode** — run `track` with no seed:
+
+    ```bash
+    cargo run --release -p tracker-app -- track path/to/video.mp4 --out /tmp/auto-out
+    ```
+
+    *Expected*: prints `lift:`, `seed proposal:` and `UNVERIFIED`; exits 0;
+    `/tmp/auto-out/` has the usual files plus `<stem>.run.json`. On a clip with
+    no moving plate it exits 1 with "no bar could be found automatically".

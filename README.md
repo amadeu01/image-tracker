@@ -30,10 +30,14 @@ Velocity-based training tools (GymAware, Vitruve, …) are accurate but expensiv
 ## How it works
 
 1. **Open your video** — a native window (egui) lets you scrub to the frame where the bar is visible.
-2. **Place a seed** — click the bar (or a colored marker on the sleeve, if you filmed with one).
+2. **Place a seed** — click the bar (or a colored marker on the sleeve, if you filmed with one). Or let the app propose it: it searches the clip for the moving plate, names the lift (squat / deadlift / unknown) and shows a ring for you to **Confirm** or reject ("Not the bar").
 3. **Calibrate** — click both edges of a plate; competition plates are 450 mm (or type any known length).
 4. **Track** — a template (ZNCC) or color tracker follows the bar; short occlusions are coasted over and flagged, long ones ask you to re-seed.
 5. **Get results** — overlay video with the traced path + legend, and CSV/JSON of positions & velocities.
+
+Headless: `track <video> --out <dir>` with **no seed** does the same search itself and prints `lift:`, `seed proposal:` and `UNVERIFIED` (nobody confirmed it); it writes `<stem>.run.json` beside the exports, and `grade --manifest groundtruth/clips.json --clip v5` checks the lift type and rep count against hand-entered expectations. Details in [RUNNING.md](RUNNING.md).
+
+**Auto detection is new and not yet validated against hand labels.** It was tuned on four clips (two squats, two deadlifts); bench press is never auto-detected; the proposed Bar Point is the plate hub centre, which may sit a little off the true bar tip. Treat an `UNVERIFIED` run as a suggestion.
 
 Bonus: the **Marker Color Advisor** analyses your video's palette and tells you which marker color would stand out best in your gym for next time.
 
@@ -51,7 +55,7 @@ See [RUNNING.md](RUNNING.md) for full run/install instructions (dev, end user, `
 ```bash
 git clone https://github.com/amadeu01/image-tracker.git
 cd image-tracker
-cargo test        # 513 workspace tests
+cargo test        # 667 workspace tests
 cargo run -p tracker-app -- path/to/video.mp4
 ```
 
@@ -87,8 +91,8 @@ crates/
 `[dependencies]` table is empty and stays empty, so the compiler makes it
 impossible for domain code to reach for `egui`, `serde` or the filesystem.
 Everything crosses the boundary through four dependency-free traits —
-`FrameSource`, `VideoSink`, `CorrelationMetric`, `Tracker` — which is why 233
-of the workspace's tests are pure domain tests that run in 0.1 s with no
+`FrameSource`, `VideoSink`, `CorrelationMetric`, `Tracker` — which is why 310
+of the workspace's tests are pure domain tests that run in well under a second with no
 `ffmpeg` on the `PATH`.
 
 `BarPath` is the single aggregate root, and it is the seam of the whole system:
