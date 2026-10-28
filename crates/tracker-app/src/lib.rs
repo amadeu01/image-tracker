@@ -11,6 +11,7 @@ pub mod ffprobe;
 pub mod frame_cache;
 pub mod grade;
 pub mod overlay_export;
+pub mod prepass;
 pub mod screen_map;
 pub mod seek_source;
 pub mod telemetry;
